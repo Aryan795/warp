@@ -520,7 +520,7 @@ use crate::workspace::view::cloud_agent_capacity_modal::{
 use crate::workspace::view::codex_modal::{CodexModal, CodexModalEvent};
 use crate::workspace::view::feature_intro_modal::{
     FeatureIntroCtaTarget, FeatureIntroId, FeatureIntroModal, FeatureIntroModalEvent,
-    feature_intro_by_id,
+    FeatureIntroModalTelemetryEvent, feature_intro_by_id,
 };
 use crate::workspace::view::free_ai_removal_modal::{
     FreeAiRemovalModal, FreeAiRemovalModalEvent, FreeAiRemovalModalTelemetryEvent,
@@ -19073,6 +19073,22 @@ impl Workspace {
         } else {
             None
         };
+
+        match event {
+            FeatureIntroModalEvent::Close(id) => {
+                send_telemetry_from_ctx!(
+                    FeatureIntroModalTelemetryEvent::Dismissed { feature: *id },
+                    ctx
+                );
+            }
+            FeatureIntroModalEvent::GetStarted(id) => {
+                send_telemetry_from_ctx!(
+                    FeatureIntroModalTelemetryEvent::CtaClicked { feature: *id },
+                    ctx
+                );
+            }
+        }
+
         OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
             model.mark_feature_intro_dismissed(ctx);
         });
@@ -19086,6 +19102,10 @@ impl Workspace {
                     self.settings_pane.update(ctx, |settings, ctx| {
                         settings.scroll_to_settings_widget(page, widget_id(), ctx);
                     });
+                }
+                FeatureIntroCtaTarget::FactoriesLaunchModalBooking => {
+                    let url = UserWorkspaces::as_ref(ctx).factories_launch_modal_cta_url();
+                    ctx.open_url(&url);
                 }
             }
         }

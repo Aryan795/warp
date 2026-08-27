@@ -38,6 +38,7 @@ use crate::server::server_api::{team::MockTeamClient, workspace::MockWorkspaceCl
 use crate::settings::{
     AISettings, AISettingsChangedEvent, CodeSettings, CodeSettingsChangedEvent, PrivacySettings,
 };
+use crate::util::links;
 #[cfg(test)]
 use crate::workspaces::workspace::{
     AIAutonomyPolicy, AiAutonomySettings, BillingMetadata, CustomerType, SplitListSetting,
@@ -127,6 +128,10 @@ pub struct UserWorkspaces {
     /// filtered out of `workspaces` — this is the only place their purchase
     /// policy survives.
     user_purchase_policy: Option<PurchaseAddOnCreditsPolicy>,
+    /// The Factories launch modal's CTA destination, captured from the latest
+    /// workspaces-metadata response. See `factories_launch_modal_cta_url` for
+    /// the fallback used before the first successful fetch.
+    factories_launch_modal_cta_url: Option<String>,
     team_client: Arc<dyn TeamClient>,
     workspace_client: Arc<dyn WorkspaceClient>,
 }
@@ -140,6 +145,10 @@ pub struct WorkspacesMetadataResponse {
     pub joinable_teams: Vec<DiscoverableTeam>,
     /// The list of experiments applicable to the user.
     pub experiments: Option<Vec<ServerExperiment>>,
+    /// The Factories launch modal's CTA destination. `None` when the server
+    /// value hasn't been fetched yet; see `UserWorkspaces::factories_launch_modal_cta_url`
+    /// for the fallback used in that case.
+    pub factories_launch_modal_cta_url: Option<String>,
     /// TODO(Tyler): Post-workspaces, move this into the workspace object.
     /// Feature model choices may change from user to user and while the app is open, so we need to periodically update this list.
     /// It makes most sense to fetch this in workspaces which is queried every 10 minutes.
@@ -191,6 +200,7 @@ impl UserWorkspaces {
             window_team_uids: Default::default(),
             joinable_teams: Default::default(),
             user_purchase_policy: None,
+            factories_launch_modal_cta_url: None,
             team_client,
             workspace_client,
         }
@@ -241,6 +251,7 @@ impl UserWorkspaces {
             window_team_uids: Default::default(),
             joinable_teams: Default::default(),
             user_purchase_policy: None,
+            factories_launch_modal_cta_url: None,
             team_client,
             workspace_client,
         };
@@ -617,6 +628,21 @@ impl UserWorkspaces {
     /// applies such a response so the teamless fallback can't go stale.
     pub fn set_user_purchase_policy(&mut self, policy: Option<PurchaseAddOnCreditsPolicy>) {
         self.user_purchase_policy = policy;
+    }
+
+    /// Updates the Factories launch modal's CTA destination, captured from a
+    /// workspaces-metadata response.
+    pub fn set_factories_launch_modal_cta_url(&mut self, url: Option<String>) {
+        self.factories_launch_modal_cta_url = url;
+    }
+
+    /// The destination for the Factories launch modal's call-to-action
+    /// button. Falls back to Warp's Contact Sales page until the
+    /// server-configured value has been fetched.
+    pub fn factories_launch_modal_cta_url(&self) -> String {
+        self.factories_launch_modal_cta_url
+            .clone()
+            .unwrap_or_else(|| links::FACTORIES_CONTACT_SALES_URL.to_string())
     }
 
     pub fn current_workspace_mut(&mut self) -> Option<&mut Workspace> {

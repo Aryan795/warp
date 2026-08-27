@@ -8,7 +8,9 @@ use warp_util::sync::Condition;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity, WindowId};
 
 use super::hoa_onboarding;
-use super::view::feature_intro_modal::{FEATURE_INTROS, FeatureIntroId};
+use super::view::feature_intro_modal::{
+    FEATURE_INTROS, FeatureIntroId, FeatureIntroModalTelemetryEvent,
+};
 use super::view::free_ai_removal_modal::{
     FreeAiRemovalModalTelemetryEvent, FreeAiRemovalModalVariant,
 };
@@ -756,11 +758,16 @@ impl OneTimeModalModel {
         if !AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
             return false;
         }
-        // Show the first registered feature intro that the user hasn't seen yet
-        // (see `FEATURE_INTROS`).
+        // Show the first registered, unseen feature intro that the user is currently
+        // eligible for (see `FEATURE_INTROS`). An unseen but ineligible intro (e.g. a
+        // server-targeted launch the user isn't enrolled in yet) is left unseen rather
+        // than consumed, so it can still show once the user becomes eligible.
         let next_id = FEATURE_INTROS
             .iter()
-            .find(|intro| !AISettings::as_ref(ctx).is_feature_intro_seen(intro.id.as_key()))
+            .find(|intro| {
+                !AISettings::as_ref(ctx).is_feature_intro_seen(intro.id.as_key())
+                    && (intro.eligible)(ctx)
+            })
             .map(|intro| intro.id);
         let Some(id) = next_id else {
             return false;
@@ -774,6 +781,7 @@ impl OneTimeModalModel {
         let should_show = !matches!(ChannelState::channel(), Channel::Integration);
         if should_show {
             self.set_active_feature_intro(Some(id), ctx);
+            send_telemetry_from_ctx!(FeatureIntroModalTelemetryEvent::Shown { feature: id }, ctx);
         }
         should_show
     }

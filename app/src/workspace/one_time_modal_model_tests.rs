@@ -377,6 +377,37 @@ fn agent_cli_launch_modal_skipped_when_flag_disabled() {
 }
 
 #[test]
+fn feature_intro_ineligible_entry_is_skipped_without_being_marked_seen() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        terminal.update(&mut app, |_, ctx| {
+            let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(false);
+
+            // Mark every intro ahead of FactoriesLaunch as seen so it's next in line.
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                for intro in FEATURE_INTROS {
+                    if intro.id == FeatureIntroId::FactoriesLaunch {
+                        break;
+                    }
+                    settings.mark_feature_intro_seen(intro.id.as_key(), ctx);
+                }
+            });
+
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                assert!(!model.check_and_trigger_feature_intro_modal(ctx));
+                assert!(
+                    !AISettings::as_ref(ctx)
+                        .is_feature_intro_seen(FeatureIntroId::FactoriesLaunch.as_key()),
+                    "an ineligible intro must not be consumed, so it can still show once eligible"
+                );
+            });
+        });
+    });
+}
+
+#[test]
 fn feature_intro_skipped_when_all_seen() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
