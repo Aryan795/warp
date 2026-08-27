@@ -63,17 +63,13 @@ const EVENT_CHILD_AGENT_STARTED: &str = "child_agent_started";
 /// the session UUID is carried in `ref_id`.
 const EVENT_RUN_SESSION_LINKED: &str = "run_session_linked";
 
-/// Outcome of attempting to hydrate a `new_message` event's body. Replaces a
-/// separate `Option<ReceivedMessageInput>` plus `bool` pair, which could
-/// represent a meaningless "hydrated but also failed" combination.
+/// Outcome of attempting to hydrate a `new_message` event's body.
 enum Hydration {
     /// Not a `new_message` event addressed to this connection's own
     /// `self_run_id` (or hydration is disabled for this connection), so no
     /// fetch was attempted.
     NotRequired,
-    /// Hydration was attempted and returned the message body.
     Hydrated(ReceivedMessageInput),
-    /// Hydration was attempted and the fetch failed.
     Failed,
 }
 
@@ -195,12 +191,7 @@ impl AgentEventConsumer for SseForwardingConsumer {
         &mut self,
         event: AgentRunEvent,
     ) -> anyhow::Result<AgentEventConsumerControlFlow> {
-        // Only a `new_message` event addressed to this connection's own
-        // `self_run_id` requires hydration; everything else (lifecycle events,
-        // messages for other runs on a family stream) never attempts a fetch and
-        // so can never be "failed" hydration — this distinction lets the drain
-        // loop tell a genuine fetch failure apart from an event that was simply
-        // never a hydration candidate.
+        // A non-candidate event must not be mistaken for a failed hydration.
         let needs_hydration = self.hydrate_new_messages
             && event.event_type == EVENT_NEW_MESSAGE
             && event.run_id == self.self_run_id;
@@ -272,16 +263,8 @@ struct ConversationStreamState {
     /// `stalled_messages` entry is in flight, so the periodic drain timer
     /// doesn't pile up concurrent retries for the same event.
     stalled_retry_in_flight: bool,
-    /// Highest sequence the owner drain has actually delivered, or dropped
-    /// at give-up. Never persisted or sent to the server as `since` — only
-    /// `event_cursor` is, and it stays capped behind any outstanding stall
-    /// so the server keeps replaying from a safe point. This field additionally
-    /// tracks what the local drain has already handled, so a reconnect's
-    /// replay of that same range (sent because `event_cursor` is still
-    /// pinned behind a stall) isn't processed a second time. It only ever
-    /// advances for sequences that were delivered or given up on, never for
-    /// one still sitting in `stalled_messages`, whose replay must keep
-    /// reaching that queue.
+    /// Highest sequence the owner drain has actually delivered or given up
+    /// on. Local-only: never persisted or sent to the server as `since`.
     handled_sequence: i64,
 }
 
@@ -524,24 +507,17 @@ impl OrchestrationEventStreamer {
     }
 
     /// Monotonically advances `ConversationStreamState::handled_sequence`.
-    /// Callers must only pass a sequence that was actually delivered or, in
-    /// [`Self::finish_stalled_message_retry`]'s give-up branch, abandoned —
-    /// never one still sitting in `stalled_messages`, since that queue's
-    /// entries rely on staying reachable through [`Self::owner_drain_floor`]'s
-    /// stalled-sequence bypass.
+    /// Callers must never pass a sequence still in `stalled_messages` — see
+    /// [`Self::owner_drain_floor`].
     fn advance_handled_sequence(&mut self, conversation_id: AIConversationId, sequence: i64) {
         let stream = self.streams.entry(conversation_id).or_default();
         stream.handled_sequence = stream.handled_sequence.max(sequence);
     }
 
-    /// Local dedup floor for the owner drain loops: `event_cursor` (the safe,
-    /// persisted resume point handed to the server as `since`, capped behind
-    /// any outstanding stall) joined with `handled_sequence` (what the drain
-    /// has additionally handled locally beyond that point). A reconnect asks
-    /// the server for events since `event_cursor`, which can replay a range
-    /// the drain already finished with while a stall keeps the cursor pinned
-    /// behind it; comparing against this floor instead discards that replay
-    /// instead of reprocessing it.
+    /// Local dedup floor for the owner drain loops: `event_cursor` joined
+    /// with `handled_sequence`, so a reconnect's replay of an already-handled
+    /// range isn't reprocessed even while the cursor sits capped behind a
+    /// stall (see [`Self::capped_owner_event_cursor`]).
     fn owner_drain_floor(&self, conversation_id: AIConversationId) -> i64 {
         self.streams
             .get(&conversation_id)
@@ -781,9 +757,7 @@ impl OrchestrationEventStreamer {
                 }
                 // Ensure a child-only batch still advances the Primary cursor.
                 self.persist_cursor_local_and_server(cursor_conversation_id, max_seq, ctx);
-                // `events` here excludes anything still in `stalled_messages`
-                // (that split happens before `drain_family_events` is called),
-                // so every sequence folded into `max_seq` was actually handled.
+                // `events` excludes anything still stalled, so this is safe.
                 self.advance_handled_sequence(cursor_conversation_id, max_seq);
             }
             FamilyDrainMode::Observer => {
@@ -986,10 +960,8 @@ impl OrchestrationEventStreamer {
                         Hydration::Hydrated(message) => messages.push(message),
                         Hydration::NotRequired => {}
                     }
-                    // A fresh delivery can resolve a still-outstanding stall
-                    // (e.g. a reconnect replay whose hydration succeeds this
-                    // time); drop its retry-queue entry so it isn't also
-                    // delivered again by `retry_stalled_message`.
+                    // A resolved replay must drop its retry-queue entry, or
+                    // `retry_stalled_message` delivers it again later.
                     if is_outstanding_stall {
                         resolved_stalls.push(item.event.sequence);
                     }
@@ -2933,10 +2905,8 @@ impl OrchestrationEventStreamer {
                         Hydration::Hydrated(message) => messages.push(message),
                         Hydration::NotRequired => {}
                     }
-                    // A fresh delivery can resolve a still-outstanding stall
-                    // (e.g. a reconnect replay whose hydration succeeds this
-                    // time); drop its retry-queue entry so it isn't also
-                    // delivered again by `retry_stalled_message`.
+                    // A resolved replay must drop its retry-queue entry, or
+                    // `retry_stalled_message` delivers it again later.
                     if is_outstanding_stall {
                         resolved_stalls.push(item.event.sequence);
                     }
@@ -2980,8 +2950,7 @@ impl OrchestrationEventStreamer {
         // Advance the cursor before filtering so dropped killed-run events
         // are not replayed later.
         self.persist_event_cursor(conversation_id, max_seq, ctx);
-        // `events` is never a still-outstanding stall (those are split off
-        // before this is called), so every sequence in it was handled here.
+        // `events` excludes anything still stalled, so this is safe.
         self.advance_handled_sequence(conversation_id, max_seq);
 
         if !self.killed_run_ids.is_empty() {
