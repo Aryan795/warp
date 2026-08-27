@@ -246,8 +246,6 @@ pub struct BillingAndUsagePageView {
     expanded_usage_entries: HashMap<String, bool>,
     // Persistent mouse states for usage history entries, keyed by conversation_id
     usage_entries_mouse_states: RefCell<HashMap<String, MouseStateHandle>>,
-    // Persistent mouse states for tooltips in usage history entries, keyed by conversation_id
-    usage_entries_tooltip_mouse_states: RefCell<HashMap<String, MouseStateHandle>>,
     // Action button for loading more usage history entries
     load_more_button: ViewHandle<ActionButton>,
     selected_addon_denomination: usize,
@@ -407,7 +405,6 @@ impl BillingAndUsagePageView {
             selected_tab: BillingUsageTab::Overview,
             expanded_usage_entries: HashMap::new(),
             usage_entries_mouse_states: RefCell::new(HashMap::new()),
-            usage_entries_tooltip_mouse_states: RefCell::new(HashMap::new()),
             load_more_button,
             selected_addon_denomination: 0,
             addon_credits_options: Default::default(),
@@ -2630,22 +2627,10 @@ impl BillingAndUsagePageView {
                 .or_default()
                 .clone();
 
-            let tooltip_mouse_state = self
-                .usage_entries_tooltip_mouse_states
-                .borrow_mut()
-                .entry(entry.conversation_id.clone())
-                .or_default()
-                .clone();
-
             usage_history_list.add_child(
                 Container::new(
-                    UsageHistoryEntry::new(
-                        Some(entry.clone()),
-                        is_expanded,
-                        Some(mouse_state),
-                        tooltip_mouse_state,
-                    )
-                    .render(appearance, app),
+                    UsageHistoryEntry::new(Some(entry.clone()), is_expanded, Some(mouse_state))
+                        .render(appearance, app),
                 )
                 .finish(),
             );
@@ -2685,10 +2670,8 @@ impl BillingAndUsagePageView {
         if is_loading {
             let mut loading_usage_entry_list = Flex::column().with_spacing(8.);
             for _ in 0..3 {
-                loading_usage_entry_list.add_child(
-                    UsageHistoryEntry::new(None, false, None, MouseStateHandle::default())
-                        .render(appearance, app),
-                );
+                loading_usage_entry_list
+                    .add_child(UsageHistoryEntry::new(None, false, None).render(appearance, app));
             }
             content.add_child(loading_usage_entry_list.finish());
         } else {

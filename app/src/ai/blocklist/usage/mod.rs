@@ -5,6 +5,7 @@ use warpui::Element;
 pub mod colors;
 pub mod conversation_usage_view;
 pub mod rollup;
+pub mod shared_usage_renderer;
 pub mod turn_usage_view;
 pub mod usage_popover_view;
 

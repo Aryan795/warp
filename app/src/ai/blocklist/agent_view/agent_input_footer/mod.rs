@@ -58,9 +58,8 @@ use crate::ai::blocklist::agent_view::is_in_cloud_context;
 use crate::ai::blocklist::history_model::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 use crate::ai::blocklist::prompt::prompt_alert::{PromptAlertEvent, PromptAlertView};
 use crate::ai::blocklist::usage::icon_for_context_window_usage;
-use crate::ai::blocklist::usage::usage_popover_view::{
-    UsagePopoverEvent, UsagePopoverView, format_cost_only,
-};
+use crate::ai::blocklist::usage::shared_usage_renderer::format_cost_only;
+use crate::ai::blocklist::usage::usage_popover_view::{UsagePopoverEvent, UsagePopoverView};
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::harness_availability::HarnessAvailabilityModel;
 use crate::appearance::Appearance;

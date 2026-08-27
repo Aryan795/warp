@@ -183,7 +183,6 @@ struct UsageHistoryState {
     model: ModelHandle<UsageHistoryModel>,
     expanded_entries: HashMap<String, bool>,
     entry_mouse_states: RefCell<HashMap<String, MouseStateHandle>>,
-    tooltip_mouse_states: RefCell<HashMap<String, MouseStateHandle>>,
     load_more_button: ViewHandle<ActionButton>,
 }
 
@@ -369,7 +368,6 @@ impl BillingAndUsagePageV2View {
                 model: usage_history_model,
                 expanded_entries: HashMap::new(),
                 entry_mouse_states: RefCell::new(HashMap::new()),
-                tooltip_mouse_states: RefCell::new(HashMap::new()),
                 load_more_button,
             },
             addon_credits: AddonCreditsState {
@@ -1874,22 +1872,10 @@ impl BillingAndUsagePageV2View {
                 .entry(entry.conversation_id.clone())
                 .or_default()
                 .clone();
-            let entry_tooltip_mouse_state = self
-                .usage_history
-                .tooltip_mouse_states
-                .borrow_mut()
-                .entry(entry.conversation_id.clone())
-                .or_default()
-                .clone();
             list.add_child(
                 Container::new(
-                    UsageHistoryEntry::new(
-                        Some(entry.clone()),
-                        expanded,
-                        Some(entry_mouse_state),
-                        entry_tooltip_mouse_state,
-                    )
-                    .render(appearance, app),
+                    UsageHistoryEntry::new(Some(entry.clone()), expanded, Some(entry_mouse_state))
+                        .render(appearance, app),
                 )
                 .finish(),
             );
@@ -1926,10 +1912,7 @@ impl BillingAndUsagePageV2View {
         if loading {
             let mut list = Flex::column().with_spacing(8.);
             for _ in 0..3 {
-                list.add_child(
-                    UsageHistoryEntry::new(None, false, None, MouseStateHandle::default())
-                        .render(appearance, app),
-                );
+                list.add_child(UsageHistoryEntry::new(None, false, None).render(appearance, app));
             }
             content.add_child(list.finish());
         } else {

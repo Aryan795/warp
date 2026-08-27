@@ -7,11 +7,9 @@ use warpui::elements::{
     MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Shrinkable, Text,
 };
 use warpui::platform::Cursor;
-use warpui::{AppContext, Element, SingletonEntity, View};
+use warpui::{AppContext, Element, SingletonEntity};
 
-use crate::ai::blocklist::usage::conversation_usage_view::{
-    ConversationUsageInfo, ConversationUsageView, DisplayMode,
-};
+use crate::ai::blocklist::usage::shared_usage_renderer;
 use crate::ai::blocklist::view_util::format_usage;
 use crate::settings::AISettings;
 use crate::settings_view::billing_and_usage_page::BillingAndUsagePageAction;
@@ -24,7 +22,6 @@ pub struct UsageHistoryEntry {
     entry: Option<ConversationUsage>,
     is_expanded: bool,
     mouse_state: Option<MouseStateHandle>,
-    tooltip_mouse_state: MouseStateHandle,
 }
 
 impl UsageHistoryEntry {
@@ -32,13 +29,11 @@ impl UsageHistoryEntry {
         entry: Option<ConversationUsage>,
         is_expanded: bool,
         mouse_state: Option<MouseStateHandle>,
-        tooltip_mouse_state: MouseStateHandle,
     ) -> Self {
         Self {
             entry,
             mouse_state,
             is_expanded,
-            tooltip_mouse_state,
         }
     }
 
@@ -50,6 +45,8 @@ impl UsageHistoryEntry {
         if let Some(entry) = &self.entry
             && self.is_expanded
         {
+            let usage_metadata: persistence::model::ConversationUsageMetadata =
+                (&entry.usage_metadata).into();
             res = res
                 .with_child(
                     // Separator between header and usage component
@@ -61,13 +58,12 @@ impl UsageHistoryEntry {
                         .finish(),
                 )
                 .with_child(
-                    ConversationUsageView::new(
-                        ConversationUsageInfo::from(entry),
-                        DisplayMode::Settings,
-                        None,
-                        self.tooltip_mouse_state.clone(),
-                    )
-                    .render(app),
+                    Container::new(shared_usage_renderer::render_settings_history_content(
+                        &usage_metadata,
+                        appearance,
+                    ))
+                    .with_uniform_padding(16.)
+                    .finish(),
                 );
         }
 
