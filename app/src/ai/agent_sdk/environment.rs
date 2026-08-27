@@ -766,8 +766,8 @@ impl EnvironmentCommandRunner {
                     OperationSuccessType::Failure => {
                         super::report_fatal_error(
                             anyhow::anyhow!(
-                                "Failed to create environment: the request to Warp did not \
-                                 complete. Check your network connection and try again."
+                                "Failed to create environment: the request could not be \
+                                 completed. Please try again."
                             ),
                             ctx,
                         );
@@ -775,9 +775,7 @@ impl EnvironmentCommandRunner {
                     OperationSuccessType::Rejection => {
                         super::report_fatal_error(
                             anyhow::anyhow!(
-                                "Failed to create environment: the server rejected the request. \
-                                 It may have already been created; list your environments \
-                                 before retrying."
+                                "Failed to create environment: the server rejected the request."
                             ),
                             ctx,
                         );
@@ -785,8 +783,7 @@ impl EnvironmentCommandRunner {
                     OperationSuccessType::FeatureNotAvailable => {
                         super::report_fatal_error(
                             anyhow::anyhow!(
-                                "Failed to create environment: cloud environments are not \
-                                 available for your account."
+                                "Failed to create environment: cloud environments are unavailable."
                             ),
                             ctx,
                         );
