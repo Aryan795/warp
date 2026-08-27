@@ -1,22 +1,28 @@
 use registry::register_uri_handler;
+#[cfg(any(feature = "release_bundle", test))]
+use thiserror::Error;
 #[cfg(feature = "release_bundle")]
 use warp_errors::report_error;
 use warpui::AppContext;
 #[cfg(feature = "release_bundle")]
 use {
     service_impl::forward_uri_to_sole_running_instance,
-    single_instance_manager::SingleInstanceManager, thiserror::Error, url::Url,
-    warp_core::channel::ChannelState,
+    single_instance_manager::SingleInstanceManager, url::Url, warp_core::channel::ChannelState,
 };
 
 mod registry;
-#[cfg(feature = "release_bundle")]
+// Compiled in test builds as well as release bundles: the single-instance ordering contract is
+// covered by unit tests, and the workspace test job does not enable `release_bundle`.
+#[cfg(any(feature = "release_bundle", test))]
+#[cfg_attr(not(feature = "release_bundle"), allow(dead_code))]
 mod service_impl;
-#[cfg(feature = "release_bundle")]
+#[cfg(any(feature = "release_bundle", test))]
+#[cfg_attr(not(feature = "release_bundle"), allow(dead_code))]
 mod single_instance_manager;
 
 #[derive(Error, Debug)]
-#[cfg(feature = "release_bundle")]
+#[cfg(any(feature = "release_bundle", test))]
+#[cfg_attr(not(feature = "release_bundle"), allow(dead_code))]
 pub enum StartupArgsForwardingError {
     #[error("should not forward arguments after an auto-update")]
     IgnoredAfterAutoUpdate,
@@ -26,6 +32,10 @@ pub enum StartupArgsForwardingError {
     CouldNotCreateUrl(#[from] url::ParseError),
     #[error("IPC Client failed to send message")]
     IpcError(#[from] ipc::ClientError),
+    #[error("timed out reaching the running instance of Warp")]
+    TimedOut,
+    #[error("the running instance of Warp declined the hand-off")]
+    HandoffDeclined,
     #[error("Win32 error")]
     WindowsError(#[from] windows::core::Error),
 }

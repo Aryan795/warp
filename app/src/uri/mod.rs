@@ -1250,13 +1250,18 @@ impl Action {
                 title: "New tab created".to_owned(),
                 description: "Go to Warp to see your new tab.".to_owned(),
             }),
-            // The handler opens its own window, so there is no primary window to show. Warp still
-            // has to come forward: this URI is usually a launch that the single-instance guard
-            // redirected to this process, and the guard's caller has already exited, so if nothing
-            // surfaces the user sees a launch that did nothing and launches again. Activating an
-            // existing window also makes this the foreground process, which is what lets the
-            // window opened immediately afterwards take the foreground itself.
-            Self::NewWindow => W::ActivateAppIfPossible,
+            // On Windows this URI is usually a launch that the single-instance guard redirected
+            // here, and the guard's caller has already exited, so if nothing surfaces the user
+            // sees a launch that did nothing and launches again. Activating an existing window
+            // makes this the foreground process, which is what lets the window the handler opens
+            // next take the foreground itself. Elsewhere the new window surfaces on its own.
+            Self::NewWindow => {
+                if cfg!(windows) {
+                    W::ActivateAppIfPossible
+                } else {
+                    W::Nothing
+                }
+            }
         }
     }
 }
