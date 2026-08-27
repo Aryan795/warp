@@ -953,6 +953,7 @@ impl OrchestrationEventStreamer {
         let mut events = Vec::new();
         let mut messages = Vec::new();
         let mut newly_stalled = Vec::new();
+        let mut resolved_stalls = Vec::new();
         {
             let Some(stream) = self.streams.get_mut(&conversation_id) else {
                 return;
@@ -971,11 +972,23 @@ impl OrchestrationEventStreamer {
                         newly_stalled.push(item.event);
                         continue;
                     }
+                    // A fresh delivery can resolve a still-outstanding stall
+                    // (e.g. a reconnect replay whose hydration succeeds this
+                    // time); drop its retry-queue entry so it isn't also
+                    // delivered again by `retry_stalled_message`.
+                    if is_outstanding_stall {
+                        resolved_stalls.push(item.event.sequence);
+                    }
                     if let Some(message) = item.fetched_message {
                         messages.push(message);
                     }
                     events.push(item.event);
                 }
+            }
+            if !resolved_stalls.is_empty() {
+                stream
+                    .stalled_messages
+                    .retain(|stalled| !resolved_stalls.contains(&stalled.event.sequence));
             }
         }
         self.enqueue_stalled_messages(conversation_id, newly_stalled);
@@ -2882,6 +2895,7 @@ impl OrchestrationEventStreamer {
         let mut events = Vec::new();
         let mut messages = Vec::new();
         let mut newly_stalled = Vec::new();
+        let mut resolved_stalls = Vec::new();
         {
             let Some(stream) = self.streams.get_mut(&conversation_id) else {
                 return;
@@ -2904,11 +2918,23 @@ impl OrchestrationEventStreamer {
                         newly_stalled.push(item.event);
                         continue;
                     }
+                    // A fresh delivery can resolve a still-outstanding stall
+                    // (e.g. a reconnect replay whose hydration succeeds this
+                    // time); drop its retry-queue entry so it isn't also
+                    // delivered again by `retry_stalled_message`.
+                    if is_outstanding_stall {
+                        resolved_stalls.push(item.event.sequence);
+                    }
                     if let Some(msg) = item.fetched_message {
                         messages.push(msg);
                     }
                     events.push(item.event);
                 }
+            }
+            if !resolved_stalls.is_empty() {
+                stream
+                    .stalled_messages
+                    .retain(|stalled| !resolved_stalls.contains(&stalled.event.sequence));
             }
         }
         self.enqueue_stalled_messages(conversation_id, newly_stalled);
