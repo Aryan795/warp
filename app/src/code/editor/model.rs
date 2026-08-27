@@ -252,8 +252,6 @@ impl DelayRendering {
         }
     }
 
-    /// Queues an edit for the eventual flush, so the render pipeline can catch up in one shot
-    /// once `block_until` is reached.
     fn push_edit(&mut self, delta: EditDelta, buffer_version: BufferVersion) {
         self.chars += delta
             .new_lines

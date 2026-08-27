@@ -5240,8 +5240,9 @@ impl Buffer {
             anchor_updates.extend(result.anchor_updates);
 
             if let Some(delta) = result.delta {
-                // `precise_deltas` items are small (ranges/points, not buffer content), so
-                // unwrapping (or cloning as a fallback) is cheap either way.
+                // `delta` is a fresh `EditDelta` this call alone produced and immediately
+                // consumes, so `precise_deltas` has no other owner and this always takes the
+                // O(1) unwrap path; it only falls back to a clone if that invariant changes.
                 precise_deltas.extend(Arc::unwrap_or_clone(delta.precise_deltas));
             }
         }

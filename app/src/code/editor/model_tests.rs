@@ -164,6 +164,60 @@ fn test_delay_rendering_flushes_early_once_edit_backlog_exceeds_budget() {
 }
 
 #[test]
+fn test_offscreen_lazy_editor_bounds_the_downstream_backlog_too() {
+    // Regression test: `DelayRendering`'s early flush (see
+    // `test_delay_rendering_flushes_early_once_edit_backlog_exceeds_budget`) hands its backlog to
+    // `RenderState::add_pending_edit`. For a `lazy_layout` editor whose element is never laid out
+    // (e.g. a collapsed diff block, an unselected file tab, an offscreen code review file), that
+    // just moves the same unbounded-backlog problem one layer down unless
+    // `RenderState::pending_edits` is bounded too. This test never calls
+    // `try_layout_pending_edits` (the element's own layout pass), so any bound observed here comes
+    // from the backlogs themselves.
+    App::test((), |mut app| async move {
+        initialize_deps(&mut app);
+        let editor = app.add_model(|ctx| {
+            let styles = code_text_styles(Appearance::as_ref(ctx), FontSettings::as_ref(ctx), None);
+            let mut model = CodeEditorModel::new(styles, None, true, None, ctx);
+            model.reset_content(
+                InitialBufferState::plain_text("").with_version(ContentVersion::new()),
+                ctx,
+            );
+            model
+        });
+
+        editor.update(&mut app, |editor, ctx| {
+            editor.cursor_at(CharOffset::from(1), ctx);
+            editor.hide_lines_outside_of_active_diff(3, ctx);
+        });
+
+        // Comfortably more than either layer's budget (128 edits each, at the time of writing).
+        const TOTAL_EDITS: usize = 300;
+        for _ in 0..TOTAL_EDITS {
+            editor.update(&mut app, |editor, ctx| {
+                editor.insert("x", EditOrigin::UserTyped, ctx);
+            });
+        }
+
+        // Let the async layout worker drain the queued `LayoutAction`s.
+        layout_model(&mut app, &editor).await;
+
+        editor.read(&app, |editor, ctx| {
+            assert!(
+                editor.delay_rendering.is_none(),
+                "the upstream backlog must have flushed early at least once"
+            );
+            let deferred = editor.render_state().as_ref(ctx).deferred_layout_count();
+            assert!(
+                deferred <= 128,
+                "an offscreen lazy editor's downstream backlog must stay bounded instead of \
+                 retaining one entry per edit, got {deferred} deferred layouts out of \
+                 {TOTAL_EDITS} edits"
+            );
+        });
+    })
+}
+
+#[test]
 fn replace_first_n_characters_handles_incremental_unicode_prefix() {
     App::test((), |mut app| async move {
         initialize_deps(&mut app);
