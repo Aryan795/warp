@@ -42,10 +42,17 @@ const RESTORE_FETCH_PERMANENT_BACKOFF_STEPS: &[u64] = &[30];
 /// How often (milliseconds) the drain timer checks for SSE events.
 const SSE_DRAIN_INTERVAL_MS: u64 = 500;
 /// Cap on hydration retry attempts for a stalled `new_message` event (see
-/// [`StalledMessageEvent`]) before giving up and letting the cursor advance past
-/// it. At one retry per `SSE_DRAIN_INTERVAL_MS` tick this is a ~20s retry budget
-/// per event — generous enough to ride out a transient body-fetch failure
-/// without queuing a truly unrecoverable message forever (QUALITY-1904).
+/// [`StalledMessageEvent`]) before giving up and advancing the cursor past it.
+/// This is a bound on *attempts*, not wall-clock time: retries are serialized
+/// one at a time per conversation (`stalled_retry_in_flight`), each attempt
+/// can itself take up to `message_hydrator::DEFAULT_AGENT_MESSAGE_FETCH_TIMEOUT`
+/// (5s) to time out, and the `SSE_DRAIN_INTERVAL_MS` tick only starts the next
+/// attempt once the previous one has completed. So the worst case is on the
+/// order of minutes per stalled event (not `SSE_DRAIN_INTERVAL_MS *
+/// MAX_STALLED_MESSAGE_RETRY_ATTEMPTS`), and multiple stalled events for the
+/// same conversation are retried one at a time rather than concurrently.
+/// Generous enough to ride out a transient body-fetch failure without queuing
+/// a truly unrecoverable message forever (QUALITY-1904).
 const MAX_STALLED_MESSAGE_RETRY_ATTEMPTS: u32 = 40;
 /// Cap killed-run tombstones while keeping normal sessions well below the limit.
 const MAX_KILLED_RUN_IDS: usize = 1024;
@@ -75,12 +82,15 @@ struct SseStreamItem {
 }
 
 /// A `new_message` event whose hydration attempt failed, queued for retry.
-/// While an entry for a given `AIConversationId` exists, [`persist_event_cursor`]
-/// refuses to advance that conversation's cursor past the entry's sequence: a
-/// client only ever asks the server for events "since" its cursor, so letting
-/// the cursor cross an unresolved sequence would make the event permanently
-/// unrecoverable, silently dropping the message and leaving anything blocked
-/// on it (e.g. `wait_for_events`) parked forever (QUALITY-1904).
+/// While an entry for a given `AIConversationId` exists,
+/// [`OrchestrationEventStreamer::capped_owner_event_cursor`] refuses to let
+/// that conversation's cursor advance past the entry's sequence — through
+/// every writer of `event_cursor`, not just `persist_event_cursor` — because
+/// a client only ever asks the server for events "since" its cursor, so
+/// letting the cursor cross an unresolved sequence would make the event
+/// permanently unrecoverable, silently dropping the message and leaving
+/// anything blocked on it (e.g. `wait_for_events`) parked forever
+/// (QUALITY-1904).
 #[derive(Clone)]
 struct StalledMessageEvent {
     event: AgentRunEvent,
@@ -260,8 +270,9 @@ struct ConversationStreamState {
     /// the family drain creates one on the first batch it handles.
     tracker: Option<OrchestrationChildTracker>,
     /// `new_message` events whose hydration failed, awaiting retry. Non-empty
-    /// entries here cap how far [`OrchestrationEventStreamer::persist_event_cursor`]
-    /// may advance this conversation's cursor (QUALITY-1904).
+    /// entries here cap how far [`OrchestrationEventStreamer::capped_owner_event_cursor`]
+    /// (used by every writer of `event_cursor`) may advance this
+    /// conversation's cursor (QUALITY-1904).
     stalled_messages: Vec<StalledMessageEvent>,
     /// True while a hydration retry for this conversation's oldest
     /// `stalled_messages` entry is in flight, so the periodic drain timer
@@ -466,6 +477,49 @@ impl OrchestrationEventStreamer {
         }
     }
 
+    /// Computes the value to store in `ConversationStreamState::event_cursor`
+    /// for `conversation_id`, given a candidate advance to `sequence`:
+    /// monotonic (never regresses below the value already held in memory) and
+    /// capped below the earliest still-stalled `new_message` sequence, if any.
+    ///
+    /// This is the single choke point behind every writer of `event_cursor` —
+    /// `persist_event_cursor`, `apply_task_children` (reached from both the
+    /// post-restore fetch AND the `wait_for_events`-time parent registration,
+    /// which is the exact path the QUALITY-1904 incident hit), the
+    /// on-server-token harness fetch, and the restore seed — so a stalled
+    /// event can never be skipped past no matter which path tries to advance
+    /// the cursor.
+    fn capped_owner_event_cursor(&self, conversation_id: AIConversationId, sequence: i64) -> i64 {
+        let existing = self
+            .streams
+            .get(&conversation_id)
+            .map(|stream| stream.event_cursor)
+            .unwrap_or(0);
+        let mut capped = sequence.max(existing);
+        if let Some(earliest_stalled) = self.streams.get(&conversation_id).and_then(|stream| {
+            stream
+                .stalled_messages
+                .iter()
+                .map(|stalled| stalled.event.sequence)
+                .min()
+        }) {
+            capped = capped.min(earliest_stalled.saturating_sub(1)).max(existing);
+        }
+        capped
+    }
+
+    /// Applies [`Self::capped_owner_event_cursor`] and writes the result into
+    /// `ConversationStreamState::event_cursor`, creating the entry if needed.
+    /// Returns the value actually stored.
+    fn set_owner_event_cursor(&mut self, conversation_id: AIConversationId, sequence: i64) -> i64 {
+        let capped = self.capped_owner_event_cursor(conversation_id, sequence);
+        self.streams
+            .entry(conversation_id)
+            .or_default()
+            .event_cursor = capped;
+        capped
+    }
+
     fn persist_event_cursor(
         &mut self,
         conversation_id: AIConversationId,
@@ -484,36 +538,12 @@ impl OrchestrationEventStreamer {
             .unwrap_or((None, false, 0));
 
         // Enforce monotonicity at the call site: `update_event_sequence`
-        // and the server-side write are both set-not-max, so fold every
-        // known prior value (in-memory stream cursor + persisted SQLite
-        // cursor) into the effective sequence before persisting. Reading
-        // `streams` without inserting keeps viewer-mode placeholders out
-        // of the owner-side map below.
-        let existing_stream_cursor = self
-            .streams
-            .get(&conversation_id)
-            .map(|stream| stream.event_cursor)
-            .unwrap_or(0);
-        let mut effective_sequence = sequence.max(existing_stream_cursor).max(persisted_sequence);
-
-        // Never advance past a `new_message` event that is still stalled awaiting
-        // a hydration retry: the server is only ever asked for events "since"
-        // this cursor, so advancing past a stalled sequence would make that
-        // message permanently unrecoverable on the next reconnect, silently and
-        // irrecoverably dropping it (QUALITY-1904). `.max(existing_stream_cursor)`
-        // keeps this monotonic even if a caller somehow passes a `sequence` below
-        // the current cursor.
-        if let Some(earliest_stalled) = self.streams.get(&conversation_id).and_then(|stream| {
-            stream
-                .stalled_messages
-                .iter()
-                .map(|stalled| stalled.event.sequence)
-                .min()
-        }) {
-            effective_sequence = effective_sequence
-                .min(earliest_stalled.saturating_sub(1))
-                .max(existing_stream_cursor);
-        }
+        // and the server-side write are both set-not-max, so fold the
+        // persisted SQLite cursor in before capping; `capped_owner_event_cursor`
+        // itself folds in the in-memory cursor and the stalled-message cap
+        // (QUALITY-1904).
+        let effective_sequence =
+            self.capped_owner_event_cursor(conversation_id, sequence.max(persisted_sequence));
 
         // Always persist to SQLite. For owner-side conversations this is the
         // resume cursor for the per-run SSE; for viewer-mode placeholders it
@@ -531,10 +561,7 @@ impl OrchestrationEventStreamer {
             return;
         }
 
-        self.streams
-            .entry(conversation_id)
-            .or_default()
-            .event_cursor = effective_sequence;
+        self.set_owner_event_cursor(conversation_id, effective_sequence);
 
         if let Some(run_id) = own_run_id {
             let ai_client = self.ai_client.clone();
@@ -1821,10 +1848,17 @@ impl OrchestrationEventStreamer {
                         return;
                     }
                 };
-                if let Some(stream) = me.streams.get_mut(&conversation_id) {
-                    stream.harness = agent_task_harness(&task).or(stream.harness);
-                    stream.event_cursor =
-                        local_cursor.max(task.last_event_sequence.unwrap_or(0));
+                if me.streams.contains_key(&conversation_id) {
+                    // Routed through `set_owner_event_cursor`, not a direct field
+                    // write, so this can never skip past a still-stalled
+                    // `new_message` event (QUALITY-1904).
+                    me.set_owner_event_cursor(
+                        conversation_id,
+                        local_cursor.max(task.last_event_sequence.unwrap_or(0)),
+                    );
+                    if let Some(stream) = me.streams.get_mut(&conversation_id) {
+                        stream.harness = agent_task_harness(&task).or(stream.harness);
+                    }
                 }
                 me.reevaluate_eligibility(conversation_id, ctx);
             },
@@ -2026,10 +2060,18 @@ impl OrchestrationEventStreamer {
             // lifecycle events for self are correctly filtered. A later
             // server `GET /agent/runs/{run_id}` response may advance the
             // cursor to `max(SQLite, server)` before delivery starts.
-            let stream = self.streams.entry(conv_id).or_default();
-            stream.event_cursor = cursor;
+            // Routed through `set_owner_event_cursor`, not a direct field
+            // write, so a restore can never resurrect a cursor past a
+            // still-stalled `new_message` event (QUALITY-1904); in practice
+            // this is a fresh entry with no stalled messages yet, but keeping
+            // every writer behind the same setter avoids relying on that.
+            self.set_owner_event_cursor(conv_id, cursor);
             if let Some(ref own) = run_id {
-                stream.watched_run_ids.insert(own.clone());
+                self.streams
+                    .entry(conv_id)
+                    .or_default()
+                    .watched_run_ids
+                    .insert(own.clone());
             }
 
             // No run_id means we can't query the server for children or
@@ -2180,11 +2222,19 @@ impl OrchestrationEventStreamer {
         task: &crate::ai::ambient_agents::task::AmbientAgentTask,
         base_cursor: i64,
     ) {
+        if !self.streams.contains_key(&conversation_id) {
+            return;
+        }
+        let server_seq = task.last_event_sequence.unwrap_or(0);
+        // Routed through `set_owner_event_cursor` (not a direct field write) so
+        // this can never advance the cursor past a `new_message` event that is
+        // still stalled awaiting a hydration retry — this is the exact path
+        // (`register_parent_on_wait` -> `finish_register_parent_on_wait` ->
+        // here) the QUALITY-1904 incident hit.
+        self.set_owner_event_cursor(conversation_id, base_cursor.max(server_seq));
         let Some(stream) = self.streams.get_mut(&conversation_id) else {
             return;
         };
-        let server_seq = task.last_event_sequence.unwrap_or(0);
-        stream.event_cursor = base_cursor.max(server_seq);
         for child in &task.children {
             stream.watched_run_ids.insert(child.clone());
         }
@@ -2685,28 +2735,47 @@ impl OrchestrationEventStreamer {
         }
     }
 
-    /// Retries hydration for the oldest still-stalled `new_message` event for
-    /// `conversation_id`, one at a time. Called every SSE drain tick so a
-    /// transient body-fetch failure is retried instead of leaving the event
-    /// (and the cursor pinned behind it, per [`Self::persist_event_cursor`])
-    /// unresolved forever (QUALITY-1904).
+    /// Retries hydration for the oldest (lowest-sequence) still-stalled
+    /// `new_message` event for `conversation_id`, one at a time. Called every
+    /// SSE drain tick so a transient body-fetch failure is retried instead of
+    /// leaving the event (and the cursor pinned behind it, per
+    /// [`Self::capped_owner_event_cursor`]) unresolved forever (QUALITY-1904).
+    ///
+    /// Resolving `self_run_id` happens before anything is committed: without
+    /// it, `hydrate_event_for_recipient` would reject the fetch outright on
+    /// its own `recipient_run_id` guard, and that rejection must not count as
+    /// a failed attempt against the stalled entry's retry budget — it isn't
+    /// evidence the message is unrecoverable, just that the conversation's
+    /// run_id isn't resolvable yet.
     fn retry_stalled_message(
         &mut self,
         conversation_id: AIConversationId,
         ctx: &mut ModelContext<Self>,
     ) {
+        let has_retryable_stalled_message =
+            self.streams.get(&conversation_id).is_some_and(|stream| {
+                !stream.stalled_retry_in_flight && !stream.stalled_messages.is_empty()
+            });
+        if !has_retryable_stalled_message {
+            return;
+        }
+        let Some(self_run_id) = self.self_run_id(conversation_id, ctx) else {
+            return;
+        };
+
         let Some(stream) = self.streams.get_mut(&conversation_id) else {
             return;
         };
-        if stream.stalled_retry_in_flight {
-            return;
-        }
-        let Some(stalled) = stream.stalled_messages.first().cloned() else {
+        let Some(stalled) = stream
+            .stalled_messages
+            .iter()
+            .min_by_key(|stalled| stalled.event.sequence)
+            .cloned()
+        else {
             return;
         };
         stream.stalled_retry_in_flight = true;
 
-        let self_run_id = self.self_run_id(conversation_id, ctx).unwrap_or_default();
         let hydrator = self.message_hydrator_for_run_id(&self_run_id);
         let event = stalled.event;
         ctx.spawn(
@@ -2726,8 +2795,11 @@ impl OrchestrationEventStreamer {
     /// removes the entry and delivers the message through the normal batch
     /// path, which lets the cursor advance now that the gap is resolved. On
     /// failure, increments the attempt count and, past
-    /// `MAX_STALLED_MESSAGE_RETRY_ATTEMPTS`, gives up (logging loudly) so a
-    /// truly unrecoverable message cannot stall the cursor forever.
+    /// `MAX_STALLED_MESSAGE_RETRY_ATTEMPTS`, gives up: drops the entry AND
+    /// explicitly advances the cursor past the abandoned sequence (through
+    /// [`Self::set_owner_event_cursor`], which still respects any other
+    /// stalled entry's cap), so a permanently unrecoverable message cannot
+    /// pin the cursor forever — matching the log message below.
     fn finish_stalled_message_retry(
         &mut self,
         conversation_id: AIConversationId,
@@ -2776,14 +2848,15 @@ impl OrchestrationEventStreamer {
         let stalled = &mut stream.stalled_messages[index];
         stalled.attempts += 1;
         if stalled.attempts >= MAX_STALLED_MESSAGE_RETRY_ATTEMPTS {
+            let attempts = stalled.attempts;
+            stream.stalled_messages.remove(index);
             log::error!(
-                "Giving up on stalled message after {} hydration retries; it will not be \
-                 delivered and the cursor will skip past it: conversation_id={conversation_id:?} \
-                 sequence={}",
-                stalled.attempts,
+                "Giving up on stalled message after {attempts} hydration retries; it will not \
+                 be delivered. Advancing the cursor past sequence {} so it does not stall \
+                 indefinitely: conversation_id={conversation_id:?}",
                 event.sequence
             );
-            stream.stalled_messages.remove(index);
+            self.set_owner_event_cursor(conversation_id, event.sequence);
         }
     }
 

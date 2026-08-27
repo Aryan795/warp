@@ -2801,6 +2801,140 @@ fn hydration_failure_retry_gives_up_after_max_attempts() {
                     .is_some_and(|s| s.stalled_messages.is_empty()),
                 "exhausting the retry budget must drop the entry instead of retrying forever"
             );
+            assert_eq!(
+                me.streams.get(&conversation_id).map(|s| s.event_cursor),
+                Some(5),
+                "giving up must advance the cursor past the abandoned sequence, matching the \
+                 log message, instead of leaving it pinned indefinitely"
+            );
+        });
+    });
+}
+
+#[test]
+fn retry_stalled_message_does_not_charge_an_attempt_when_self_run_id_is_unavailable() {
+    // If the conversation's run_id can't be resolved yet (rare/transient),
+    // `hydrate_event_for_recipient` would reject the fetch on its own
+    // `recipient_run_id` guard before ever attempting it. That must not count
+    // against the stalled entry's retry budget, and must not mark a retry as
+    // in-flight (which would otherwise wedge future ticks).
+    App::test((), |mut app| async move {
+        // Intentionally do not register any conversation with a run_id in the
+        // history model, so `self_run_id` resolves to `None`.
+        app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+
+        let ai_client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
+        let server_api = ServerApiProvider::new_for_test().get();
+        let streamer = app.add_singleton_model(|ctx| {
+            OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
+        });
+
+        let conversation_id = AIConversation::new(false, false).id();
+        let stalled_event = make_seq_event("new_message", "unresolved-run", Some("msg-1"), 5);
+        streamer.update(&mut app, |me, _| {
+            me.streams
+                .entry(conversation_id)
+                .or_default()
+                .stalled_messages
+                .push(StalledMessageEvent {
+                    event: stalled_event,
+                    attempts: 0,
+                });
+        });
+
+        streamer.update(&mut app, |me, ctx| {
+            me.retry_stalled_message(conversation_id, ctx);
+        });
+
+        streamer.read(&app, |me, _| {
+            let stream = me.streams.get(&conversation_id).expect("stream exists");
+            assert_eq!(
+                stream.stalled_messages.len(),
+                1,
+                "the entry must remain queued"
+            );
+            assert_eq!(
+                stream.stalled_messages[0].attempts, 0,
+                "an unresolved self_run_id must not charge an attempt"
+            );
+            assert!(
+                !stream.stalled_retry_in_flight,
+                "no retry was actually dispatched, so the in-flight flag must stay clear"
+            );
+        });
+    });
+}
+
+#[test]
+fn wait_time_parent_registration_does_not_skip_past_a_stalled_message() {
+    // Regression for the QUALITY-1904 critical finding: `apply_task_children`
+    // (reached from `finish_register_parent_on_wait`, the exact
+    // `wait_for_events`-time path) must not bypass the stalled-message cap by
+    // writing `event_cursor` directly from the server's `last_event_sequence`.
+    App::test((), |mut app| async move {
+        let history_model =
+            app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
+        let own_run_id = "550e8400-e29b-41d4-a716-446655440530";
+        let mut conversation = AIConversation::new(false, false);
+        conversation.set_run_id(own_run_id.to_string());
+        let conversation_id = conversation.id();
+        let terminal_view_id = warpui::EntityId::new();
+        history_model.update(&mut app, |model, ctx| {
+            model.restore_conversations(terminal_view_id, vec![conversation], ctx);
+            model.update_conversation_status(
+                terminal_view_id,
+                conversation_id,
+                ConversationStatus::InProgress,
+                ctx,
+            );
+        });
+
+        let ai_client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
+        let server_api = ServerApiProvider::new_for_test().get();
+        let poller = app.add_singleton_model(|ctx| {
+            OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
+        });
+
+        let consumer_id = warpui::EntityId::new();
+        let stalled_event = make_seq_event("new_message", own_run_id, Some("msg-stalled"), 5);
+        poller.update(&mut app, |me, _| {
+            let stream = me.streams.entry(conversation_id).or_default();
+            stream.event_cursor = 3;
+            stream.watched_run_ids.insert(own_run_id.to_string());
+            stream.consumers.insert(consumer_id);
+            stream.stalled_messages.push(StalledMessageEvent {
+                event: stalled_event,
+                attempts: 0,
+            });
+        });
+
+        // The server reports a `last_event_sequence` past the stalled message,
+        // exactly as it would if the child's `new_message` event were the
+        // most recent thing the server had recorded for this run.
+        let mut task = make_ambient_task_with_children(vec!["child-run-1".to_string()]);
+        task.last_event_sequence = Some(9);
+        poller.update(&mut app, |me, ctx| {
+            me.finish_register_parent_on_wait(conversation_id, Ok(task), ctx);
+        });
+
+        poller.read(&app, |me, _| {
+            assert_eq!(
+                me.streams.get(&conversation_id).map(|s| s.event_cursor),
+                Some(4),
+                "wait-time parent registration must not skip the cursor past a stalled \
+                 message's sequence even though the server reported a higher \
+                 last_event_sequence"
+            );
+        });
+        history_model.read(&app, |model, _| {
+            assert_eq!(
+                model
+                    .conversation(&conversation_id)
+                    .and_then(|c| c.last_event_sequence()),
+                None,
+                "apply_task_children only updates the in-memory stream cursor, not the \
+                 SQLite-persisted one"
+            );
         });
     });
 }
