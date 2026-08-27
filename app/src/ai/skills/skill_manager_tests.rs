@@ -1520,6 +1520,125 @@ fn removing_remote_home_skills_preserves_project_skills_below_home() {
 }
 
 // ============================================================================
+// Tests for the home-skill catalog byte budget
+// ============================================================================
+
+/// Helper: creates a Home-scope skill with `content_len` bytes of content.
+fn make_home_skill_with_content(name: &str, content_len: usize) -> ParsedSkill {
+    let local_path = std::env::temp_dir()
+        .join("home-budget-test")
+        .join(".agents")
+        .join("skills")
+        .join(name)
+        .join("SKILL.md");
+    ParsedSkill {
+        name: name.to_string(),
+        description: format!("{name} skill"),
+        path: LocalOrRemotePath::Local(local_path),
+        content: "x".repeat(content_len),
+        line_range: None,
+        provider: SkillProvider::Agents,
+        scope: SkillScope::Home,
+    }
+}
+
+#[test]
+fn handle_skills_added_rejects_home_skills_once_catalog_budget_is_exhausted() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(DirectoryWatcher::new);
+        app.add_singleton_model(AISettings::new_with_defaults);
+        app.add_singleton_model(|_| DetectedRepositories::default());
+        app.add_singleton_model(RepoMetadataModel::new);
+        app.add_singleton_model(HomeDirectoryWatcher::new_for_test);
+        app.add_singleton_model(WarpManagedPathsWatcher::new_for_testing);
+        let handle = app.add_singleton_model(SkillManager::new);
+
+        // Two skills at 3 MiB each exceed the 5 MiB catalog budget, so only the first should be
+        // retained — regardless of whether it arrived via an initial scan or an incremental
+        // file-watcher update, since both funnel through `handle_skills_added`.
+        let three_mib = 3 * 1024 * 1024;
+        let first = make_home_skill_with_content("first", three_mib);
+        let first_path = first.path.clone();
+        let second = make_home_skill_with_content("second", three_mib);
+        let second_path = second.path.clone();
+
+        handle.update(&mut app, |manager, _| {
+            manager.handle_skills_added(vec![first]);
+            manager.handle_skills_added(vec![second]);
+        });
+
+        handle.read(&app, |manager, _| {
+            assert!(manager.skill_by_path(&first_path).is_some());
+            assert!(
+                manager.skill_by_path(&second_path).is_none(),
+                "the second skill should have been rejected once the budget was exhausted"
+            );
+        });
+    });
+}
+
+#[test]
+fn handle_skills_added_admits_a_new_skill_after_the_budget_is_freed_by_deletion() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(DirectoryWatcher::new);
+        app.add_singleton_model(AISettings::new_with_defaults);
+        app.add_singleton_model(|_| DetectedRepositories::default());
+        app.add_singleton_model(RepoMetadataModel::new);
+        app.add_singleton_model(HomeDirectoryWatcher::new_for_test);
+        app.add_singleton_model(WarpManagedPathsWatcher::new_for_testing);
+        let handle = app.add_singleton_model(SkillManager::new);
+
+        let three_mib = 3 * 1024 * 1024;
+        let first = make_home_skill_with_content("first", three_mib);
+        let first_path = first.path.clone();
+        let second = make_home_skill_with_content("second", three_mib);
+        let second_path = second.path.clone();
+
+        handle.update(&mut app, |manager, _| {
+            manager.handle_skills_added(vec![first]);
+            manager.handle_skills_added(vec![second.clone()]);
+            // Freeing the first skill's budget should let the second be re-added.
+            manager.handle_skills_deleted(vec![first_path]);
+            manager.handle_skills_added(vec![second]);
+        });
+
+        handle.read(&app, |manager, _| {
+            assert!(manager.skill_by_path(&second_path).is_some());
+        });
+    });
+}
+
+#[test]
+fn add_skills_dirs_skills_shares_the_home_catalog_budget() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(DirectoryWatcher::new);
+        app.add_singleton_model(AISettings::new_with_defaults);
+        app.add_singleton_model(|_| DetectedRepositories::default());
+        app.add_singleton_model(RepoMetadataModel::new);
+        app.add_singleton_model(HomeDirectoryWatcher::new_for_test);
+        app.add_singleton_model(WarpManagedPathsWatcher::new_for_testing);
+        let handle = app.add_singleton_model(SkillManager::new);
+
+        let three_mib = 3 * 1024 * 1024;
+        let from_provider_dir = make_home_skill_with_content("from-provider-dir", three_mib);
+        let from_env_dir = make_home_skill_with_content("from-env-dir", three_mib);
+        let from_env_dir_path = from_env_dir.path.clone();
+
+        handle.update(&mut app, |manager, _| {
+            manager.handle_skills_added(vec![from_provider_dir]);
+            manager.add_skills_dirs_skills(vec![from_env_dir]);
+        });
+
+        handle.read(&app, |manager, _| {
+            assert!(
+                manager.skill_by_path(&from_env_dir_path).is_none(),
+                "WARP_SKILL_DIRS skills must respect the same budget as other home skills"
+            );
+        });
+    });
+}
+
+// ============================================================================
 // Tests for best_supported_provider
 // ============================================================================
 

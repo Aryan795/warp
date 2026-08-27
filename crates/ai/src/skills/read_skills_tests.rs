@@ -151,8 +151,9 @@ fn test_read_skills_stops_at_batch_byte_budget() {
     let skills_dir = temp_dir.path().join(".agents/skills");
     fs::create_dir_all(&skills_dir).unwrap();
 
-    // Six skills just under the per-file cap; their combined content (~5.4 MB) exceeds the
-    // batch budget (5 MB), so the scan must stop retaining before the last one.
+    // Six identically-sized skills (each name is a single digit, so every file's content is the
+    // same length): five fit within the 5 MB batch budget, a sixth does not. Names sort exactly
+    // as written, so the selection is deterministic and pinned below.
     let body = "x".repeat(900_000);
     for i in 0..6 {
         let skill_dir = skills_dir.join(format!("skill{i}"));
@@ -166,9 +167,12 @@ fn test_read_skills_stops_at_batch_byte_budget() {
 
     let skills = read_skills(&skills_dir);
 
-    assert!(
-        skills.len() < 6,
-        "expected the batch budget to cut off before all six skills were retained"
+    let mut names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["skill-0", "skill-1", "skill-2", "skill-3", "skill-4"],
+        "expected exactly the five lexically-first skills to survive the batch budget"
     );
     let total_bytes: usize = skills.iter().map(|s| s.content.len()).sum();
     assert!(

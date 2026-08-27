@@ -104,37 +104,33 @@ pub fn read_skills(path: &Path) -> Vec<ParsedSkill> {
         return skills;
     };
 
-    for entry in entries {
-        // Skip entries that fail to read
-        let Ok(entry) = entry else {
-            continue;
-        };
+    // `fs::read_dir` order is filesystem-dependent, so sort candidate skill files by path first.
+    // Otherwise, which skills survive the batch quota below would vary between scans or
+    // filesystems rather than being a stable, predictable selection.
+    let mut skill_file_paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|entry_path| entry_path.is_dir())
+        .map(|entry_path| entry_path.join("SKILL.md"))
+        .filter(|skill_file_path| skill_file_path.exists())
+        .collect();
+    skill_file_paths.sort();
 
-        let entry_path = entry.path();
-
-        // Only process directories
-        if !entry_path.is_dir() {
-            continue;
-        }
-
-        // Look for SKILL.md file in the subdirectory
-        let skill_file_path = entry_path.join("SKILL.md");
-
-        if skill_file_path.exists() {
-            // Attempt to parse the skill file, ignoring errors
-            if let Ok(parsed_skill) = parse_skill(&skill_file_path) {
-                let content_bytes = parsed_skill.content.len() as u64;
-                if batch_bytes.saturating_add(content_bytes) > MAX_SKILLS_BATCH_BYTES {
-                    log::warn!(
-                        "Reached skills read batch limit ({MAX_SKILLS_BATCH_BYTES} bytes) in \
-                         {}; skipping remaining files",
-                        path.display()
-                    );
-                    break;
-                }
-                batch_bytes = batch_bytes.saturating_add(content_bytes);
-                skills.push(parsed_skill);
+    for skill_file_path in skill_file_paths {
+        // Attempt to parse the skill file, ignoring errors
+        if let Ok(parsed_skill) = parse_skill(&skill_file_path) {
+            let content_bytes = parsed_skill.content.len() as u64;
+            if batch_bytes.saturating_add(content_bytes) > MAX_SKILLS_BATCH_BYTES {
+                log::warn!(
+                    "Reached skills read batch limit ({MAX_SKILLS_BATCH_BYTES} bytes) in {}; \
+                     skipping {} and remaining files",
+                    path.display(),
+                    skill_file_path.display()
+                );
+                break;
             }
+            batch_bytes = batch_bytes.saturating_add(content_bytes);
+            skills.push(parsed_skill);
         }
     }
 
