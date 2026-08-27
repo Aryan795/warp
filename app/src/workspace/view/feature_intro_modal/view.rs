@@ -5,7 +5,7 @@ use warp_core::ui::theme::Fill;
 use warpui::assets::asset_cache::AssetSource;
 use warpui::elements::{
     Border, CacheOption, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius,
-    CrossAxisAlignment, Empty, Expanded, Flex, Image, MainAxisAlignment, MainAxisSize,
+    CrossAxisAlignment, Empty, Expanded, Flex, Highlight, Image, MainAxisAlignment, MainAxisSize,
     OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Stack, Text,
 };
 use warpui::fonts::{Properties, Weight};
@@ -52,6 +52,18 @@ pub enum FeatureIntroCtaTarget {
     /// destination (see `UserWorkspaces::factories_launch_modal_cta_url`).
     FactoriesLaunchModalBooking,
 }
+
+/// A promotional callout (e.g. a limited-time incentive) rendered in its
+/// own visually distinct block below a [`FeatureIntro`]'s description,
+/// rather than as another line of body copy. `emphasis` must be an exact
+/// substring of `text`; it renders with the strongest visual emphasis in
+/// the block. See [`FeatureIntroModal::render_offer`].
+#[derive(Clone, Copy)]
+pub struct FeatureIntroOffer {
+    pub text: &'static str,
+    pub emphasis: &'static str,
+}
+
 /// A data-driven description of a single feature-intro popover. New feature
 /// announcements are added by appending an entry to [`FEATURE_INTROS`]; no new
 /// view, model, settings, or workspace wiring is required.
@@ -68,6 +80,9 @@ pub struct FeatureIntro {
     pub description: &'static str,
     /// Optional icon rendered to the left of the description.
     pub description_icon: Option<Icon>,
+    /// Optional promotional callout rendered in its own visually distinct
+    /// block below the description. `None` renders no such block.
+    pub offer: Option<FeatureIntroOffer>,
     /// Label for the primary call-to-action button.
     pub cta_label: &'static str,
     /// Destination opened when the user clicks the call-to-action. `None`
@@ -95,6 +110,7 @@ pub const FEATURE_INTROS: &[FeatureIntro] = &[
         title: "Build a custom model router for the Warp Agent.",
         description: "Custom routers can be complexity-based, where tasks are routed based on how difficult they are, or rule-based, where they are routed based on a set of natural language prompts.",
         description_icon: Some(Icon::Compass),
+        offer: None,
         cta_label: "Get started",
         cta_target: Some(FeatureIntroCtaTarget::SettingsWidget {
             page: SettingsSection::WarpAgent,
@@ -110,8 +126,12 @@ pub const FEATURE_INTROS: &[FeatureIntro] = &[
         hero_image_path: "async/png/onboarding/factories_launch_intro_banner.png",
         badge: Some("NEW"),
         title: "Build your software factory on Warp",
-        description: "Build cloud software factories around your team's existing workflow.\nEarly Access includes hands-on implementation support and up to $10K in Factory usage.",
+        description: "Open, flexible infrastructure for building cloud software factories around your team. Factories-as-code, any model or harness, with evals and self-improvement built in.",
         description_icon: None,
+        offer: Some(FeatureIntroOffer {
+            text: "Get hands-on implementation support and up to $10K in Factory usage during Early Access.",
+            emphasis: "up to $10K",
+        }),
         cta_label: "Get Early Access",
         cta_target: Some(FeatureIntroCtaTarget::FactoriesLaunchModalBooking),
         // Purely server-driven: the feature flag reflects cohort membership, and a
@@ -130,6 +150,26 @@ pub const FEATURE_INTROS: &[FeatureIntro] = &[
 pub fn feature_intro_by_id(id: FeatureIntroId) -> Option<&'static FeatureIntro> {
     FEATURE_INTROS.iter().find(|intro| intro.id == id)
 }
+
+/// Appends the signed-in user's `email` to `cta_url` as an `id` query
+/// parameter, Chili Piper's documented smart parameter for identifying and
+/// prefilling a guest on a Round-Robin scheduling link. Leaves `cta_url`
+/// unchanged when `email` is `None`, empty (an anonymous user), or when
+/// `cta_url` doesn't parse as an absolute URL.
+pub fn with_email_id_prefill(cta_url: &str, email: Option<&str>) -> String {
+    let Some(email) = email.filter(|email| !email.is_empty()) else {
+        return cta_url.to_string();
+    };
+    let Ok(mut parsed) = url::Url::parse(cta_url) else {
+        return cta_url.to_string();
+    };
+    parsed.query_pairs_mut().append_pair("id", email);
+    parsed.to_string()
+}
+
+#[cfg(test)]
+#[path = "view_tests.rs"]
+mod tests;
 
 fn modal_background(appearance: &Appearance) -> Fill {
     appearance.theme().surface_3()
@@ -326,6 +366,37 @@ impl FeatureIntroModal {
         }
     }
 
+    /// Renders `offer` as its own visually distinct block: an accent-tinted,
+    /// rounded container (distinguishing it from the plain-text description
+    /// above it) with `emphasis` highlighted in bold, accent-colored text as
+    /// the strongest emphasis in the line.
+    fn render_offer(offer: &FeatureIntroOffer, appearance: &Appearance) -> Box<dyn Element> {
+        debug_assert!(
+            offer.text.contains(offer.emphasis),
+            "FeatureIntroOffer::emphasis must be a substring of its text"
+        );
+
+        let mut text = Text::new(offer.text, appearance.ui_font_family(), 14.)
+            .with_color(modal_text_main(appearance));
+        if let Some(byte_start) = offer.text.find(offer.emphasis) {
+            let char_start = offer.text[..byte_start].chars().count();
+            let char_count = offer.emphasis.chars().count();
+            text = text.with_single_highlight(
+                Highlight::new()
+                    .with_properties(Properties::default().weight(Weight::Bold))
+                    .with_foreground_color(appearance.theme().accent().into_solid()),
+                (char_start..char_start + char_count).collect(),
+            );
+        }
+
+        Container::new(text.finish())
+            .with_horizontal_padding(10.)
+            .with_vertical_padding(8.)
+            .with_background(appearance.theme().accent_overlay())
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+            .finish()
+    }
+
     fn render_body(&self, intro: &FeatureIntro, appearance: &Appearance) -> Box<dyn Element> {
         let mut header = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
@@ -335,10 +406,17 @@ impl FeatureIntroModal {
         }
         header.add_child(Self::render_title(intro.title, appearance));
         header.add_child(Self::render_description(intro, appearance));
+        if let Some(offer) = &intro.offer {
+            header.add_child(Self::render_offer(offer, appearance));
+        }
 
+        // The offer block reads as its own section, so it earns more room before
+        // the footer divider than the plain description text does.
+        let body_bottom_padding = if intro.offer.is_some() { 20. } else { 16. };
         let body = Container::new(header.finish())
             .with_horizontal_padding(16.)
-            .with_vertical_padding(16.)
+            .with_padding_top(16.)
+            .with_padding_bottom(body_bottom_padding)
             .with_background(modal_background(appearance))
             .finish();
         let footer = Container::new(

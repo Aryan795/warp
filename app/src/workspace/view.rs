@@ -520,7 +520,7 @@ use crate::workspace::view::cloud_agent_capacity_modal::{
 use crate::workspace::view::codex_modal::{CodexModal, CodexModalEvent};
 use crate::workspace::view::feature_intro_modal::{
     FeatureIntroCtaTarget, FeatureIntroId, FeatureIntroModal, FeatureIntroModalEvent,
-    FeatureIntroModalTelemetryEvent, feature_intro_by_id,
+    FeatureIntroModalTelemetryEvent, feature_intro_by_id, with_email_id_prefill,
 };
 use crate::workspace::view::free_ai_removal_modal::{
     FreeAiRemovalModal, FreeAiRemovalModalEvent, FreeAiRemovalModalTelemetryEvent,
@@ -19104,7 +19104,9 @@ impl Workspace {
                     });
                 }
                 FeatureIntroCtaTarget::FactoriesLaunchModalBooking => {
-                    let url = UserWorkspaces::as_ref(ctx).factories_launch_modal_cta_url();
+                    let cta_url = UserWorkspaces::as_ref(ctx).factories_launch_modal_cta_url();
+                    let url =
+                        with_email_id_prefill(&cta_url, self.auth_state.user_email().as_deref());
                     ctx.open_url(&url);
                 }
             }

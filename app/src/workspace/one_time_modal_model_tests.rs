@@ -561,6 +561,34 @@ fn factories_launch_modal_requires_validated_cta_url() {
 }
 
 #[test]
+fn factories_launch_modal_eligible_with_the_real_configured_booking_url() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+
+        terminal.update(&mut app, |_, ctx| {
+            let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
+            let intro = FEATURE_INTROS
+                .iter()
+                .find(|intro| intro.id == FeatureIntroId::FactoriesLaunch)
+                .unwrap();
+
+            // The exact production value configured in warp-server's
+            // features.factories_launch_modal_cta_url, proving the positive path
+            // (not just synthetic examples or rejection cases) opens the gate.
+            UserWorkspaces::handle(ctx).update(ctx, |workspaces, _ctx| {
+                workspaces.set_factories_launch_modal_cta_url(Some(
+                    "https://warp-dev.chilipiper.com/round-robin/factories-warp-intro".to_string(),
+                ));
+            });
+
+            assert!(UserWorkspaces::as_ref(ctx).has_validated_factories_launch_modal_cta_url());
+            assert!((intro.eligible)(ctx));
+        });
+    });
+}
+
+#[test]
 fn custom_model_router_requires_ai_enabled_but_factories_launch_does_not() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
