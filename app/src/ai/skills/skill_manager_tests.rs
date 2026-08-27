@@ -1609,6 +1609,101 @@ fn handle_skills_added_admits_a_new_skill_after_the_budget_is_freed_by_deletion(
 }
 
 #[test]
+fn replacing_a_project_skill_with_a_home_skill_does_not_undercount_the_budget() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(DirectoryWatcher::new);
+        app.add_singleton_model(AISettings::new_with_defaults);
+        app.add_singleton_model(|_| DetectedRepositories::default());
+        app.add_singleton_model(RepoMetadataModel::new);
+        app.add_singleton_model(HomeDirectoryWatcher::new_for_test);
+        app.add_singleton_model(WarpManagedPathsWatcher::new_for_testing);
+        let handle = app.add_singleton_model(SkillManager::new);
+
+        // Fill most of the 5 MiB home budget with an unrelated home skill.
+        let filler = make_home_skill_with_content("filler", 4_900_000);
+
+        // A Project-scoped skill (never counted against the home budget) at the path that will
+        // later be replaced by a Home-scoped skill of the same size.
+        let shared_path = make_home_skill_with_content("shared", 3_000_000).path;
+        let project_skill = ParsedSkill {
+            name: "shared".to_string(),
+            description: "shared skill".to_string(),
+            path: shared_path.clone(),
+            content: "x".repeat(3_000_000),
+            line_range: None,
+            provider: SkillProvider::Agents,
+            scope: SkillScope::Project,
+        };
+        let home_replacement = ParsedSkill {
+            scope: SkillScope::Home,
+            ..project_skill.clone()
+        };
+
+        handle.update(&mut app, |manager, _| {
+            manager.handle_skills_added(vec![filler]);
+            manager.handle_skills_added(vec![project_skill.clone()]);
+            // The Project entry's 3 MB must not be credited toward the Home budget: accepting
+            // this would put the true Home total at 4.9 MB + 3 MB, over the 5 MiB cap.
+            manager.handle_skills_added(vec![home_replacement]);
+        });
+
+        handle.read(&app, |manager, _| {
+            let current = manager.skill_by_path(&shared_path).unwrap();
+            assert_eq!(
+                current.scope,
+                SkillScope::Project,
+                "the over-budget Home replacement must be rejected, leaving the Project skill in place"
+            );
+        });
+    });
+}
+
+#[test]
+fn replacing_a_home_skill_with_a_project_skill_releases_its_budget() {
+    App::test((), |mut app| async move {
+        app.add_singleton_model(DirectoryWatcher::new);
+        app.add_singleton_model(AISettings::new_with_defaults);
+        app.add_singleton_model(|_| DetectedRepositories::default());
+        app.add_singleton_model(RepoMetadataModel::new);
+        app.add_singleton_model(HomeDirectoryWatcher::new_for_test);
+        app.add_singleton_model(WarpManagedPathsWatcher::new_for_testing);
+        let handle = app.add_singleton_model(SkillManager::new);
+
+        let home_skill = make_home_skill_with_content("shared", 3_000_000);
+        let shared_path = home_skill.path.clone();
+        let project_replacement = ParsedSkill {
+            scope: SkillScope::Project,
+            content: "x".repeat(100),
+            ..home_skill.clone()
+        };
+        let another_home_skill = make_home_skill_with_content("another", 3_000_000);
+        let another_home_path = another_home_skill.path.clone();
+
+        handle.update(&mut app, |manager, _| {
+            manager.handle_skills_added(vec![home_skill]);
+            // Replacing the Home skill with a Project skill at the same path must release its
+            // 3 MB reservation, not leak it.
+            manager.handle_skills_added(vec![project_replacement]);
+            // If the reservation had leaked, this otherwise-fits-easily 3 MB Home skill would be
+            // wrongly rejected (3 MB leaked + 3 MB new > 5 MiB), even though true Home content is
+            // just the 3 MB being added here.
+            manager.handle_skills_added(vec![another_home_skill]);
+        });
+
+        handle.read(&app, |manager, _| {
+            assert_eq!(
+                manager.skill_by_path(&shared_path).unwrap().scope,
+                SkillScope::Project
+            );
+            assert!(
+                manager.skill_by_path(&another_home_path).is_some(),
+                "the new home skill should be admitted once the old reservation is released"
+            );
+        });
+    });
+}
+
+#[test]
 fn add_skills_dirs_skills_shares_the_home_catalog_budget() {
     App::test((), |mut app| async move {
         app.add_singleton_model(DirectoryWatcher::new);
