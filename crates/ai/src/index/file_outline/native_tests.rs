@@ -197,8 +197,10 @@ fmt.Println("Helper function")
 }
 
 /// Dense, deeply nested, syntactically-invalid SQL: unmatched parens force tree-sitter's
-/// error-recovery machinery to repeatedly fork and merge stack versions, guaranteeing its
-/// progress callback (checked roughly every 100 parse actions) fires at least once.
+/// error-recovery machinery to repeatedly fork and merge stack versions. Tree-sitter's progress
+/// callback is polled periodically from its top-level parse loop (though not from within a
+/// single error-recovery pass); this input is large enough to guarantee at least one such poll,
+/// which is all the already-elapsed deadline below needs to trip.
 fn build_pathological_sql(repeat: usize) -> String {
     let mut source = String::from("SELECT * FROM t WHERE ");
     for _ in 0..repeat {

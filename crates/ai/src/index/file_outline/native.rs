@@ -248,9 +248,7 @@ fn parse_file_outline(path: &Path) -> anyhow::Result<FileOutline> {
     parse_file_outline_with_deadline(path, Instant::now() + PARSE_BUDGET)
 }
 
-/// Core of [`parse_file_outline`], with the parse deadline taken as a parameter so tests can pass
-/// an already-elapsed deadline to deterministically exercise the budget-exceeded path without
-/// waiting on wall-clock time.
+/// Builds the file's outline, abandoning the tree-sitter parse once `deadline` passes.
 fn parse_file_outline_with_deadline(path: &Path, deadline: Instant) -> anyhow::Result<FileOutline> {
     if !is_file_parsable(path)? {
         return Err(anyhow!("File exceeds max file size limit for parsing"));
@@ -264,13 +262,15 @@ fn parse_file_outline_with_deadline(path: &Path, deadline: Instant) -> anyhow::R
     let mut parser = Parser::new();
     parser.set_language(&language.grammar)?;
 
-    // Set only when the deadline itself trips the callback below, so a `None` parse result can be
-    // told apart from any other reason `parse_with_options` might fail (e.g. a scanner error).
+    // Latched (never reset to false) once the deadline trips the callback below, so a `None`
+    // parse result can be told apart from any other reason `parse_with_options` might fail (e.g.
+    // a scanner error), regardless of whether tree-sitter re-invokes the callback after it
+    // returns `true`.
     let mut deadline_exceeded = false;
     // The progress callback must return `true` to cancel parsing -- tree-sitter's polarity here
     // is easy to get backwards (see https://github.com/tree-sitter/tree-sitter/discussions/4312).
     let mut progress_callback = |_state: &ParseState| {
-        deadline_exceeded = Instant::now() >= deadline;
+        deadline_exceeded |= Instant::now() >= deadline;
         deadline_exceeded
     };
     let options = ParseOptions::new().progress_callback(&mut progress_callback);
