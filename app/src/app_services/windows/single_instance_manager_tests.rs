@@ -82,6 +82,32 @@ fn a_claim_caught_before_its_listener_binds_still_reports_an_existing_instance()
     drop(mid_claim);
 }
 
+/// Teardown is the mirror of the claim, and gets the ordering the other way round: the listener
+/// has to be gone before the role is offered back. Releasing the mutex first lets the next launch
+/// take a role it then cannot bind, stranding it with neither the claim nor a listener while the
+/// old pipe is still closing - and a launch after that claims cleanly, leaving two full instances.
+#[test]
+fn teardown_does_not_strand_the_next_launch() {
+    let (mutex_name, pipe_name) = unique_object_names();
+
+    let sole = claim_instance(&mutex_name, &pipe_name).expect("first claim should succeed");
+    assert!(matches!(sole, InstanceRole::Sole(_)));
+    drop(sole);
+
+    let next =
+        claim_instance(&mutex_name, &pipe_name).expect("claim after teardown should succeed");
+    assert!(
+        matches!(next, InstanceRole::Sole(_)),
+        "a launch after teardown must be able to take the role outright, not land undiscoverable"
+    );
+    assert!(
+        listener_is_reachable(&pipe_name),
+        "the launch that took the role must be reachable"
+    );
+
+    drop(next);
+}
+
 /// A process that cannot listen must not leave a claim behind, or the next launch would defer to
 /// something it can never reach.
 #[test]

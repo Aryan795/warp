@@ -60,12 +60,31 @@ enum InstanceRole {
 
 /// The resources that make this process the sole instance, held for the process lifetime.
 struct SoleInstance {
-    _mutex: MutexHandle,
-    _server: ipc::Server,
+    server: Option<ipc::Server>,
     /// Drives the server's accept loop. The claim is taken before there is an `AppContext` to
     /// borrow an executor from, so the claim owns one.
-    _executor: Arc<Background>,
+    executor: Option<Arc<Background>>,
+    /// Declared after the listener so that the claim outlives it: releasing the mutex while the
+    /// pipe is still bound advertises a free role to a launch that then cannot bind, leaving it
+    /// running with neither the claim nor a listener.
+    _mutex: MutexHandle,
     forwarded_uris: Receiver<Vec<Url>>,
+}
+
+impl Drop for SoleInstance {
+    /// Field order alone is not enough: dropping an [`ipc::Server`] detaches its tasks rather than
+    /// stopping them, so the pipe would outlive the drop. Wait for the listener to actually go
+    /// away before the mutex is dropped and the role becomes available again.
+    ///
+    /// This runs only where the claim is dropped explicitly. A process exiting normally never gets
+    /// here, because the claim lives in a `static`, and the OS reclaims both objects in an order
+    /// this code does not control.
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            warpui::r#async::block_on(server.shutdown());
+        }
+        self.executor.take();
+    }
 }
 
 /// A bound URI listener, before it is known whether this process may keep it.
@@ -162,15 +181,15 @@ fn claim_sole_instance() -> Result<InstanceRole, Error> {
 
 /// Determines this process's [`InstanceRole`] by acquiring the mutex and then binding the pipe.
 ///
-/// The two are not one atomic step, and no ordering of two kernel objects can make them one. What
-/// this ordering buys is that every state a concurrent launch can observe resolves safely:
-/// acquiring the mutex first means a launch that arrives mid-claim concludes "an instance exists"
-/// and waits out its connect budget, rather than concluding "no instance" and immediately starting
-/// a duplicate. Binding immediately after, rather than later during GUI initialization, is what
-/// shrinks that wait from seconds to the few instructions between these two statements.
+/// These are two kernel objects and no ordering makes acquiring them atomic, so a concurrent
+/// launch can always observe one without the other. This order is chosen because of which
+/// conclusion the in-between state leads to: with the mutex first, a launch that arrives mid-claim
+/// decides "an instance exists" and waits out its connect budget, where the reverse order would
+/// have it decide "no instance" and start a duplicate immediately. Binding here rather than later
+/// during GUI initialization is what keeps that wait to the gap between these two statements.
 ///
-/// Releasing the mutex when the bind fails keeps the same property: the claim never outlives this
-/// process's ability to serve it.
+/// Releasing the mutex when the bind fails follows the same reasoning: a claim that this process
+/// cannot serve is worse than no claim at all.
 fn claim_instance(mutex_name: &str, pipe_name: &str) -> Result<InstanceRole, Error> {
     let Some(mutex) = try_acquire_mutex(mutex_name)? else {
         return Ok(InstanceRole::Secondary);
@@ -178,9 +197,9 @@ fn claim_instance(mutex_name: &str, pipe_name: &str) -> Result<InstanceRole, Err
 
     match bind_uri_listener(pipe_name) {
         Ok(listener) => Ok(InstanceRole::Sole(SoleInstance {
+            server: Some(listener.server),
+            executor: Some(listener.executor),
             _mutex: mutex,
-            _server: listener.server,
-            _executor: listener.executor,
             forwarded_uris: listener.forwarded_uris,
         })),
         Err(err) => {

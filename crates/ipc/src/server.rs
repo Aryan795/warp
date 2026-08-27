@@ -156,7 +156,7 @@ impl ServerBuilder {
 /// Two background tasks are spawned for each client connection -- one for processing incoming
 /// requests and one for sending outgoing responses.
 pub struct Server {
-    _tasks: Vec<BackgroundTask>,
+    tasks: Vec<BackgroundTask>,
 }
 
 impl Server {
@@ -190,7 +190,23 @@ impl Server {
                 background_executor.clone(),
             )),
         ];
-        Ok(Self { _tasks: tasks })
+        Ok(Self { tasks })
+    }
+
+    /// Stops serving and waits until the server's tasks have finished, so the underlying transport
+    /// is released by the time this returns.
+    ///
+    /// Dropping a [`Server`] only detaches those tasks, which leaves the transport bound for an
+    /// unspecified period afterwards. Callers that hand ownership of the transport to something
+    /// else - or that publish "this address is free" - have to wait for the release, not just for
+    /// the handles to go out of scope.
+    pub async fn shutdown(self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+        for task in self.tasks {
+            let _ = task.await;
+        }
     }
 
     /// Listens for new connections on `listener`, relaying them through the given sender.
