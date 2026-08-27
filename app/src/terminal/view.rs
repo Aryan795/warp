@@ -7187,6 +7187,11 @@ impl TerminalView {
             models,
             context_window_usage,
             platform_usage_in_cents,
+            // Not part of the archived per-exchange snapshot (no per-model
+            // credits breakdown exists to snapshot), so this always reads
+            // the conversation's current value rather than a historical
+            // one -- see the "CREDITS" section's doc comment.
+            credits_spent_for_last_block: conversation.credits_spent_for_last_block(),
             tool_calls,
             files_changed,
             lines_added,
@@ -7202,8 +7207,9 @@ impl TerminalView {
                 .wall_to_wall_response_time_since_last_query(),
         };
 
-        let turn_usage_view = ctx
-            .add_typed_action_view(|_ctx| TurnUsageView::new(turn_usage_info, Some(timing_info)));
+        let turn_usage_view = ctx.add_typed_action_view(|ctx| {
+            TurnUsageView::new(turn_usage_info, Some(timing_info), ctx)
+        });
 
         // Close the panel when the user clicks its "X" button, by toggling
         // the same flag/action the trigger icon uses.

@@ -8,6 +8,8 @@ use warpui::platform::WindowStyle;
 use warpui::{App, Element, SingletonEntity};
 
 use super::*;
+use crate::settings::UsageDisplayUnit;
+use crate::test_util::settings::initialize_settings_for_tests;
 
 fn placeholder_usage_info() -> TurnUsageInfo {
     TurnUsageInfo {
@@ -22,6 +24,7 @@ fn placeholder_usage_info() -> TurnUsageInfo {
         }],
         context_window_usage: 0.001,
         platform_usage_in_cents: None,
+        credits_spent_for_last_block: None,
         tool_calls: 2,
         files_changed: 1,
         lines_added: 4,
@@ -31,11 +34,12 @@ fn placeholder_usage_info() -> TurnUsageInfo {
 }
 
 fn initialize_test_app(app: &mut App) {
+    initialize_settings_for_tests(app);
     app.add_singleton_model(|_| Appearance::mock());
 }
 
-fn build_view(_ctx: &mut warpui::ViewContext<TurnUsageView>) -> TurnUsageView {
-    TurnUsageView::new(placeholder_usage_info(), None)
+fn build_view(ctx: &mut warpui::ViewContext<TurnUsageView>) -> TurnUsageView {
+    TurnUsageView::new(placeholder_usage_info(), None, ctx)
 }
 
 #[test]
@@ -102,6 +106,7 @@ fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
             ],
             context_window_usage: 0.25,
             platform_usage_in_cents: Some(8.0),
+            credits_spent_for_last_block: None,
             tool_calls: 3,
             files_changed: 2,
             lines_added: 5,
@@ -113,13 +118,14 @@ fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
             total_agent_response_time_ms: 1500,
             wall_to_wall_response_time_ms: Some(2000),
         };
-        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_ctx| {
-            TurnUsageView::new(usage_info, Some(timing_info))
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            TurnUsageView::new(usage_info, Some(timing_info), ctx)
         });
 
         view.read(&app, |view, ctx| {
             let appearance = Appearance::as_ref(ctx);
-            let (labels, values) = view.build_label_value_columns(appearance);
+            let (labels, values) =
+                view.build_label_value_columns(appearance, UsageDisplayUnit::Dollars);
 
             assert_eq!(
                 labels.len(),
@@ -212,19 +218,21 @@ fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
             }],
             context_window_usage: 0.1,
             platform_usage_in_cents: None,
+            credits_spent_for_last_block: None,
             tool_calls: 1,
             files_changed: 0,
             lines_added: 0,
             lines_removed: 0,
             commands_executed: 0,
         };
-        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_ctx| {
-            TurnUsageView::new(usage_info, None)
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            TurnUsageView::new(usage_info, None, ctx)
         });
 
         let labels_text = |view: &TurnUsageView, ctx: &warpui::AppContext| {
             let appearance = Appearance::as_ref(ctx);
-            let (labels, _values) = view.build_label_value_columns(appearance);
+            let (labels, _values) =
+                view.build_label_value_columns(appearance, UsageDisplayUnit::Dollars);
             Flex::column()
                 .with_children(labels)
                 .finish()
@@ -234,7 +242,8 @@ fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
 
         let values_text = |view: &TurnUsageView, ctx: &warpui::AppContext| {
             let appearance = Appearance::as_ref(ctx);
-            let (_labels, values) = view.build_label_value_columns(appearance);
+            let (_labels, values) =
+                view.build_label_value_columns(appearance, UsageDisplayUnit::Dollars);
             Flex::column()
                 .with_children(values)
                 .finish()
@@ -389,6 +398,7 @@ fn comprehensive_multi_agent_usage_info() -> TurnUsageInfo {
         ],
         context_window_usage: 0.63,
         platform_usage_in_cents: Some(37.25),
+        credits_spent_for_last_block: None,
         tool_calls: 9,
         files_changed: 4,
         lines_added: 210,
@@ -415,8 +425,12 @@ fn comprehensive_multi_agent_scenario_covers_every_token_type_and_sub_penny_cost
             total_agent_response_time_ms: 4_300,
             wall_to_wall_response_time_ms: Some(5_100),
         };
-        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_ctx| {
-            TurnUsageView::new(comprehensive_multi_agent_usage_info(), Some(timing_info))
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            TurnUsageView::new(
+                comprehensive_multi_agent_usage_info(),
+                Some(timing_info),
+                ctx,
+            )
         });
 
         // Expand every model row so all breakdown rows (Input/Output/Cache
@@ -429,7 +443,8 @@ fn comprehensive_multi_agent_scenario_covers_every_token_type_and_sub_penny_cost
 
         view.read(&app, |view, ctx| {
             let appearance = Appearance::as_ref(ctx);
-            let (labels, values) = view.build_label_value_columns(appearance);
+            let (labels, values) =
+                view.build_label_value_columns(appearance, UsageDisplayUnit::Dollars);
             let labels_text = Flex::column()
                 .with_children(labels)
                 .finish()
@@ -481,13 +496,14 @@ fn platform_usage_section_omitted_when_truly_zero() {
 
         let mut usage_info = placeholder_usage_info();
         usage_info.platform_usage_in_cents = Some(0.0);
-        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |_ctx| {
-            TurnUsageView::new(usage_info, None)
+        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
+            TurnUsageView::new(usage_info, None, ctx)
         });
 
         view.read(&app, |view, ctx| {
             let appearance = Appearance::as_ref(ctx);
-            let (labels, _values) = view.build_label_value_columns(appearance);
+            let (labels, _values) =
+                view.build_label_value_columns(appearance, UsageDisplayUnit::Dollars);
             let labels_text = Flex::column()
                 .with_children(labels)
                 .finish()

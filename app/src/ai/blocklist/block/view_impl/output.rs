@@ -103,7 +103,6 @@ use crate::ai::blocklist::inline_action::web_search::WebSearchView;
 use crate::ai::blocklist::keyboard_navigable_buttons::KeyboardNavigableButtons;
 use crate::ai::blocklist::secret_redaction::SecretRedactionState;
 use crate::ai::blocklist::usage::rollup::compute_orchestration_rollup;
-use crate::ai::blocklist::usage::turn_usage_view::{format_dollars, format_tokens};
 use crate::ai::blocklist::view_util::{
     FAILED_OUTPUT_USAGE_NOTICE_TEXT, format_usage, should_show_failed_output_usage_notice,
 };
@@ -3888,11 +3887,23 @@ fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> 
                 cost + model_usage.cost_in_cents(),
             )
         });
-    let mut tooltip_parts = vec![format_tokens(turn_tokens)];
-    if turn_cost_in_cents > 0.0 {
-        tooltip_parts.push(format_dollars(turn_cost_in_cents));
-    }
-    let tooltip_text = format!("Turn: {}", tooltip_parts.join("  /  "));
+    // The tooltip is the one place the Turn panel respects the Credits/
+    // Dollars display-unit toggle: `format_usage` shows dollars when the
+    // unit is Dollars and a cost is known, else falls back to credits.
+    // There's no per-model credits breakdown (only an aggregate turn-level
+    // credits figure), so the panel itself always shows dollars; see the
+    // panel's own "CREDITS" section for the credits-mode total.
+    let usage_display_unit = AISettings::as_ref(app).usage_display_unit;
+    let credits_spent_for_last_block = conversation.credits_spent_for_last_block().unwrap_or(0.0);
+    let tooltip_text = format!(
+        "Turn: {}",
+        format_usage(
+            credits_spent_for_last_block,
+            turn_tokens.try_into().ok(),
+            Some(turn_cost_in_cents).filter(|&cost| cost > 0.0),
+            usage_display_unit,
+        )
+    );
 
     // Matches the sizing/hover-background/corner-radius of the sibling
     // action-row buttons (thumbs up/down, continue, fork) below, so the
