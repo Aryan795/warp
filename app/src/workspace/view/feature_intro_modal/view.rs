@@ -23,6 +23,39 @@ use crate::view_components::action_button::{
 const MODAL_WIDTH: f32 = 340.;
 const HERO_HEIGHT: f32 = 110.;
 
+/// Spacing between grouped elements (badge+title, or all of badge, title,
+/// and description when there's no offer block) — matches the badge/title/
+/// description group spacing used by every other launch modal in this crate
+/// (`openwarp_launch_modal`, `orchestration_launch_modal`,
+/// `auto_handoff_sleep_modal`).
+const COMPACT_SPACING: f32 = 8.;
+/// Wider spacing used in place of [`COMPACT_SPACING`] only when an offer
+/// block is present, so the badge and title read as a pair distinct from
+/// the body copy below them, rather than as part of one dense block.
+const SPACIOUS_HEADING_SPACING: f32 = 12.;
+/// Wider spacing used in place of [`COMPACT_SPACING`] between the heading
+/// group, the description, and the offer block, only when an offer block
+/// is present, so each reads as its own section.
+const SPACIOUS_SECTION_SPACING: f32 = 16.;
+/// Looser line height for the description and offer paragraphs, used only
+/// when an offer block is present, since that copy is denser than the
+/// single-sentence descriptions other launch modals render at the default
+/// (`1.2`) line height.
+const SPACIOUS_LINE_HEIGHT_RATIO: f32 = 1.4;
+/// The body container's own top and bottom padding, used only when there's
+/// no offer block (matches the original, pre-offer-block padding).
+const COMPACT_BODY_PADDING: f32 = 16.;
+const SPACIOUS_BODY_PADDING_TOP: f32 = 20.;
+/// Larger than [`SPACIOUS_BODY_PADDING_TOP`]: the offer block is the last
+/// thing before the footer divider and earns more room ahead of it.
+const SPACIOUS_BODY_PADDING_BOTTOM: f32 = 24.;
+/// The footer's own vertical padding, used only when there's no offer block
+/// (matches the original, pre-offer-block padding).
+const COMPACT_FOOTER_PADDING: f32 = 12.;
+const SPACIOUS_FOOTER_PADDING: f32 = 16.;
+/// Uniform padding inside the offer block's own container.
+const OFFER_PADDING: f32 = 12.;
+
 /// Identifies a single feature announced through the reusable feature-intro
 /// popover. The string form ([`FeatureIntroId::as_key`]) is the persisted
 /// "seen" key, so it must remain stable across releases.
@@ -352,11 +385,12 @@ impl FeatureIntroModal {
     fn render_description(intro: &FeatureIntro, appearance: &Appearance) -> Box<dyn Element> {
         let mut lines = Flex::column().with_spacing(4.);
         for line in intro.description.split('\n') {
-            lines.add_child(
-                Text::new(line, appearance.ui_font_family(), 14.)
-                    .with_color(modal_text_sub(appearance))
-                    .finish(),
-            );
+            let mut text = Text::new(line, appearance.ui_font_family(), 14.)
+                .with_color(modal_text_sub(appearance));
+            if intro.offer.is_some() {
+                text = text.with_line_height_ratio(SPACIOUS_LINE_HEIGHT_RATIO);
+            }
+            lines.add_child(text.finish());
         }
         let description = lines.finish();
 
@@ -395,7 +429,8 @@ impl FeatureIntroModal {
         );
 
         let mut text = Text::new(offer.text, appearance.ui_font_family(), 14.)
-            .with_color(modal_text_main(appearance));
+            .with_color(modal_text_main(appearance))
+            .with_line_height_ratio(SPACIOUS_LINE_HEIGHT_RATIO);
         if let Some(byte_start) = offer.text.find(offer.emphasis) {
             let char_start = offer.text[..byte_start].chars().count();
             let char_count = offer.emphasis.chars().count();
@@ -408,35 +443,69 @@ impl FeatureIntroModal {
         }
 
         Container::new(text.finish())
-            .with_horizontal_padding(10.)
-            .with_vertical_padding(8.)
+            .with_uniform_padding(OFFER_PADDING)
             .with_background(appearance.theme().accent_overlay())
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
             .finish()
     }
 
-    fn render_body(&self, intro: &FeatureIntro, appearance: &Appearance) -> Box<dyn Element> {
+    /// Builds `render_body`'s vertical rhythm. With no offer block, this
+    /// reproduces the original flat badge/title/description spacing exactly
+    /// (nesting the badge+title pair one level deeper doesn't change the gap
+    /// between any two adjacent elements when every spacing value is equal).
+    /// With an offer block, the badge+title pair, the description, and the
+    /// offer each get more room, so the card reads as sections rather than
+    /// one dense block.
+    fn render_header(intro: &FeatureIntro, appearance: &Appearance) -> Box<dyn Element> {
+        let spacious = intro.offer.is_some();
+
+        let mut heading = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_spacing(if spacious {
+                SPACIOUS_HEADING_SPACING
+            } else {
+                COMPACT_SPACING
+            });
+        if let Some(badge) = intro.badge {
+            heading.add_child(Self::render_badge(badge, appearance));
+        }
+        heading.add_child(Self::render_title(intro.title, appearance));
+
         let mut header = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
-            .with_spacing(8.);
-        if let Some(badge) = intro.badge {
-            header.add_child(Self::render_badge(badge, appearance));
-        }
-        header.add_child(Self::render_title(intro.title, appearance));
+            .with_spacing(if spacious {
+                SPACIOUS_SECTION_SPACING
+            } else {
+                COMPACT_SPACING
+            });
+        header.add_child(heading.finish());
         header.add_child(Self::render_description(intro, appearance));
         if let Some(offer) = &intro.offer {
             header.add_child(Self::render_offer(offer, appearance));
         }
+        header.finish()
+    }
 
-        // The offer block reads as its own section, so it earns more room before
-        // the footer divider than the plain description text does.
-        let body_bottom_padding = if intro.offer.is_some() { 20. } else { 16. };
-        let body = Container::new(header.finish())
+    fn render_body(&self, intro: &FeatureIntro, appearance: &Appearance) -> Box<dyn Element> {
+        let spacious = intro.offer.is_some();
+
+        let (body_padding_top, body_padding_bottom) = if spacious {
+            (SPACIOUS_BODY_PADDING_TOP, SPACIOUS_BODY_PADDING_BOTTOM)
+        } else {
+            (COMPACT_BODY_PADDING, COMPACT_BODY_PADDING)
+        };
+        let body = Container::new(Self::render_header(intro, appearance))
             .with_horizontal_padding(16.)
-            .with_padding_top(16.)
-            .with_padding_bottom(body_bottom_padding)
+            .with_padding_top(body_padding_top)
+            .with_padding_bottom(body_padding_bottom)
             .with_background(modal_background(appearance))
             .finish();
+
+        let footer_padding = if spacious {
+            SPACIOUS_FOOTER_PADDING
+        } else {
+            COMPACT_FOOTER_PADDING
+        };
         let footer = Container::new(
             Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
@@ -446,7 +515,7 @@ impl FeatureIntroModal {
                 .finish(),
         )
         .with_horizontal_padding(16.)
-        .with_vertical_padding(12.)
+        .with_vertical_padding(footer_padding)
         .with_background(modal_background(appearance))
         .with_border(Border::top(1.).with_border_fill(appearance.theme().outline()))
         .with_corner_radius(CornerRadius::with_bottom(Radius::Pixels(8.)))
