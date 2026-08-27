@@ -196,9 +196,20 @@ pub struct AmbientAgentEnvironment {
     pub description: Option<String>,
     /// Source-control provider hosting this environment's repositories.
     ///
+    /// This is the environment's *primary* forge: the default filler for
+    /// repositories that omit their own. It is not the set of forges present —
+    /// each repository's own `code_forge` is authoritative for clone routing.
     /// Absent means GitHub for legacy environments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_forge: Option<CodeForge>,
+    /// Concrete forges enabled on this environment.
+    ///
+    /// Distinguishes an absent legacy configuration from an explicit empty,
+    /// single-forge, or mixed-forge set. A mixed environment is not a third
+    /// host: each repo still talks to GitHub or GitLab, and this records which
+    /// hosts are enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_forges: Option<Vec<CodeForge>>,
     /// List of GitHub repositories
     #[serde(default)]
     pub github_repos: Vec<GithubRepo>,
@@ -244,6 +255,7 @@ impl AmbientAgentEnvironment {
             name,
             description,
             code_forge: None,
+            code_forges: None,
             github_repos,
             source_repos: None,
             base_image: Some(BaseImage::DockerImage(docker_image)),
@@ -258,6 +270,32 @@ impl AmbientAgentEnvironment {
     /// for legacy environments.
     pub fn effective_code_forge(&self) -> CodeForge {
         self.code_forge.unwrap_or_default()
+    }
+
+    /// Returns the concrete forges enabled on this environment.
+    ///
+    /// Uses the deserialized `code_forges` set when present. Otherwise derives
+    /// the set from the effective repository list, or from the primary forge
+    /// for a legacy environment with no repositories.
+    pub fn effective_code_forges(&self) -> Vec<CodeForge> {
+        if let Some(forges) = &self.code_forges {
+            return forges.clone();
+        }
+        let mut forges = Vec::new();
+        for repo in self.effective_repos() {
+            let forge = repo.code_forge.unwrap_or_default();
+            if !forges.contains(&forge) {
+                forges.push(forge);
+            }
+        }
+        if forges.is_empty() {
+            match self.code_forge {
+                Some(CodeForge::None) => Vec::new(),
+                _ => vec![self.effective_code_forge()],
+            }
+        } else {
+            forges
+        }
     }
 
     /// Display string for this environment's base image, empty when the

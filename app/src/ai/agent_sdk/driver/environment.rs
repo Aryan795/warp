@@ -19,10 +19,10 @@ use warp_core::{safe_info, safe_warn};
 use warpui::r#async::FutureExt;
 use warpui::{ModelContext, ModelSpawner, SingletonEntity};
 
-use super::AgentDriverError;
 #[cfg(feature = "local_fs")]
 use super::cache_setup;
 use super::terminal::TerminalDriver;
+use super::{AgentDriverError, git_credentials};
 use crate::ai::agent_sdk::environment_snapshot::{
     EnvironmentSnapshot, EnvironmentSnapshotReporter, RepositoryRevision,
 };
@@ -413,6 +413,15 @@ async fn prepare_environment_impl(
 
     if !source_repos.is_empty() {
         for repo in source_repos {
+            // Apply the hosting forge's identity after clone so a mixed
+            // checkout does not author every commit as whichever credential
+            // happened to come first. Done here rather than in the clone
+            // script because it must also apply to a directory that already
+            // existed and was reused.
+            git_credentials::configure_repository_git_identity(
+                &working_dir.join(&repo.repo),
+                repo.code_forge.unwrap_or_default().host(),
+            );
             register_cloned_repo(repo, working_dir, is_sandbox, spawner).await?;
             if !is_sandbox && should_index_codebase {
                 let receiver = index_repo_codebase(

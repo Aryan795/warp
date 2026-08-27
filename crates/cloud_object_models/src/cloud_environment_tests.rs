@@ -56,6 +56,7 @@ fn serialize_environment_without_docker_image_omits_field() {
         name: "no-image-env".into(),
         description: None,
         code_forge: None,
+        code_forges: None,
         github_repos: vec![],
         source_repos: None,
         base_image: None,
@@ -75,6 +76,7 @@ fn roundtrip_serde_without_docker_image() {
         name: "no-image-rt".into(),
         description: None,
         code_forge: None,
+        code_forges: None,
         github_repos: vec![GithubRepo::new("owner".into(), "repo".into())],
         source_repos: None,
         base_image: None,
@@ -182,6 +184,110 @@ fn deserialize_gitlab_environment_uses_authoritative_source_repos() {
 }
 
 #[test]
+fn deserialize_mixed_source_repos_keeps_each_repo_host() {
+    let json = serde_json::json!({
+        "name": "mixed-env",
+        "code_forge": "GITHUB",
+        "code_forges": ["GITHUB", "GITLAB"],
+        "source_repos": [
+            {
+                "code_forge": "GITHUB",
+                "owner": "warpdotdev",
+                "repo": "warp"
+            },
+            {
+                "code_forge": "GITLAB",
+                "owner": "platform/backend",
+                "repo": "api"
+            }
+        ],
+        "docker_image": "ubuntu:latest"
+    });
+
+    let env: AmbientAgentEnvironment = serde_json::from_value(json).unwrap();
+
+    assert_eq!(env.effective_code_forge(), CodeForge::GitHub);
+    assert_eq!(
+        env.code_forges.as_deref(),
+        Some(&[CodeForge::GitHub, CodeForge::GitLab][..])
+    );
+    assert_eq!(
+        env.effective_code_forges(),
+        vec![CodeForge::GitHub, CodeForge::GitLab]
+    );
+    let repos = env.effective_repos();
+    assert_eq!(
+        repos,
+        vec![
+            SourceRepo::new(CodeForge::GitHub, "warpdotdev".into(), "warp".into()),
+            SourceRepo::new(CodeForge::GitLab, "platform/backend".into(), "api".into()),
+        ]
+    );
+    assert_eq!(
+        repos[0].https_clone_url(),
+        "https://github.com/warpdotdev/warp.git"
+    );
+    assert_eq!(
+        repos[1].https_clone_url(),
+        "https://gitlab.com/platform/backend/api.git"
+    );
+}
+
+#[test]
+fn mixed_source_repos_without_container_set_still_clone_from_per_repo_forge() {
+    let json = serde_json::json!({
+        "name": "mixed-inferred-env",
+        "code_forge": "GITHUB",
+        "source_repos": [
+            {
+                "code_forge": "GITHUB",
+                "owner": "warpdotdev",
+                "repo": "warp"
+            },
+            {
+                "code_forge": "GITLAB",
+                "owner": "platform/backend",
+                "repo": "api"
+            }
+        ]
+    });
+
+    let env: AmbientAgentEnvironment = serde_json::from_value(json).unwrap();
+
+    assert_eq!(env.code_forges, None);
+    assert_eq!(
+        env.effective_code_forges(),
+        vec![CodeForge::GitHub, CodeForge::GitLab]
+    );
+    assert_eq!(
+        env.effective_repos()[1].https_clone_url(),
+        "https://gitlab.com/platform/backend/api.git"
+    );
+}
+
+#[test]
+fn mixed_code_forges_do_not_fill_missing_per_repo_forge_as_multiple() {
+    let json = serde_json::json!({
+        "name": "mixed-fill-env",
+        "code_forge": "GITHUB",
+        "code_forges": ["GITHUB", "GITLAB"],
+        "source_repos": [{
+            "owner": "warpdotdev",
+            "repo": "warp"
+        }]
+    });
+
+    let env: AmbientAgentEnvironment = serde_json::from_value(json).unwrap();
+    let repos = env.effective_repos();
+
+    assert_eq!(repos[0].code_forge, Some(CodeForge::GitHub));
+    assert_eq!(
+        repos[0].https_clone_url(),
+        "https://github.com/warpdotdev/warp.git"
+    );
+}
+
+#[test]
 fn present_empty_source_repos_override_legacy_mirror() {
     let json = serde_json::json!({
         "name": "empty-env",
@@ -209,6 +315,7 @@ fn legacy_environment_serialization_omits_provider_neutral_fields() {
     let json = serde_json::to_value(&env).unwrap();
 
     assert!(!json.as_object().unwrap().contains_key("code_forge"));
+    assert!(!json.as_object().unwrap().contains_key("code_forges"));
     assert!(!json.as_object().unwrap().contains_key("source_repos"));
 }
 

@@ -11,8 +11,8 @@ use super::{
     PrepareEnvironmentError, RepositoryCloneRequest, build_parallel_clone_command,
     build_remove_repository_origins_command, build_resolved_head_command, checkout_command_for,
     checkout_result, environment_snapshot, is_valid_git_object_id, merge_repos_deduped,
-    parse_resolved_head_sha, parse_resolved_head_shas, repository_clone_requests, single_repo_name,
-    validate_repository_head_overrides,
+    parse_resolved_head_sha, parse_resolved_head_shas, repository_clone_requests,
+    repository_forge_for_repo, single_repo_name, validate_repository_head_overrides,
 };
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, SourceRepo};
 use crate::terminal::shell::ShellType;
@@ -493,6 +493,63 @@ fn head_overrides_replace_checkout_ref_only_for_matching_repos() {
         prepared[1].checkout,
         Some(RepositoryHeadRef::Branch("old-pin".to_string()))
     );
+}
+
+#[test]
+fn repository_forge_for_repo_maps_supported_hosts_and_rejects_none() {
+    assert_eq!(
+        repository_forge_for_repo(&repo(CodeForge::GitHub, "warpdotdev", "warp")),
+        Some(RepositoryForge::GitHub)
+    );
+    assert_eq!(
+        repository_forge_for_repo(&repo(CodeForge::GitLab, "platform/backend", "api")),
+        Some(RepositoryForge::GitLab)
+    );
+    assert_eq!(
+        repository_forge_for_repo(&repo(CodeForge::None, "warpdotdev", "warp")),
+        None
+    );
+    assert_eq!(
+        repository_forge_for_repo(&repo(CodeForge::Unknown, "warpdotdev", "warp")),
+        None
+    );
+}
+
+#[test]
+fn mixed_clone_requests_use_each_repository_host() {
+    let repos = vec![
+        repo(CodeForge::GitHub, "warpdotdev", "warp"),
+        repo(CodeForge::GitLab, "platform/backend", "api"),
+    ];
+
+    let prepared = repository_clone_requests(&repos, &[]).unwrap();
+
+    assert_eq!(
+        prepared[0].repo.https_clone_url(),
+        "https://github.com/warpdotdev/warp.git"
+    );
+    assert_eq!(
+        prepared[1].repo.https_clone_url(),
+        "https://gitlab.com/platform/backend/api.git"
+    );
+}
+
+#[test]
+fn clone_requests_reject_a_repository_with_none_forge() {
+    let repos = vec![SourceRepo::new(
+        CodeForge::None,
+        "warpdotdev".to_string(),
+        "warp".to_string(),
+    )];
+
+    let error = repository_clone_requests(&repos, &[]).unwrap_err();
+
+    assert!(matches!(
+        error,
+        PrepareEnvironmentError::UnsupportedRepositoryForge { repo_name }
+            if repo_name == "warpdotdev/warp"
+    ));
+    assert_eq!(repos[0].https_clone_url(), "https:///warpdotdev/warp.git");
 }
 
 #[test]
