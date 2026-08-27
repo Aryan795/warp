@@ -4347,6 +4347,7 @@ fn factories_launch_cta_url_rejects_contact_sales_regardless_of_query_or_fragmen
     for url in [
         links::FACTORIES_CONTACT_SALES_URL,
         "https://www.warp.dev/contact-sales/",
+        "https://www.warp.dev/contact-sales//",
         "https://www.warp.dev/contact-sales?campaign=x",
         "https://www.warp.dev/contact-sales#pricing",
         "https://www.warp.dev/Contact-Sales",
@@ -4363,6 +4364,7 @@ fn factories_launch_cta_url_rejects_request_access_regardless_of_query_or_fragme
     for url in [
         "https://www.warp.dev/request-access",
         "https://www.warp.dev/request-access/",
+        "https://www.warp.dev/request-access//",
         "https://www.warp.dev/request-access?campaign=x",
         "https://www.warp.dev/request-access#top",
         "https://www.warp.dev/Request-Access",
