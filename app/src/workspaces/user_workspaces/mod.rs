@@ -646,14 +646,16 @@ impl UserWorkspaces {
     }
 
     /// Whether a real, server-configured Factories launch modal CTA URL has
-    /// been fetched. Fails closed: until the server delivers a URL that
-    /// differs from the generic Contact Sales fallback, the Factories launch
-    /// modal must not show, since its whole purpose is directing qualified
-    /// users to a specific booking destination.
+    /// been fetched. Fails closed: until the server delivers a well-formed,
+    /// absolute `https` URL that isn't (a normalized variant of) the generic
+    /// Contact Sales fallback, the Factories launch modal must not show,
+    /// since its whole purpose is directing qualified users to a specific
+    /// booking destination. See `is_valid_non_fallback_cta_url` for exactly
+    /// what counts as "real".
     pub fn has_validated_factories_launch_modal_cta_url(&self) -> bool {
         self.factories_launch_modal_cta_url
             .as_deref()
-            .is_some_and(|url| url != links::FACTORIES_CONTACT_SALES_URL)
+            .is_some_and(is_valid_non_fallback_cta_url)
     }
 
     pub fn current_workspace_mut(&mut self) -> Option<&mut Workspace> {
@@ -1771,6 +1773,46 @@ impl UserWorkspaces {
             ctx,
         );
     }
+}
+
+/// Whether `raw` is a real, usable Factories launch modal CTA destination:
+/// a well-formed absolute `https` URL with a non-empty host, and not (a
+/// normalized variant of) the generic Contact Sales fallback. This is the
+/// only thing standing between a malformed or unset server config value and
+/// `ctx.open_url` (see `workspace/view.rs`'s `FactoriesLaunchModalBooking`
+/// handler), so it deliberately rejects anything that isn't an absolute web
+/// URL rather than merely checking for exact byte-equality with the
+/// fallback.
+fn is_valid_non_fallback_cta_url(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(trimmed) else {
+        return false;
+    };
+    if parsed.scheme() != "https" || parsed.host_str().is_none_or(str::is_empty) {
+        return false;
+    }
+
+    // The fallback constant is controlled by us and must always parse; if it
+    // somehow didn't, treat every URL as non-fallback rather than panicking.
+    let Ok(fallback) = url::Url::parse(links::FACTORIES_CONTACT_SALES_URL) else {
+        return true;
+    };
+    !urls_match_ignoring_trailing_slash(&parsed, &fallback)
+}
+
+/// Compares two URLs for equality while treating a trailing slash on the
+/// path as insignificant, so a trivial Contact Sales variant (e.g. a
+/// trailing `/`) is still recognized as the fallback rather than accepted
+/// as a "real" destination.
+fn urls_match_ignoring_trailing_slash(a: &url::Url, b: &url::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+        && a.path().trim_end_matches('/') == b.path().trim_end_matches('/')
+        && a.query() == b.query()
 }
 
 /// Reads the legacy, pre-team-keyed model catalog cache (`MODELS_BY_FEATURE_CACHE_KEY`), for

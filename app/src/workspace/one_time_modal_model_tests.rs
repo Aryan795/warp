@@ -522,6 +522,33 @@ fn factories_launch_modal_requires_validated_cta_url() {
             assert!(!UserWorkspaces::as_ref(ctx).has_validated_factories_launch_modal_cta_url());
             assert!(!(intro.eligible)(ctx));
 
+            // A weak byte-inequality check would accept any of these; a real
+            // safety gate in front of `ctx.open_url` must not.
+            let malformed_or_fallback = [
+                "",
+                "   ",
+                "not a url",
+                "http://cal.com/warp",
+                "javascript:alert(1)",
+                "/relative/path",
+                "https://www.warp.dev/contact-sales",
+                "https://www.warp.dev/contact-sales/",
+                "  https://www.warp.dev/contact-sales  ",
+            ];
+            for value in malformed_or_fallback {
+                UserWorkspaces::handle(ctx).update(ctx, |workspaces, _ctx| {
+                    workspaces.set_factories_launch_modal_cta_url(Some(value.to_string()));
+                });
+                assert!(
+                    !UserWorkspaces::as_ref(ctx).has_validated_factories_launch_modal_cta_url(),
+                    "expected {value:?} to be rejected"
+                );
+                assert!(
+                    !(intro.eligible)(ctx),
+                    "expected {value:?} to be ineligible"
+                );
+            }
+
             UserWorkspaces::handle(ctx).update(ctx, |workspaces, _ctx| {
                 workspaces
                     .set_factories_launch_modal_cta_url(Some("https://cal.com/warp".to_string()));
@@ -566,28 +593,34 @@ fn custom_model_router_requires_ai_enabled_but_factories_launch_does_not() {
     });
 }
 
+/// Marks every FEATURE_INTROS entry ahead of FactoriesLaunch as seen and
+/// configures a validated CTA URL, so FactoriesLaunch is the next eligible,
+/// unseen intro. Callers must separately hold
+/// `FeatureFlag::FactoriesLaunchModal.override_enabled(true)` for the
+/// duration of the test.
+fn prepare_factories_launch_as_next_intro(ctx: &mut warpui::AppContext) {
+    UserWorkspaces::handle(ctx).update(ctx, |workspaces, _ctx| {
+        workspaces.set_factories_launch_modal_cta_url(Some("https://cal.com/warp".to_string()));
+    });
+    AISettings::handle(ctx).update(ctx, |settings, ctx| {
+        for intro in FEATURE_INTROS {
+            if intro.id == FeatureIntroId::FactoriesLaunch {
+                break;
+            }
+            settings.mark_feature_intro_seen(intro.id.as_key(), ctx);
+        }
+    });
+}
+
 #[test]
 fn factories_launch_feature_intro_requires_winning_the_server_claim() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let terminal = add_window_with_terminal(&mut app, None);
+        let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
 
         terminal.update(&mut app, |_, ctx| {
-            let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
-            UserWorkspaces::handle(ctx).update(ctx, |workspaces, _ctx| {
-                workspaces
-                    .set_factories_launch_modal_cta_url(Some("https://cal.com/warp".to_string()));
-            });
-
-            // Mark every intro ahead of FactoriesLaunch as seen so it's next in line.
-            AISettings::handle(ctx).update(ctx, |settings, ctx| {
-                for intro in FEATURE_INTROS {
-                    if intro.id == FeatureIntroId::FactoriesLaunch {
-                        break;
-                    }
-                    settings.mark_feature_intro_seen(intro.id.as_key(), ctx);
-                }
-            });
+            prepare_factories_launch_as_next_intro(ctx);
 
             // Simulate another device having already claimed the impression.
             let mut auth_client = MockAuthClient::new();
@@ -603,10 +636,12 @@ fn factories_launch_feature_intro_requires_winning_the_server_claim() {
             OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
                 let handled = model.check_and_trigger_feature_intro_modal(ctx);
 
-                // The one-time seen marker is set synchronously regardless of
-                // whether the claim ultimately succeeds.
+                // The seen marker must NOT be written until the claim resolves:
+                // writing it eagerly (and then treating a lost/failed claim as
+                // "shown") would burn the user's only impression before we even
+                // know whether another device actually won it.
                 assert!(
-                    AISettings::as_ref(ctx)
+                    !AISettings::as_ref(ctx)
                         .is_feature_intro_seen(FeatureIntroId::FactoriesLaunch.as_key())
                 );
                 assert!(handled);
@@ -619,10 +654,102 @@ fn factories_launch_feature_intro_requires_winning_the_server_claim() {
         warpui::r#async::Timer::after(std::time::Duration::from_millis(100)).await;
 
         terminal.update(&mut app, |_, ctx| {
-            OneTimeModalModel::handle(ctx).update(ctx, |model, _ctx| {
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
                 assert_eq!(
                     model.active_feature_intro, None,
                     "a lost claim must not show the popover on this device"
+                );
+                assert!(
+                    AISettings::as_ref(ctx)
+                        .is_feature_intro_seen(FeatureIntroId::FactoriesLaunch.as_key()),
+                    "a genuinely lost claim (another device won) is now known, so it's safe \
+                     to mark seen"
+                );
+                assert_eq!(
+                    model.pending_claim_intro_id, None,
+                    "the in-flight guard must clear once the claim resolves"
+                );
+            });
+        });
+    });
+}
+
+#[test]
+fn factories_launch_feature_intro_network_error_does_not_burn_the_impression() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
+
+        terminal.update(&mut app, |_, ctx| {
+            prepare_factories_launch_as_next_intro(ctx);
+
+            // Simulate an offline device / transient server error.
+            let mut auth_client = MockAuthClient::new();
+            auth_client
+                .expect_claim_feature_intro_impression()
+                .withf(|intro_key| intro_key == FeatureIntroId::FactoriesLaunch.as_key())
+                .times(1)
+                .return_once(|_| Err(anyhow::anyhow!("network unreachable")));
+            ServerApiProvider::handle(ctx).update(ctx, |provider, _ctx| {
+                provider.set_auth_client_for_test(Arc::new(auth_client));
+            });
+
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                assert!(model.check_and_trigger_feature_intro_modal(ctx));
+                assert!(
+                    !AISettings::as_ref(ctx)
+                        .is_feature_intro_seen(FeatureIntroId::FactoriesLaunch.as_key())
+                );
+            });
+        });
+
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(100)).await;
+
+        terminal.update(&mut app, |_, ctx| {
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                assert_eq!(
+                    model.active_feature_intro, None,
+                    "a failed claim must not show the popover on this device"
+                );
+                // The critical assertion: a request error must NOT burn the
+                // user's only (globally-synced) impression. Being offline or
+                // hitting a transient failure must leave the intro eligible
+                // to retry, not permanently suppress it on every device.
+                assert!(
+                    !AISettings::as_ref(ctx)
+                        .is_feature_intro_seen(FeatureIntroId::FactoriesLaunch.as_key()),
+                    "a request error must leave the intro unseen so it can retry"
+                );
+                assert_eq!(model.pending_claim_intro_id, None);
+
+                // A later recheck (e.g. once connectivity resumes) must retry
+                // the claim rather than treating the intro as already handled.
+                let mut retry_client = MockAuthClient::new();
+                retry_client
+                    .expect_claim_feature_intro_impression()
+                    .withf(|intro_key| intro_key == FeatureIntroId::FactoriesLaunch.as_key())
+                    .times(1)
+                    .return_once(|_| Ok(true));
+                ServerApiProvider::handle(ctx).update(ctx, |provider, _ctx| {
+                    provider.set_auth_client_for_test(Arc::new(retry_client));
+                });
+                assert!(model.check_and_trigger_feature_intro_modal(ctx));
+            });
+        });
+
+        warpui::r#async::Timer::after(std::time::Duration::from_millis(100)).await;
+
+        terminal.update(&mut app, |_, ctx| {
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                assert_eq!(
+                    model.active_feature_intro,
+                    Some(FeatureIntroId::FactoriesLaunch),
+                    "the retry should succeed once connectivity is restored"
+                );
+                assert!(
+                    AISettings::as_ref(ctx)
+                        .is_feature_intro_seen(FeatureIntroId::FactoriesLaunch.as_key())
                 );
             });
         });

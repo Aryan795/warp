@@ -62,6 +62,11 @@ pub struct OneTimeModalModel {
     /// intentionally excluded from `is_any_modal_open` (which suppresses terminal
     /// focus stealing) to keep the terminal usable while it is visible.
     active_feature_intro: Option<FeatureIntroId>,
+    /// The `requires_server_claim` intro currently awaiting its atomic claim
+    /// response, if any. Prevents a recheck that fires while the claim is in
+    /// flight (e.g. from an `ExperimentsUpdated` event or another modal's
+    /// dismissal) from starting a second, redundant claim for the same intro.
+    pending_claim_intro_id: Option<FeatureIntroId>,
     /// Whether the initial one-time modal checks have run. The seen markers are
     /// cloud-synced settings, so event-driven re-checks must wait for the initial
     /// cloud preferences load to avoid acting on stale values.
@@ -195,6 +200,7 @@ impl OneTimeModalModel {
             is_free_ai_removal_modal_open: false,
             is_hoa_onboarding_open: false,
             active_feature_intro: None,
+            pending_claim_intro_id: None,
             has_completed_initial_modal_checks: false,
             has_fetched_workspaces: false,
             target_window_id: None,
@@ -792,9 +798,12 @@ impl OneTimeModalModel {
         // Show the first registered, unseen feature intro that the user is currently
         // eligible for (see `FEATURE_INTROS`). An unseen but ineligible intro (e.g. a
         // server-targeted launch the user isn't enrolled in yet) is left unseen rather
-        // than consumed, so it can still show once the user becomes eligible.
+        // than consumed, so it can still show once the user becomes eligible. An intro
+        // whose claim is already in flight is skipped too, so a recheck that fires
+        // while we're waiting on the server doesn't start a second concurrent claim.
         let next = FEATURE_INTROS.iter().find(|intro| {
             !AISettings::as_ref(ctx).is_feature_intro_seen(intro.id.as_key())
+                && self.pending_claim_intro_id != Some(intro.id)
                 && (intro.eligible)(ctx)
         });
         let Some(intro) = next else {
@@ -802,19 +811,25 @@ impl OneTimeModalModel {
         };
         let id = intro.id;
 
-        // Mark it seen up front so it shows at most once per device, even if
-        // suppressed below (e.g. `Channel::Integration`, or a lost server claim).
-        AISettings::handle(ctx).update(ctx, |settings, ctx| {
-            settings.mark_feature_intro_seen(id.as_key(), ctx);
-        });
-
         if matches!(ChannelState::channel(), Channel::Integration) {
             return false;
         }
 
         if intro.requires_server_claim {
+            // Unlike the non-claim path below, the seen marker is deliberately NOT set
+            // here: it is a globally-synced setting, so writing it before the claim
+            // resolves and then treating a network failure as "already shown" would
+            // permanently suppress the modal everywhere for a user who was never
+            // actually shown it. `claim_and_show_feature_intro` only marks it seen once
+            // the claim outcome (won or genuinely lost to another device) is known.
             self.claim_and_show_feature_intro(intro, ctx);
         } else {
+            // Mark it seen up front so it shows at most once per device. This intro has
+            // no server claim to lose, so there's no failure mode where marking it seen
+            // could cost the user their only impression.
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                settings.mark_feature_intro_seen(id.as_key(), ctx);
+            });
             self.set_active_feature_intro(Some(id), ctx);
             send_telemetry_from_ctx!(FeatureIntroModalTelemetryEvent::Shown { feature: id }, ctx);
         }
@@ -823,33 +838,46 @@ impl OneTimeModalModel {
 
     /// Wins the atomic, cross-device impression claim before actually showing a
     /// `requires_server_claim` intro (see `AuthClient::claim_feature_intro_impression`).
-    /// The intro's one-time seen marker is already set by the caller, so a lost
-    /// claim (another device already showed it, or the request failed) simply
-    /// leaves this device without the popover; lower-priority modals are then
-    /// given a chance to show instead.
+    /// The one-time seen marker is written only once the outcome is known: on a win
+    /// (`Ok(true)`) or a genuine loss to another device (`Ok(false)`), never on a
+    /// request error, so a transient failure or being offline leaves the intro
+    /// eligible to retry on the next recheck instead of silently burning the user's
+    /// only impression.
     fn claim_and_show_feature_intro(
         &mut self,
         intro: &'static FeatureIntro,
         ctx: &mut ModelContext<Self>,
     ) {
+        self.pending_claim_intro_id = Some(intro.id);
         let auth_client = ServerApiProvider::as_ref(ctx).get_auth_client();
         let intro_key = intro.id.as_key();
         ctx.spawn(
             async move { auth_client.claim_feature_intro_impression(intro_key).await },
-            move |me, result, ctx| match result {
-                Ok(true) => {
-                    me.set_active_feature_intro(Some(intro.id), ctx);
-                    send_telemetry_from_ctx!(
-                        FeatureIntroModalTelemetryEvent::Shown { feature: intro.id },
-                        ctx
-                    );
-                }
-                Ok(false) => {
-                    me.resume_modal_checks_after_feature_intro(ctx);
-                }
-                Err(e) => {
-                    log::warn!("Failed to claim feature intro impression for {intro_key}: {e:#}");
-                    me.resume_modal_checks_after_feature_intro(ctx);
+            move |me, result, ctx| {
+                me.pending_claim_intro_id = None;
+                match result {
+                    Ok(claimed) => {
+                        AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                            settings.mark_feature_intro_seen(intro_key, ctx);
+                        });
+                        if claimed {
+                            me.set_active_feature_intro(Some(intro.id), ctx);
+                            send_telemetry_from_ctx!(
+                                FeatureIntroModalTelemetryEvent::Shown { feature: intro.id },
+                                ctx
+                            );
+                        } else {
+                            // Another device already won the claim; the intro has
+                            // genuinely been shown, so it's correctly marked seen above.
+                            me.resume_modal_checks_after_feature_intro(ctx);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to claim feature intro impression for {intro_key}: {e:#}"
+                        );
+                        me.resume_modal_checks_after_feature_intro(ctx);
+                    }
                 }
             },
         );
