@@ -1914,6 +1914,7 @@ fn command_to_telemetry_event(command: &CliCommand) -> CliTelemetryEvent {
             HarnessSupportCommand::ReportShutdown(_) => {
                 CliTelemetryEvent::HarnessSupportReportShutdown
             }
+            HarnessSupportCommand::WaitForEvents => CliTelemetryEvent::HarnessSupportWaitForEvents,
         },
         CliCommand::Artifact(artifact_cmd) => match artifact_cmd {
             ArtifactCommand::Upload(_) => CliTelemetryEvent::ArtifactUpload,
