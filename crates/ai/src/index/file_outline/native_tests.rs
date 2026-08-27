@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use tempfile::TempDir;
 
@@ -193,4 +194,38 @@ fmt.Println("Helper function")
     assert_eq!(symbols[3].type_prefix, Some("type".to_owned()));
     assert_eq!(symbols[4].name, "helperFunction");
     assert_eq!(symbols[4].type_prefix, Some("func".to_owned()));
+}
+
+/// Dense, deeply nested, syntactically-invalid SQL. The unmatched parens force tree-sitter's
+/// error-recovery machinery (`ts_parser__recover`) to repeatedly fork and merge stack versions.
+/// At this size (~1.8MB, under `repo_metadata::entry::MAX_FILE_SIZE`'s 3MB cap so the size guard
+/// isn't what's being tested), local benchmarking of an unbounded parse of this exact input took
+/// several seconds -- comfortably past `PARSE_BUDGET` -- confirming this input reliably exercises
+/// the budget rather than racing it.
+fn build_pathological_sql(repeat: usize) -> String {
+    let mut source = String::from("SELECT * FROM t WHERE ");
+    for _ in 0..repeat {
+        source.push_str("(a = b AND (c OR (d = (");
+    }
+    source
+}
+
+#[test]
+fn test_parse_file_outline_gives_up_once_parse_budget_is_exceeded() {
+    let temp_dir = TempDir::new().unwrap();
+    let content = build_pathological_sql(80_000);
+    let file_path = create_test_file(&temp_dir, "pathological.sql", &content);
+
+    let start = Instant::now();
+    let result = parse_file_outline(&file_path);
+    let elapsed = start.elapsed();
+
+    assert!(
+        result.is_err(),
+        "a parse that runs past its budget should give up instead of running to completion"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the parse budget should bound wall-clock time regardless of input size, took {elapsed:?}"
+    );
 }

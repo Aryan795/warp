@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
-use arborium::tree_sitter::{Parser, Query, QueryCursor, Tree};
+use arborium::tree_sitter::{ParseOptions, ParseState, Parser, Point, Query, QueryCursor, Tree};
 use futures::channel::oneshot;
 use ignore::gitignore::Gitignore;
+use instant::Instant;
 use itertools::Itertools;
 use rayon::prelude::*;
 use repo_metadata::RepositoryUpdate;
@@ -233,6 +235,20 @@ async fn parse_symbols_for_files(files: Vec<FileMetadata>) -> Option<HashMap<Fil
     rx.await.ok()
 }
 
+/// Wall-clock budget for a single tree-sitter parse of one file's outline. Tree-sitter's
+/// error-recovery pass (`ts_parser__recover`) can allocate memory super-linearly on dense-error
+/// input regardless of file size, so a single pathological file well under
+/// `repo_metadata::entry::MAX_FILE_SIZE` can still drive a multi-GB memory spike (Sentry
+/// 7259255054) when this function is fanned out over every repo file via `par_iter`. Enforced via
+/// a progress callback, which tree-sitter polls roughly every 100 parse actions, so a runaway
+/// parse only overshoots the deadline by the time it takes to run one more such batch, not by an
+/// amount that scales with input size. This parser is always given a valid language and never
+/// given a deprecated cancellation flag, so the callback below is the only way
+/// `parse_with_options` can return `None` here -- a `None` result unambiguously means the budget
+/// was exceeded. 750ms matches the budget already validated against this same failure mode on the
+/// editor's syntax-highlighting parse path (`syntax_tree::PARSE_BUDGET`).
+const PARSE_BUDGET: Duration = Duration::from_millis(750);
+
 /// Given the path of a file, try to construct its outline.
 fn parse_file_outline(path: &Path) -> anyhow::Result<FileOutline> {
     if !is_file_parsable(path)? {
@@ -246,8 +262,29 @@ fn parse_file_outline(path: &Path) -> anyhow::Result<FileOutline> {
 
     let mut parser = Parser::new();
     parser.set_language(&language.grammar)?;
-    let Some(tree) = parser.parse(&content, None) else {
-        return Err(anyhow!("Couldn't parse AST"));
+
+    let deadline = Instant::now() + PARSE_BUDGET;
+    // The progress callback must return `true` to cancel parsing -- tree-sitter's polarity here
+    // is easy to get backwards (see https://github.com/tree-sitter/tree-sitter/discussions/4312).
+    let mut progress_callback = |_state: &ParseState| Instant::now() >= deadline;
+    let options = ParseOptions::new().progress_callback(&mut progress_callback);
+
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut read_callback = |i: usize, _: Point| {
+        if i < len {
+            &bytes[i..]
+        } else {
+            Default::default()
+        }
+    };
+    let Some(tree) = parser.parse_with_options(&mut read_callback, None, Some(options)) else {
+        log::warn!(
+            "[ai] tree-sitter parse of {path:?} exceeded the {PARSE_BUDGET:?} parse budget; treating as unparseable"
+        );
+        return Err(anyhow!(
+            "Couldn't parse AST within the {PARSE_BUDGET:?} parse budget"
+        ));
     };
     let symbols = language.symbols_query.as_ref().map(|query| {
         get_symbols(query, &tree, &content)
