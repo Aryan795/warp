@@ -108,7 +108,7 @@ pub const FEATURE_INTROS: &[FeatureIntro] = &[
         hero_image_path: "async/png/onboarding/factories_launch_intro_banner.png",
         badge: Some("NEW"),
         title: "Build your software factory on Warp",
-        description: "Open, flexible infrastructure for building cloud software factories around the way your team already works. Factories-as-code, any model or harness, with evals, benchmarks, and self-improvement built in. Select teams also get hands-on implementation support and up to $10K in Factory usage during Early Access.",
+        description: "Build cloud software factories around your team's existing workflow. Early Access includes hands-on implementation support and up to $10K in Factory usage.",
         description_icon: None,
         cta_label: "Get Early Access",
         cta_target: Some(FeatureIntroCtaTarget::FactoriesLaunchModalBooking),
