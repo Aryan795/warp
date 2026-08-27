@@ -156,6 +156,8 @@ impl ServerBuilder {
 /// Two background tasks are spawned for each client connection -- one for processing incoming
 /// requests and one for sending outgoing responses.
 pub struct Server {
+    // Only read by `shutdown`, which the wasm executor cannot support.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     tasks: Vec<BackgroundTask>,
 }
 
@@ -200,6 +202,9 @@ impl Server {
     /// unspecified period afterwards. Callers that hand ownership of the transport to something
     /// else - or that publish "this address is free" - have to wait for the release, not just for
     /// the handles to go out of scope.
+    ///
+    /// Native-only: the wasm executor's task handle can neither be aborted nor awaited.
+    #[cfg(not(target_family = "wasm"))]
     pub async fn shutdown(self) {
         for task in &self.tasks {
             task.abort();
@@ -342,6 +347,7 @@ impl Server {
     }
 }
 
-#[cfg(test)]
+// Native-only: these exercise the real transport, which is unimplemented on wasm.
+#[cfg(all(test, not(target_family = "wasm")))]
 #[path = "server_tests.rs"]
 mod tests;
