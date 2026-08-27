@@ -1,11 +1,12 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_channel::{Sender, TrySendError};
 use async_trait::async_trait;
+use instant::Instant;
 use ipc::{Client, ConnectionAddress};
 use url::Url;
-use warp_errors::{ReportErrorLogMode, report_error};
+use warp_errors::report_error;
 use warpui::r#async::executor::Background;
 use warpui::r#async::{FutureExt as _, Timer};
 use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
@@ -57,7 +58,7 @@ impl ipc::ServiceImpl for UriServiceImpl {
                 // the first one already says everything the rest would.
                 report_error!(
                     anyhow::anyhow!("Refused a URI hand-off because the pending queue is full"),
-                    ReportErrorLogMode::OncePerRun
+                    warp_errors::ReportErrorLogMode::OncePerRun
                 );
                 Err("the running instance has too many pending hand-offs".to_owned())
             }
