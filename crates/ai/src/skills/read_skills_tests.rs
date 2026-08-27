@@ -146,6 +146,38 @@ No front matter here.
 }
 
 #[test]
+fn test_read_skills_stops_at_batch_byte_budget() {
+    let temp_dir = tempdir().unwrap();
+    let skills_dir = temp_dir.path().join(".agents/skills");
+    fs::create_dir_all(&skills_dir).unwrap();
+
+    // Six skills just under the per-file cap; their combined content (~5.4 MB) exceeds the
+    // batch budget (5 MB), so the scan must stop retaining before the last one.
+    let body = "x".repeat(900_000);
+    for i in 0..6 {
+        let skill_dir = skills_dir.join(format!("skill{i}"));
+        fs::create_dir(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: skill-{i}\n---\n\n{body}"),
+        )
+        .unwrap();
+    }
+
+    let skills = read_skills(&skills_dir);
+
+    assert!(
+        skills.len() < 6,
+        "expected the batch budget to cut off before all six skills were retained"
+    );
+    let total_bytes: usize = skills.iter().map(|s| s.content.len()).sum();
+    assert!(
+        total_bytes as u64 <= MAX_SKILLS_BATCH_BYTES,
+        "retained content ({total_bytes} bytes) exceeded the batch budget"
+    );
+}
+
+#[test]
 fn test_read_skills_empty_directory() {
     let temp_dir = tempdir().unwrap();
     let skills_dir = temp_dir.path();

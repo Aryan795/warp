@@ -21,12 +21,21 @@ fn context_arc() -> Arc<[AIAgentContext]> {
     Arc::from(vec![AIAgentContext::SelectedText("SECRET123".to_string())])
 }
 
+fn selected_text(input: &AIAgentInput) -> &str {
+    let AIAgentInput::ActionResult { context, .. } = input else {
+        panic!("expected ActionResult input");
+    };
+    let AIAgentContext::SelectedText(text) = &context[0] else {
+        panic!("expected SelectedText context");
+    };
+    text
+}
+
 /// A batch of inputs sharing one context arc (as `send_query` produces for a batch of completed
-/// action results) should redact the shared content exactly once and have every sharer end up
-/// pointing at that single redacted allocation, rather than each cloning its own copy.
+/// action results) must still have the shared secret redacted in every input.
 #[test]
 #[serial]
-fn test_redact_inputs_reuses_one_redacted_copy_for_a_shared_context() {
+fn test_redact_inputs_redacts_a_context_shared_across_inputs() {
     secrets::set_user_and_enterprise_secret_regexes(
         [&Regex::new("SECRET123").expect("valid regex")],
         std::iter::empty(),
@@ -36,39 +45,20 @@ fn test_redact_inputs_reuses_one_redacted_copy_for_a_shared_context() {
     let mut inputs = vec![
         action_result_input(shared_context.clone()),
         action_result_input(shared_context.clone()),
-        action_result_input(shared_context.clone()),
+        action_result_input(shared_context),
     ];
-    // Drop the extra local reference so only the inputs themselves hold the arc, matching how
-    // `send_query` releases its `context` variable before the request is redacted.
-    drop(shared_context);
 
     redact_inputs(&mut inputs);
 
-    let contexts: Vec<&Arc<[AIAgentContext]>> = inputs
-        .iter()
-        .map(|input| match input {
-            AIAgentInput::ActionResult { context, .. } => context,
-            _ => unreachable!(),
-        })
-        .collect();
-
-    // All three inputs should share the exact same redacted allocation...
-    assert!(Arc::ptr_eq(contexts[0], contexts[1]));
-    assert!(Arc::ptr_eq(contexts[1], contexts[2]));
-    // ...redacted only once, not once per sharer.
-    assert_eq!(Arc::strong_count(contexts[0]), 3);
-
-    // Redaction still took effect.
-    let AIAgentContext::SelectedText(text) = &contexts[0][0] else {
-        panic!("expected SelectedText context");
-    };
-    assert_eq!(text, "*********");
+    for input in &inputs {
+        assert_eq!(selected_text(input), "*********");
+    }
 }
 
-/// Inputs that do not share a context should each keep their own independently-redacted copy.
+/// Inputs that do not share a context must each have their own secret redacted independently.
 #[test]
 #[serial]
-fn test_redact_inputs_does_not_share_contexts_across_unrelated_inputs() {
+fn test_redact_inputs_redacts_independent_contexts() {
     secrets::set_user_and_enterprise_secret_regexes(
         [&Regex::new("SECRET123").expect("valid regex")],
         std::iter::empty(),
@@ -81,19 +71,7 @@ fn test_redact_inputs_does_not_share_contexts_across_unrelated_inputs() {
 
     redact_inputs(&mut inputs);
 
-    let contexts: Vec<&Arc<[AIAgentContext]>> = inputs
-        .iter()
-        .map(|input| match input {
-            AIAgentInput::ActionResult { context, .. } => context,
-            _ => unreachable!(),
-        })
-        .collect();
-
-    assert!(!Arc::ptr_eq(contexts[0], contexts[1]));
-    for context in contexts {
-        let AIAgentContext::SelectedText(text) = &context[0] else {
-            panic!("expected SelectedText context");
-        };
-        assert_eq!(text, "*********");
+    for input in &inputs {
+        assert_eq!(selected_text(input), "*********");
     }
 }

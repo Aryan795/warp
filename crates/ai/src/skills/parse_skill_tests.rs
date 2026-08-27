@@ -250,7 +250,7 @@ fn test_truncation_cuts_at_sentence_boundary() {
 }
 
 #[test]
-fn test_parse_rejects_oversized_skill_file_without_reading_it_fully() {
+fn test_parse_rejects_oversized_skill_file() {
     let content = format!(
         "---\nname: some-skill\n---\n\n{}",
         "x".repeat(MAX_SKILL_FILE_BYTES as usize + 1)
