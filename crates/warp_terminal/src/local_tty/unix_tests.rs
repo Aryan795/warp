@@ -110,38 +110,37 @@ fn docker_sandbox_command_sets_history_size_sentinels() {
 }
 
 #[test]
-fn dev_container_exec_args_relay_over_a_plain_pipe() {
+fn dev_container_exec_args_attaches_with_it() {
     let starter = dev_container_starter(None);
     let args = dev_container_exec_args(&starter);
 
-    // `-i` without `-t`: the pty lives inside the container (via `script`),
-    // not on the `docker exec` relay itself. See `prepare_dev_container` for
-    // why that's load-bearing for handshake delivery.
+    // `-it`: Docker allocates its own pty on the host-exec side, which
+    // forwards resizes and Ctrl-C natively.
     assert_eq!(args[0], "exec");
-    assert_eq!(args[1], "-i");
-    assert!(!args.iter().any(|arg| arg == "-it" || arg == "-t"));
+    assert_eq!(args[1], "-it");
 }
 
 #[test]
-fn dev_container_exec_args_wraps_bash_in_script_with_quoted_init_path() {
+fn dev_container_exec_args_execs_bash_directly_with_an_unquoted_rcfile_path() {
     let starter = dev_container_starter(None);
     let args = dev_container_exec_args(&starter);
 
-    let script_pos = args
+    // No `script` wrapper: `-it` allocates the pty on the relay itself, so
+    // there's no need to allocate a second one inside the container.
+    assert!(!args.iter().any(|arg| arg == "script"));
+
+    let bash_pos = args
         .iter()
-        .position(|arg| arg == "script")
-        .expect("args should invoke `script` inside the container");
-    assert_eq!(args[script_pos + 1], "-E");
-    assert_eq!(args[script_pos + 2], "never");
-    assert_eq!(args[script_pos + 3], "-qfec");
+        .position(|arg| arg == "bash")
+        .expect("args should exec `bash` directly");
+    assert_eq!(args[bash_pos + 1], "--rcfile");
+    // Unquoted: this is a literal argv element, not a string a shell
+    // re-parses, so quoting it would hand bash a path that doesn't exist.
     assert_eq!(
-        args[script_pos + 4],
-        std::ffi::OsString::from(format!(
-            "exec bash --rcfile '{}' --noprofile",
-            starter.container_init_script_path()
-        ))
+        args[bash_pos + 2],
+        std::ffi::OsString::from(starter.container_init_script_path())
     );
-    assert_eq!(args[script_pos + 5], "/dev/null");
+    assert_eq!(args[bash_pos + 3], "--noprofile");
 }
 
 #[test]
@@ -309,19 +308,9 @@ fn dev_container_default_user_args_do_not_force_root_unlike_chown_args() {
 }
 
 #[test]
-fn dev_container_init_script_sets_window_size_before_the_shell_init_script() {
-    let starter = dev_container_starter(None);
-    let size = SizeInfo::new_without_font_metrics(40, 120);
-    let script = dev_container_init_script(&starter.sandbox_id, starter.session_id(), &size);
-
-    assert!(script.starts_with("command -p stty rows 40 columns 120\n"));
-}
-
-#[test]
 fn dev_container_init_script_sources_the_staged_bootstrap_script() {
     let starter = dev_container_starter(None);
-    let size = SizeInfo::new_without_font_metrics(40, 120);
-    let script = dev_container_init_script(&starter.sandbox_id, starter.session_id(), &size);
+    let script = dev_container_init_script(&starter.sandbox_id, starter.session_id());
 
     // The bootstrap script is `source`d directly from a file the container
     // already has, rather than typed into the pty by Warp later.

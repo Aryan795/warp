@@ -112,8 +112,8 @@ fn dev_container_up_failure_message_falls_back_to_stderr_tail_and_trims_blank_li
 }
 
 #[test]
-fn dev_container_script_preflight_args_without_remote_user() {
-    let args = dev_container_script_preflight_args("abc123", None, "/workspaces/project");
+fn dev_container_preflight_args_without_remote_user() {
+    let args = dev_container_preflight_args("abc123", None, "/workspaces/project");
 
     assert_eq!(
         args,
@@ -124,14 +124,14 @@ fn dev_container_script_preflight_args_without_remote_user() {
             std::ffi::OsString::from("abc123"),
             std::ffi::OsString::from("sh"),
             std::ffi::OsString::from("-c"),
-            std::ffi::OsString::from("command -v script && command -v bash"),
+            std::ffi::OsString::from("command -v bash"),
         ]
     );
 }
 
 #[test]
-fn dev_container_script_preflight_args_with_remote_user() {
-    let args = dev_container_script_preflight_args("abc123", Some("vscode"), "/workspaces/project");
+fn dev_container_preflight_args_with_remote_user() {
+    let args = dev_container_preflight_args("abc123", Some("vscode"), "/workspaces/project");
 
     assert_eq!(
         args,
@@ -144,17 +144,17 @@ fn dev_container_script_preflight_args_with_remote_user() {
             std::ffi::OsString::from("abc123"),
             std::ffi::OsString::from("sh"),
             std::ffi::OsString::from("-c"),
-            std::ffi::OsString::from("command -v script && command -v bash"),
+            std::ffi::OsString::from("command -v bash"),
         ]
     );
 }
 
 #[test]
-fn dev_container_script_preflight_args_checks_both_script_and_bash() {
-    let args = dev_container_script_preflight_args("abc123", None, "/workspaces/project");
+fn dev_container_preflight_args_checks_bash() {
+    let args = dev_container_preflight_args("abc123", None, "/workspaces/project");
     let check = args.last().expect("args should be non-empty");
 
-    assert_eq!(check, "command -v script && command -v bash");
+    assert_eq!(check, "command -v bash");
 }
 
 #[test]

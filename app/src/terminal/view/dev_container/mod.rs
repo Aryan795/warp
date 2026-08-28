@@ -369,7 +369,7 @@ impl TerminalView {
             let remote_workspace_folder = remote_workspace_folder.clone();
             async move {
                 Command::new(&docker_path)
-                    .args(dev_container_script_preflight_args(
+                    .args(dev_container_preflight_args(
                         &container_id,
                         remote_user.as_deref(),
                         &remote_workspace_folder,
@@ -378,12 +378,6 @@ impl TerminalView {
                     .await
             }
         };
-
-        // The new pane doesn't exist yet, so seed its init script with this
-        // pane's own row/column count; the new pane inherits this pane's
-        // pixel size (see `create_and_push_dev_container`), and both derive
-        // the same grid size from the same font metrics.
-        let size = *self.size_info();
 
         ctx.spawn(preflight_future, move |me, result, ctx| match result {
             Ok(output) if output.status.success() => {
@@ -399,7 +393,6 @@ impl TerminalView {
                     remote_user.clone(),
                     sandbox_id.clone(),
                     session_id,
-                    size,
                 )
                 .boxed();
                 #[cfg(not(unix))]
@@ -445,9 +438,8 @@ impl TerminalView {
                 let detail = tail_lines(&String::from_utf8_lossy(&output.stderr), 5);
                 me.show_dev_container_toast(
                     format!(
-                        "Dev container isn't ready to attach: it may be missing `script` or \
-                         `bash`, or its configured remote user or workspace folder may not \
-                         exist: {detail}"
+                        "Dev container isn't ready to attach: it may be missing `bash`, or its \
+                         configured remote user or workspace folder may not exist: {detail}"
                     ),
                     ToastFlavor::Error,
                     ctx,
@@ -610,13 +602,13 @@ fn dev_container_up_failure_message(stdout: &[u8], stderr: &[u8]) -> String {
 /// Args for a preflight `docker exec` that checks the same things the real
 /// attach in `crate::terminal::local_tty::unix::dev_container_exec_args`
 /// needs to succeed, run with the exact same `-u`/`-w` it uses: that the
-/// container has both `script` and `bash` (neither guaranteed present in
-/// every image), and that `remote_user` and `remote_workspace_folder` (if
-/// set) are actually valid in the container — an unqualified `-u <bad
-/// user>` or `-w <missing dir>` fails a `docker exec` the same way `sh` not
-/// finding `script`/`bash` does: a non-zero exit with no pane created.
+/// container has `bash` (not guaranteed present in every image), and that
+/// `remote_user` and `remote_workspace_folder` (if set) are actually valid
+/// in the container — an unqualified `-u <bad user>` or `-w <missing dir>`
+/// fails a `docker exec` the same way `sh` not finding `bash` does: a
+/// non-zero exit with no pane created.
 #[cfg(feature = "local_tty")]
-fn dev_container_script_preflight_args(
+fn dev_container_preflight_args(
     container_id: &str,
     remote_user: Option<&str>,
     remote_workspace_folder: &str,
@@ -632,7 +624,7 @@ fn dev_container_script_preflight_args(
         std::ffi::OsString::from(container_id),
         std::ffi::OsString::from("sh"),
         std::ffi::OsString::from("-c"),
-        std::ffi::OsString::from("command -v script && command -v bash"),
+        std::ffi::OsString::from("command -v bash"),
     ]);
     args
 }

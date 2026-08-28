@@ -110,41 +110,23 @@ fn docker_sandbox_run_args(starter: &DockerSandboxShellStarter) -> Vec<std::ffi:
 ///
 /// This attaches with plain `docker exec` rather than `devcontainer exec`;
 /// see the doc comment on [`crate::shell::ShellLaunchData::DevContainer`]
-/// for why. It also runs `-i` (no `-t`) with `bash` wrapped in `script`
-/// *inside* the container rather than the more obvious `docker exec -it
-/// ... bash`; see [`prepare_dev_container`] for why.
+/// for why.
 ///
-/// Without `-t`, our host pty would otherwise stay in cooked mode
-/// (`ICANON`+`ISIG`), which can buffer the `ETX` byte Warp sends for Ctrl-C
-/// or have the kernel convert it into a local `SIGINT` for `docker exec`
-/// itself, rather than reaching the remote shell. `spawn_command_in_pty`'s
-/// `disable_signal_generation` puts the pty in raw mode instead, matching
-/// what `-t` would otherwise do, so the byte is forwarded to the
-/// container's own pty, where `ISIG` (still enabled there) generates the
-/// signal for the remote foreground process instead.
-///
-/// Passes `script -E never`: `script`'s default `--echo=auto` decides
-/// whether to echo on the pty it allocates by inspecting *its own* stdin,
-/// which here is the plain pipe `docker exec -i` gives it rather than a
-/// real terminal, so `auto` cannot detect the missing tty and leaves echo
-/// on. `never` sets it explicitly instead of relying on that detection.
+/// Runs with `-it`, giving Docker its own pty allocation on the host-exec
+/// side: it forwards window-resize events (`SIGWINCH`) into the container
+/// automatically for the life of the session, and the container's own
+/// `ISIG` handles Ctrl-C without Warp needing to force raw mode on the host
+/// pty itself (see the `disable_signal_generation: false` passed to
+/// [`spawn_command_in_pty`] in [`spawn_dev_container`]).
 fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
     let mut args = vec![
         std::ffi::OsString::from("exec"),
-        std::ffi::OsString::from("-i"),
+        std::ffi::OsString::from("-it"),
     ];
     if let Some(remote_user) = &starter.remote_user {
         args.push(std::ffi::OsString::from("-u"));
         args.push(std::ffi::OsString::from(remote_user));
     }
-    // `script -c`'s command runs through the container's `/bin/sh`, so the
-    // init path needs shell quoting here even though the rest of these args
-    // are passed as literal argv entries to `docker exec` itself.
-    let init_path_quoted = format!(
-        "'{}'",
-        shell_escape_single_quotes(&starter.container_init_script_path(), ShellType::Bash)
-    );
-    let bash_cmd = format!("exec bash --rcfile {init_path_quoted} --noprofile");
     args.extend([
         std::ffi::OsString::from("-w"),
         std::ffi::OsString::from(&starter.remote_workspace_folder),
@@ -153,12 +135,16 @@ fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::
         std::ffi::OsString::from("-e"),
         std::ffi::OsString::from("COLORTERM=truecolor"),
         std::ffi::OsString::from(&starter.container_id),
-        std::ffi::OsString::from("script"),
-        std::ffi::OsString::from("-E"),
-        std::ffi::OsString::from("never"),
-        std::ffi::OsString::from("-qfec"),
-        std::ffi::OsString::from(bash_cmd),
-        std::ffi::OsString::from("/dev/null"),
+        std::ffi::OsString::from("bash"),
+        std::ffi::OsString::from("--rcfile"),
+        // Deliberately NOT shell-quoted: this is a literal `Command::arg()`
+        // element handed straight to `docker exec`'s argv, not a string a
+        // shell re-parses. Quoting it (as `docker_sandbox_run_args`
+        // correctly does for its own `-c <string>` shape) hands bash a path
+        // with literal quote characters that doesn't exist, so it silently
+        // skips `--rcfile` and falls back to its own default prompt.
+        std::ffi::OsString::from(starter.container_init_script_path()),
+        std::ffi::OsString::from("--noprofile"),
     ]);
     args
 }
@@ -1189,23 +1175,19 @@ fn spawn_dev_container(
         node_version_chip_enabled,
     );
 
-    spawn_command_in_pty(command, &size, close_fds, true)
+    // `false`, matching Docker sandbox and host-shell sessions: `-it` gives
+    // Docker its own host-side pty allocation, which already handles
+    // Ctrl-C via the container's own `ISIG`. Forcing raw mode here as well
+    // would fight that instead of helping it.
+    spawn_command_in_pty(command, &size, close_fds, false)
 }
 
 /// Builds the `Command` for a Dev Container PTY session: `docker exec`
 /// invocation with the `docker cp`'d init script and host-side environment
 /// variables.
 ///
-/// TODO(prototype): The *initial* size is set once, by [`prepare_dev_container`]
-/// (see its doc comment), but nothing after that: `docker exec -it` forwards
-/// live resizes from our outer pty automatically, the same as `docker run
-/// -it`/`docker attach` do, but [`dev_container_exec_args`] deliberately
-/// doesn't pass `-t` (see its doc comment), which forfeits that forwarding.
-/// `SIGWINCH` therefore never reaches the inner shell when the pane is
-/// resized after opening, so the container-side `bash` keeps using whatever
-/// size it started with. Fixing this needs an explicit resize channel (e.g.
-/// `docker exec -F /dev/pts/N stty rows R cols C` against the `script`-owned
-/// pty) rather than relying on Docker's implicit `-it` behavior.
+/// Resizes are forwarded automatically by `docker exec -it` for the life of
+/// the session: no explicit resize channel is needed.
 ///
 /// Does not perform any PTY-level setup; hand the returned `Command` to
 /// [`spawn_command_in_pty`].
@@ -1443,19 +1425,6 @@ async fn stage_and_secure_dev_container_file(
 /// `InitShell` hook, and the terminal model validates that hook's ID
 /// against the one registered for the session.
 ///
-/// `docker cp` (rather than a bind mount configured at `devcontainer up`
-/// time) is what lets [`dev_container_exec_args`] attach with plain `docker
-/// exec -i` instead of `docker exec -it`: `-it` relays pty bytes through an
-/// extra hop that unreliably drops the Warp handshake bash emits right
-/// after the rcfile finishes sourcing, leaving the pane stuck on "Starting
-/// bash..." (see #4460). Allocating the pty *inside* the container with
-/// `script` over a plain pipe doesn't lose that handshake.
-///
-/// This is also where the inner pty's window size gets set; see
-/// [`dev_container_init_script`] for why that's needed. `size` is the
-/// caller's own pane size (the new session's pane doesn't exist yet), which
-/// the new pane inherits.
-///
 /// Async because staging is several sequential `docker cp`/`exec` round
 /// trips; the caller (the `/devcontainer` preflight, before any pane or PTY
 /// thread exists) must run this off its own executor rather than block on
@@ -1468,7 +1437,6 @@ pub async fn prepare_dev_container(
     remote_user: Option<String>,
     sandbox_id: String,
     session_id: SessionId,
-    size: SizeInfo,
 ) -> Result<()> {
     // If `devcontainer up` didn't report a `remoteUser`, resolve whichever
     // user the real attach's unqualified `docker exec` (no `-u`) would
@@ -1478,7 +1446,7 @@ pub async fn prepare_dev_container(
         None => resolve_default_container_user(&docker_path, &container_id).await?,
     };
 
-    let init_script = dev_container_init_script(&sandbox_id, session_id, &size);
+    let init_script = dev_container_init_script(&sandbox_id, session_id);
     stage_and_secure_dev_container_file(
         &docker_path,
         &container_id,
@@ -1505,22 +1473,19 @@ pub async fn prepare_dev_container(
     Ok(())
 }
 
-/// Builds the Dev Container init script: an explicit `stty rows/columns`
-/// line (see [`prepare_dev_container`] for why that's needed), the normal
-/// shell init script (sends the `InitShell` hook), and finally a `source`
-/// of the full bootstrap script `prepare_dev_container` stages alongside it.
-///
-/// `stty rows/columns` runs before `raw_init_shell_script_for_shell`'s own
-/// content (which includes `stty raw`); window size and the raw-mode flags
-/// are independent termios settings, but setting size first means it's in
-/// place for the whole session from the very first line bash reads.
+/// Builds the Dev Container init script: the normal shell init script
+/// (sends the `InitShell` hook), then a `source` of the full bootstrap
+/// script `prepare_dev_container` stages alongside it. Window size isn't
+/// set here: `docker exec -it` sizes the container's pty from the pane's
+/// own pty and keeps it in sync on every resize, so there's no stale value
+/// to seed.
 ///
 /// Sourcing the bootstrap script here — rather than relying on Warp to type
 /// it into the pty once it sees the `InitShell` hook, as happens for local
 /// shells — means the entire bootstrap (`InitShell`, rcfile sourcing,
 /// `Bootstrapped`) runs as one `--rcfile` execution the container reads from
 /// disk, with nothing crossing the `docker exec` relay as typed input.
-fn dev_container_init_script(sandbox_id: &str, session_id: SessionId, size: &SizeInfo) -> String {
+fn dev_container_init_script(sandbox_id: &str, session_id: SessionId) -> String {
     let bootstrap_path_quoted = format!(
         "'{}'",
         shell_escape_single_quotes(
@@ -1529,9 +1494,7 @@ fn dev_container_init_script(sandbox_id: &str, session_id: SessionId, size: &Siz
         )
     );
     format!(
-        "command -p stty rows {} columns {}\n{}\nsource {bootstrap_path_quoted}\n",
-        size.rows(),
-        size.columns(),
+        "{}\nsource {bootstrap_path_quoted}\n",
         raw_init_shell_script_for_shell(ShellType::Bash, &ASSETS, session_id)
     )
 }
