@@ -850,24 +850,7 @@ impl AgentDriverRunner {
         task_id_str: String,
         ai_client: Arc<dyn AIClient>,
     ) -> anyhow::Result<Vec<GitCredential>> {
-        let workload_token = warp_isolation_platform::issue_workload_token(Some(
-            std::time::Duration::from_secs(5 * 60),
-        ))
-        .await?
-        .token;
-        // A forge that failed at startup is reported by the refresh loop
-        // instead; bootstrap only needs whatever credentials it can get, and
-        // the server already fails the call outright when none are available.
-        let response = ai_client
-            .get_task_git_credentials(task_id_str, workload_token)
-            .await?;
-        for host in &response.failed_hosts {
-            log::warn!(
-                "No {host} credential could be issued at startup; \
-                 operations against that forge will fail until a refresh succeeds"
-            );
-        }
-        Ok(response.credentials)
+        fetch_complete_task_git_credentials(task_id_str, ai_client).await
     }
 
     async fn bootstrap_git_credentials_for_task(
@@ -1942,6 +1925,45 @@ fn command_to_telemetry_event(command: &CliCommand) -> CliTelemetryEvent {
             RunnerCommand::Delete(_) => CliTelemetryEvent::RunnerDelete,
         },
     }
+}
+
+/// Fetch credentials for environment bootstrap. A fresh sandbox has no prior
+/// store to keep for a failed host, so this never opts into a partial refresh.
+/// A mixed success/failure result is treated as an error so clone does not run
+/// against an uncredentialed forge.
+async fn fetch_complete_task_git_credentials(
+    task_id_str: String,
+    ai_client: Arc<dyn AIClient>,
+) -> anyhow::Result<Vec<GitCredential>> {
+    let response = request_task_git_credentials(task_id_str, ai_client, false).await?;
+    credentials_from_complete_response(response)
+}
+
+fn credentials_from_complete_response(
+    response: crate::server::server_api::ai::TaskGitCredentialsResponse,
+) -> anyhow::Result<Vec<GitCredential>> {
+    if !response.failed_hosts.is_empty() {
+        anyhow::bail!(
+            "Git credentials were not issued for every applicable forge at startup ({}); \
+             refusing to prepare the environment without credentials for those hosts",
+            response.failed_hosts.join(", ")
+        );
+    }
+    Ok(response.credentials)
+}
+
+async fn request_task_git_credentials(
+    task_id_str: String,
+    ai_client: Arc<dyn AIClient>,
+    accepts_partial_refresh: bool,
+) -> anyhow::Result<crate::server::server_api::ai::TaskGitCredentialsResponse> {
+    let workload_token =
+        warp_isolation_platform::issue_workload_token(Some(std::time::Duration::from_secs(5 * 60)))
+            .await?
+            .token;
+    ai_client
+        .get_task_git_credentials(task_id_str, workload_token, accepts_partial_refresh)
+        .await
 }
 
 #[cfg(test)]

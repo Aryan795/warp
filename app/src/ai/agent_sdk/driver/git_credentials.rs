@@ -515,7 +515,7 @@ async fn try_refresh(task_id: &str, ai_client: &Arc<dyn AIClient>) -> Result<boo
             .token;
 
     let response = ai_client
-        .get_task_git_credentials(task_id.to_string(), workload_token)
+        .get_task_git_credentials(task_id.to_string(), workload_token, true)
         .await
         .context("Failed to fetch git credentials from server")?;
 
@@ -568,14 +568,14 @@ pub(crate) async fn refresh_loop(task_id: String, ai_client: Arc<dyn AIClient>) 
         loop {
             match try_refresh(&task_id, &ai_client).await {
                 Ok(true) => break,
-                // Some forges refreshed and others did not. The server
-                // reissues only what is still stale, so retrying costs nothing
-                // for the hosts that already succeeded.
+                // Some forges refreshed and others did not. Retry the same
+                // request so failed hosts get another attempt; the merge
+                // replaces any hosts that refresh again and leaves the rest.
                 Ok(false) if attempt < backoff_delays.len() => {
                     let delay = backoff_delays[attempt];
                     log::warn!(
                         "Git credentials refreshed for some forges but not others (attempt {}); \
-                         retrying the remaining ones in {}s",
+                         retrying so failed hosts get another attempt in {}s",
                         attempt + 1,
                         delay.as_secs()
                     );

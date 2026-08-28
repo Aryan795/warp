@@ -9,8 +9,10 @@ use warp_core::telemetry::TelemetryEvent;
 
 use super::{
     CommandAuthentication, command_authentication, command_requires_auth,
-    command_to_telemetry_event, reconcile_task_harness,
+    command_to_telemetry_event, credentials_from_complete_response, reconcile_task_harness,
 };
+use crate::ai::agent_sdk::driver::AgentDriverError;
+use crate::server::server_api::ai::{GitCredential, TaskGitCredentialsResponse};
 
 const TASK_ID: &str = "00000000-0000-0000-0000-000000000001";
 
@@ -215,4 +217,48 @@ fn run_message_watch_telemetry_defaults_to_unknown_harness() {
     )));
 
     assert_eq!(event.payload(), Some(json!({ "harness": "unknown" })));
+}
+
+fn github_credential() -> GitCredential {
+    GitCredential {
+        token: "github-token".to_string(),
+        username: None,
+        email: None,
+        host: "github.com".to_string(),
+    }
+}
+
+#[test]
+fn bootstrap_rejects_partial_credentials_before_environment_prep() {
+    let result = credentials_from_complete_response(TaskGitCredentialsResponse {
+        credentials: vec![github_credential()],
+        failed_hosts: vec!["gitlab.com".to_string()],
+    });
+    let Err(err) = result else {
+        panic!("a mixed success/failure result must fail bootstrap");
+    };
+
+    let mapped = AgentDriverError::SkillResolutionFailed(format!(
+        "Failed to fetch git credentials before skill resolution: {err:#}"
+    ));
+    assert!(mapped.to_string().contains("gitlab.com"));
+    assert!(
+        mapped
+            .to_string()
+            .contains("refusing to prepare the environment")
+    );
+}
+
+#[test]
+fn bootstrap_accepts_complete_credentials() {
+    let result = credentials_from_complete_response(TaskGitCredentialsResponse {
+        credentials: vec![github_credential()],
+        failed_hosts: vec![],
+    });
+    let Ok(credentials) = result else {
+        panic!("a complete response must proceed to credential configuration");
+    };
+
+    assert_eq!(credentials.len(), 1);
+    assert_eq!(credentials[0].host, "github.com");
 }

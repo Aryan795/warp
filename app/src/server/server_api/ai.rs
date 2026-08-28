@@ -1455,6 +1455,7 @@ pub trait AIClient: 'static + Send + Sync {
         &self,
         task_id: String,
         workload_token: String,
+        accepts_partial_refresh: bool,
     ) -> anyhow::Result<TaskGitCredentialsResponse, anyhow::Error>;
 
     async fn get_task_attachments(
@@ -2681,15 +2682,16 @@ impl AIClient for ServerApi {
         &self,
         task_id: String,
         workload_token: String,
+        accepts_partial_refresh: bool,
     ) -> anyhow::Result<TaskGitCredentialsResponse, anyhow::Error> {
         let variables = TaskGitCredentialsVariables {
             input: TaskGitCredentialsInput {
                 task_id: cynic::Id::new(task_id),
                 workload_token,
-                // The driver merges each fresh credential over its existing
-                // stores instead of rebuilding them, so one forge's bad minute
-                // no longer has to cost the other its refresh.
-                accepts_partial_refresh: Some(true),
+                // Bootstrap must not opt in: a fresh sandbox has no prior
+                // credential to keep for a failed host. The refresh loop does,
+                // so it can merge a partial list over stores that already exist.
+                accepts_partial_refresh: Some(accepts_partial_refresh),
             },
             request_context: get_request_context(),
         };
