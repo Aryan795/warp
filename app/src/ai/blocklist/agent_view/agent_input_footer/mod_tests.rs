@@ -1,6 +1,6 @@
 use chrono::Utc;
 use persistence::model::ConversationUsageMetadata;
-use warpui::{App, AppContext, EntityId, SingletonEntity, View};
+use warpui::{App, AppContext, EntityId, SingletonEntity, View, ViewHandle};
 
 use super::AgentInputFooter;
 use crate::ai::agent::api::ServerConversationToken;
@@ -9,13 +9,14 @@ use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::task::TaskPrincipalInfo;
 use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState};
 use crate::ai::blocklist::history_model::BlocklistAIHistoryModel;
+use crate::ai::blocklist::{InputConfig, InputType};
 use crate::auth::user::TEST_USER_UID;
 use crate::cloud_object::{Owner, Revision, ServerMetadata, ServerPermissions};
 use crate::features::FeatureFlag;
 use crate::server::ids::ServerId;
 use crate::terminal::cli_agent_sessions::{
-    CLIAgentInputState, CLIAgentSession, CLIAgentSessionContext, CLIAgentSessionStatus,
-    CLIAgentSessionsModel,
+    CLIAgentInputEntrypoint, CLIAgentInputState, CLIAgentSession, CLIAgentSessionContext,
+    CLIAgentSessionStatus, CLIAgentSessionsModel,
 };
 use crate::terminal::shared_session::{SharedSessionSource, SharedSessionStatus};
 use crate::terminal::{CLIAgent, TerminalView};
@@ -50,10 +51,21 @@ fn claude_cli_session() -> CLIAgentSession {
     }
 }
 
-fn register_claude_cli_session(view: &TerminalView, ctx: &mut warpui::ViewContext<TerminalView>) {
+fn open_claude_rich_input(view: &TerminalView, ctx: &mut warpui::ViewContext<TerminalView>) {
     let view_id = view.id();
     CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
         sessions.set_session(view_id, claude_cli_session(), ctx);
+        sessions.open_input(
+            view_id,
+            CLIAgentInputEntrypoint::CtrlG,
+            InputConfig {
+                input_type: InputType::AI,
+                is_locked: true,
+            },
+            false,
+            false,
+            ctx,
+        );
     });
 }
 
@@ -73,18 +85,54 @@ fn footer_indicator_kind(
 }
 
 fn assert_cli_footer_indicator(
-    view: &TerminalView,
-    app: &AppContext,
+    terminal: &ViewHandle<TerminalView>,
+    app: &App,
     expected: Option<CloudRoutingIndicatorKind>,
 ) {
-    let footer = view.input().as_ref(app).agent_input_footer().clone();
+    let input = terminal.read(app, |view, _| view.input().clone());
+    let footer = input.read(app, |input, _| input.agent_input_footer().clone());
     footer.read(app, |footer, app| {
         assert!(
-            footer.is_cli_agent_session_active(app),
-            "precondition: CLI rich-input footer path should be active"
+            footer.has_active_cli_agent_input_session(app),
+            "precondition: CLI rich input should be open so Input mounts the CLI footer"
         );
         assert_eq!(footer_indicator_kind(footer, app), expected);
-        let _ = footer.render(app);
+
+        let rendered_ids = footer.render(app).debug_child_view_ids();
+        let live_id = footer.live_session_indicator.id();
+        let new_id = footer.new_cloud_vm_indicator.id();
+        match expected {
+            Some(CloudRoutingIndicatorKind::LiveSession) => {
+                assert!(
+                    rendered_ids.contains(&live_id),
+                    "CLI footer render should include the live cloud indicator; child views={rendered_ids:?}"
+                );
+                assert!(
+                    !rendered_ids.contains(&new_id),
+                    "CLI footer render should omit the new-VM indicator; child views={rendered_ids:?}"
+                );
+            }
+            Some(CloudRoutingIndicatorKind::NewCloudVm) => {
+                assert!(
+                    rendered_ids.contains(&new_id),
+                    "CLI footer render should include the new-VM indicator; child views={rendered_ids:?}"
+                );
+                assert!(
+                    !rendered_ids.contains(&live_id),
+                    "CLI footer render should omit the live cloud indicator; child views={rendered_ids:?}"
+                );
+            }
+            None => {
+                assert!(
+                    !rendered_ids.contains(&live_id),
+                    "CLI footer render should omit the live cloud indicator; child views={rendered_ids:?}"
+                );
+                assert!(
+                    !rendered_ids.contains(&new_id),
+                    "CLI footer render should omit the new-VM indicator; child views={rendered_ids:?}"
+                );
+            }
+        }
     });
 }
 
@@ -194,12 +242,13 @@ fn seed_owned_disconnected_cloud_task(
 #[test]
 fn cli_footer_shows_live_indicator_for_cloud_third_party_session() {
     App::test((), |mut app| async move {
+        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
         initialize_app_for_terminal_view(&mut app);
         let terminal = add_window_with_terminal(&mut app, None);
         let task_id = ambient_task_id();
 
         terminal.update(&mut app, |view, ctx| {
-            register_claude_cli_session(view, ctx);
+            open_claude_rich_input(view, ctx);
             {
                 let mut model = view.model.lock();
                 model.set_shared_session_source(SharedSessionSource::ambient_agent(Some(
@@ -209,15 +258,18 @@ fn cli_footer_shows_live_indicator_for_cloud_third_party_session() {
             }
         });
 
-        terminal.read(&app, |view, app| {
-            assert_cli_footer_indicator(view, app, Some(CloudRoutingIndicatorKind::LiveSession));
-        });
+        assert_cli_footer_indicator(
+            &terminal,
+            &app,
+            Some(CloudRoutingIndicatorKind::LiveSession),
+        );
     });
 }
 
 #[test]
 fn cli_footer_shows_new_cloud_vm_indicator_for_disconnected_third_party_session() {
     App::test((), |mut app| async move {
+        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
         initialize_app_for_terminal_view(&mut app);
         let terminal = add_window_with_terminal(&mut app, None);
         let task_id = ambient_task_id();
@@ -230,7 +282,7 @@ fn cli_footer_shows_new_cloud_vm_indicator_for_disconnected_third_party_session(
         );
 
         terminal.update(&mut app, |view, ctx| {
-            register_claude_cli_session(view, ctx);
+            open_claude_rich_input(view, ctx);
             {
                 let mut model = view.model.lock();
                 model.set_shared_session_source(SharedSessionSource::ambient_agent(Some(
@@ -240,43 +292,39 @@ fn cli_footer_shows_new_cloud_vm_indicator_for_disconnected_third_party_session(
             }
         });
 
-        terminal.read(&app, |view, app| {
-            assert_cli_footer_indicator(view, app, Some(CloudRoutingIndicatorKind::NewCloudVm));
-        });
+        assert_cli_footer_indicator(&terminal, &app, Some(CloudRoutingIndicatorKind::NewCloudVm));
     });
 }
 
 #[test]
 fn cli_footer_omits_cloud_indicators_for_local_cli_session() {
     App::test((), |mut app| async move {
+        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
         initialize_app_for_terminal_view(&mut app);
         let terminal = add_window_with_terminal(&mut app, None);
 
         terminal.update(&mut app, |view, ctx| {
-            register_claude_cli_session(view, ctx);
+            open_claude_rich_input(view, ctx);
         });
 
-        terminal.read(&app, |view, app| {
-            assert_cli_footer_indicator(view, app, None);
-        });
+        assert_cli_footer_indicator(&terminal, &app, None);
     });
 }
 
 #[test]
 fn cli_footer_omits_live_indicator_for_shared_local_session_viewer() {
     App::test((), |mut app| async move {
+        let _cli_agent_flag = FeatureFlag::CLIAgentRichInput.override_enabled(true);
         initialize_app_for_terminal_view(&mut app);
         let terminal = add_window_with_terminal(&mut app, None);
 
         terminal.update(&mut app, |view, ctx| {
-            register_claude_cli_session(view, ctx);
+            open_claude_rich_input(view, ctx);
             view.model
                 .lock()
                 .set_shared_session_status(SharedSessionStatus::executor());
         });
 
-        terminal.read(&app, |view, app| {
-            assert_cli_footer_indicator(view, app, None);
-        });
+        assert_cli_footer_indicator(&terminal, &app, None);
     });
 }

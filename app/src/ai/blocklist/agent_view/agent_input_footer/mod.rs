@@ -1561,7 +1561,6 @@ impl AgentInputFooter {
         }
     }
 
-    /// Cloud live / new-VM chip selected from [`resolve_ai_query_routing`].
     fn cloud_routing_indicator_button(
         &self,
         terminal_model: &TerminalModel,
