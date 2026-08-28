@@ -48,6 +48,8 @@ pub(crate) mod ssh_tmux_deprecation_banner;
 mod tab_metadata;
 #[cfg(any(test, feature = "integration_tests"))]
 mod testing;
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+pub(crate) mod tmux;
 mod tooltips;
 pub mod use_agent_footer;
 mod zero_state_block;
@@ -21873,6 +21875,16 @@ impl TerminalView {
                     return;
                 }
                 self.create_and_push_docker_sandbox(ctx);
+            }
+            InputEvent::CreateTmuxWorkspace => {
+                if !FeatureFlag::TmuxControlPrototype.is_enabled() {
+                    log::warn!("tmux control prototype feature flag is disabled");
+                    return;
+                }
+                #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+                self.create_and_push_tmux_workspace(ctx);
+                #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+                log::warn!("tmux control prototype requires a local Unix tty");
             }
             InputEvent::ExitCloudModeAndStartLocalAgent { initial_prompt } => {
                 let origin = AgentViewEntryOrigin::Input {

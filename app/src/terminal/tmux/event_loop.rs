@@ -1,0 +1,439 @@
+use std::borrow::Cow;
+use std::collections::VecDeque;
+use std::io::{self, ErrorKind, Read, Write};
+use std::ops::DerefMut;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+
+use parking_lot::{FairMutex, FairMutexGuard, Mutex};
+use warp_terminal::shell::ShellType;
+
+use crate::terminal::TerminalModel;
+use crate::terminal::event_listener::ChannelEventListener;
+use crate::terminal::local_tty::event_loop::CHANNEL_TOKEN;
+use crate::terminal::local_tty::mio_channel::{self, Receiver};
+use crate::terminal::local_tty::{self, EventedPty};
+use crate::terminal::model::ansi;
+use crate::terminal::tmux::pane_bytes::{feed_control_bytes, notify_exit, sink_writer};
+use crate::terminal::tmux::parser::PaneId;
+use crate::terminal::tmux::protocol::{
+    kill_session_command, refresh_client_command, send_keys_commands, zsh_init_bytes,
+};
+use crate::terminal::writeable_pty::Message;
+use crate::terminal::writeable_pty::pty_controller::{EventLoopSendError, EventLoopSender};
+
+const READ_BUFFER_SIZE: usize = 0x4_0000;
+const MAX_LOCKED_READ: usize = 0x1_0000;
+
+/// Shared between the UI-thread sender and the control-client reader thread.
+pub struct SharedControlState {
+    pane_id: Mutex<Option<PaneId>>,
+    pending_pane_writes: Mutex<Vec<Cow<'static, [u8]>>>,
+}
+
+impl SharedControlState {
+    pub fn new() -> Self {
+        Self {
+            pane_id: Mutex::new(None),
+            pending_pane_writes: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+/// Converts pane-bound PTY writes into control-mode commands on the tmux client stream.
+#[derive(Clone)]
+pub struct TmuxControlSender {
+    inner: mio_channel::Sender<Message>,
+    shared: Arc<SharedControlState>,
+}
+
+impl TmuxControlSender {
+    pub fn new(inner: mio_channel::Sender<Message>, shared: Arc<SharedControlState>) -> Self {
+        Self { inner, shared }
+    }
+
+    fn send_inner(&self, message: Message) -> Result<(), EventLoopSendError> {
+        self.inner
+            .send(message)
+            .map_err(|_| EventLoopSendError::Disconnected)
+    }
+}
+
+impl EventLoopSender for TmuxControlSender {
+    fn send(&self, message: Message) -> Result<(), EventLoopSendError> {
+        match message {
+            Message::Input(bytes) => {
+                let encoded = {
+                    let pane = self.shared.pane_id.lock();
+                    if let Some(pane_id) = pane.as_ref() {
+                        send_keys_commands(pane_id, &bytes)
+                            .into_iter()
+                            .map(|command| Cow::Owned(command.into_bytes()))
+                            .collect::<Vec<_>>()
+                    } else {
+                        self.shared.pending_pane_writes.lock().push(bytes);
+                        Vec::new()
+                    }
+                };
+                for command in encoded {
+                    self.send_inner(Message::Input(command))?;
+                }
+                Ok(())
+            }
+            Message::Resize(size) => {
+                let command = refresh_client_command(size.columns(), size.rows());
+                self.send_inner(Message::Input(Cow::Owned(command.into_bytes())))
+            }
+            Message::Shutdown => {
+                let _ = self.send_inner(Message::Input(Cow::Borrowed(
+                    kill_session_command().as_bytes(),
+                )));
+                self.send_inner(Message::Shutdown)
+            }
+            other => self.send_inner(other),
+        }
+    }
+}
+
+struct Writing {
+    source: Cow<'static, [u8]>,
+    written: usize,
+}
+
+impl Writing {
+    fn new(source: Cow<'static, [u8]>) -> Self {
+        Self { source, written: 0 }
+    }
+
+    fn advance(&mut self, n: usize) {
+        self.written += n;
+    }
+
+    fn remaining_bytes(&self) -> &[u8] {
+        &self.source[self.written..]
+    }
+
+    fn finished(&self) -> bool {
+        self.written >= self.source.len()
+    }
+}
+
+struct LoopState {
+    write_list: VecDeque<Cow<'static, [u8]>>,
+    writing: Option<Writing>,
+    control_parser: super::parser::ControlModeParser,
+    ansi_parser: ansi::Processor,
+    tracked_pane: Option<PaneId>,
+}
+
+impl LoopState {
+    fn new() -> Self {
+        Self {
+            write_list: VecDeque::new(),
+            writing: None,
+            control_parser: super::parser::ControlModeParser::new(),
+            ansi_parser: ansi::Processor::new(),
+            tracked_pane: None,
+        }
+    }
+
+    fn ensure_next(&mut self) {
+        if self.writing.is_none() {
+            self.writing = self.write_list.pop_front().map(Writing::new);
+        }
+    }
+
+    fn needs_write(&self) -> bool {
+        self.writing.is_some() || !self.write_list.is_empty()
+    }
+}
+
+enum ChannelResult {
+    Continue,
+    TerminateLoop { child_exited: bool },
+}
+
+/// Control-client PTY loop: parse tmux -CC off the client stream and feed only decoded pane
+/// bytes into the TerminalModel.
+pub struct ControlClientEventLoop<P: EventedPty> {
+    poll: mio::Poll,
+    pty: P,
+    rx: Receiver<Message>,
+    terminal: Arc<FairMutex<TerminalModel>>,
+    event_listener: ChannelEventListener,
+    shared: Arc<SharedControlState>,
+    zsh_init: Option<(String, ShellType)>,
+}
+
+impl<P> ControlClientEventLoop<P>
+where
+    P: EventedPty + Send + 'static,
+{
+    pub fn new(
+        terminal: Arc<FairMutex<TerminalModel>>,
+        event_listener: ChannelEventListener,
+        pty: P,
+        rx: Receiver<Message>,
+        shared: Arc<SharedControlState>,
+        zsh_init: Option<(String, ShellType)>,
+    ) -> Self {
+        Self {
+            poll: mio::Poll::new().expect("create mio Poll"),
+            pty,
+            rx,
+            terminal,
+            event_listener,
+            shared,
+            zsh_init,
+        }
+    }
+
+    pub fn spawn(self) -> JoinHandle<()> {
+        thread::Builder::new()
+            .name("tmux control-mode reader".into())
+            .spawn(move || self.run())
+            .expect("spawn tmux control-mode reader")
+    }
+
+    fn run(mut self) {
+        let mut state = LoopState::new();
+        let mut buf = [0u8; READ_BUFFER_SIZE];
+        let mut can_read = false;
+        let mut can_write = false;
+
+        self.poll
+            .registry()
+            .register(&mut self.rx, CHANNEL_TOKEN, mio::Interest::READABLE)
+            .unwrap();
+        self.pty
+            .register(
+                &self.poll,
+                mio::Interest::READABLE | mio::Interest::WRITABLE,
+            )
+            .unwrap();
+
+        let mut events = mio::Events::with_capacity(1024);
+        let mut child_exited = false;
+
+        'event_loop: loop {
+            events.clear();
+            if let Err(err) = self.poll.poll(&mut events, None) {
+                match err.kind() {
+                    ErrorKind::Interrupted => continue,
+                    _ => panic!("tmux control-mode event loop polling error: {err:?}"),
+                }
+            }
+
+            for event in events.iter() {
+                match event.token() {
+                    token if token == CHANNEL_TOKEN => match self.drain_recv_channel(&mut state) {
+                        ChannelResult::Continue => {}
+                        ChannelResult::TerminateLoop {
+                            child_exited: exited,
+                        } => {
+                            if exited {
+                                notify_exit(&mut *self.terminal.lock());
+                                child_exited = true;
+                                self.event_listener.send_wakeup_event();
+                            }
+                            break 'event_loop;
+                        }
+                    },
+                    token if token == self.pty.child_event_token() => {
+                        if let Some(local_tty::ChildEvent::Exited) = self.pty.next_child_event() {
+                            notify_exit(&mut *self.terminal.lock());
+                            child_exited = true;
+                            self.event_listener.send_wakeup_event();
+                            break 'event_loop;
+                        }
+                    }
+                    token if token == self.pty.read_token() || token == self.pty.write_token() => {
+                        if event.is_read_closed() || event.is_write_closed() {
+                            continue;
+                        }
+                        if event.is_readable() {
+                            can_read = true;
+                        }
+                        if event.is_writable() {
+                            can_write = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            while can_read || (state.needs_write() && can_write) {
+                if can_read {
+                    match self.pty_read(&mut state, &mut buf, &mut can_read) {
+                        Ok(()) => {}
+                        Err(err) => {
+                            if err.kind() == ErrorKind::Other {
+                                continue;
+                            }
+                            log::error!("Error reading tmux control client: {err}");
+                            break 'event_loop;
+                        }
+                    }
+                }
+                if state.needs_write() && can_write {
+                    if let Err(err) = self.pty_write(&mut state, &mut can_write) {
+                        log::error!("Error writing tmux control client: {err}");
+                        break 'event_loop;
+                    }
+                }
+            }
+        }
+
+        let _ = child_exited;
+        let _ = self.pty.kill();
+    }
+
+    fn drain_recv_channel(&mut self, state: &mut LoopState) -> ChannelResult {
+        while let Ok(msg) = self.rx.try_recv() {
+            match msg {
+                Message::Input(input) => state.write_list.push_back(input),
+                Message::Shutdown => {
+                    return ChannelResult::TerminateLoop {
+                        child_exited: false,
+                    };
+                }
+                Message::Resize(size) => self.pty.on_resize(&size),
+                Message::ChildExited => return ChannelResult::TerminateLoop { child_exited: true },
+            }
+        }
+        ChannelResult::Continue
+    }
+
+    fn pty_read(
+        &mut self,
+        state: &mut LoopState,
+        buf: &mut [u8],
+        can_read: &mut bool,
+    ) -> io::Result<()> {
+        let mut bytes_in_buffer = 0;
+        let mut bytes_processed = 0;
+        let mut terminal = None;
+
+        loop {
+            match self.pty.reader().read(&mut buf[bytes_in_buffer..]) {
+                Ok(0) if bytes_in_buffer == 0 => {
+                    *can_read = false;
+                    break;
+                }
+                Ok(got) => bytes_in_buffer += got,
+                Err(err) => match err.kind() {
+                    ErrorKind::Interrupted | ErrorKind::WouldBlock => {
+                        if err.kind() == ErrorKind::WouldBlock {
+                            *can_read = false;
+                        }
+                        if bytes_in_buffer == 0 {
+                            break;
+                        }
+                    }
+                    _ => return Err(err),
+                },
+            }
+
+            let terminal = match &mut terminal {
+                Some(terminal) => terminal,
+                None => terminal.insert(match self.terminal.try_lock() {
+                    None if bytes_in_buffer >= READ_BUFFER_SIZE => self.terminal.lock(),
+                    None => continue,
+                    Some(terminal) => terminal,
+                }),
+            };
+
+            let mut writer = sink_writer();
+            let feed = feed_control_bytes(
+                &mut state.control_parser,
+                &mut state.ansi_parser,
+                terminal.deref_mut(),
+                &mut writer,
+                &mut state.tracked_pane,
+                &buf[..bytes_in_buffer],
+            );
+            if feed.entered_control_mode {
+                log::info!("tmux control mode entered");
+            }
+            if feed.exited {
+                notify_exit(terminal.deref_mut());
+            }
+            Self::maybe_bind_pane(&self.shared, &mut self.zsh_init, state);
+
+            bytes_processed += bytes_in_buffer;
+            bytes_in_buffer = 0;
+            if bytes_processed >= MAX_LOCKED_READ {
+                break;
+            }
+            FairMutexGuard::bump(terminal);
+        }
+
+        if bytes_processed > 0 {
+            self.event_listener.send_wakeup_event();
+        }
+        Ok(())
+    }
+
+    fn maybe_bind_pane(
+        shared: &SharedControlState,
+        zsh_init: &mut Option<(String, ShellType)>,
+        state: &mut LoopState,
+    ) {
+        let Some(pane_id) = state.tracked_pane.clone() else {
+            return;
+        };
+        let mut stored = shared.pane_id.lock();
+        if stored.is_some() {
+            return;
+        }
+        *stored = Some(pane_id.clone());
+        drop(stored);
+
+        let pending = std::mem::take(&mut *shared.pending_pane_writes.lock());
+        let mut to_send = Vec::new();
+        if let Some((init_script, shell_type)) = zsh_init.take() {
+            to_send.push(zsh_init_bytes(&init_script, shell_type));
+        }
+        to_send.extend(pending.into_iter().map(|bytes| bytes.into_owned()));
+        for bytes in to_send {
+            for command in send_keys_commands(&pane_id, &bytes) {
+                state.write_list.push_back(Cow::Owned(command.into_bytes()));
+            }
+        }
+    }
+
+    fn pty_write(&mut self, state: &mut LoopState, can_write: &mut bool) -> io::Result<()> {
+        state.ensure_next();
+        'write_many: while let Some(mut current) = state.writing.take() {
+            loop {
+                match self.pty.writer().write(current.remaining_bytes()) {
+                    Ok(0) => {
+                        state.writing = Some(current);
+                        *can_write = false;
+                        break 'write_many;
+                    }
+                    Ok(n) => {
+                        current.advance(n);
+                        if current.finished() {
+                            state.writing = state.write_list.pop_front().map(Writing::new);
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        state.writing = Some(current);
+                        match err.kind() {
+                            ErrorKind::Interrupted | ErrorKind::WouldBlock => {
+                                if err.kind() == ErrorKind::WouldBlock {
+                                    *can_write = false;
+                                }
+                                break 'write_many;
+                            }
+                            _ => return Err(err),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}

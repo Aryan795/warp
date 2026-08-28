@@ -228,6 +228,18 @@ pub const CREATE_DOCKER_SANDBOX: StaticCommand = StaticCommand {
     argument: None,
 };
 
+pub const CREATE_TMUX_WORKSPACE: StaticCommand = StaticCommand {
+    name: "/tmux",
+    description: "Open a Warp-managed tmux control-mode workspace (prototype)",
+    kind: SlashCommandKind::CreateTmuxWorkspace,
+    supported_surfaces: SlashCommandSurfaces::GuiOnly {
+        icon_path: "bundled/svg/terminal.svg",
+    },
+    availability: Availability::LOCAL,
+    auto_enter_ai_mode: false,
+    argument: None,
+};
+
 pub static CREATE_NEW_PROJECT: LazyLock<StaticCommand> = LazyLock::new(|| StaticCommand {
     name: "/create-new-project",
     description: "Have Oz walk you through creating a new coding project",
@@ -1015,6 +1027,10 @@ fn all_commands_for_all_surfaces() -> Vec<StaticCommand> {
 
     if FeatureFlag::LocalDockerSandbox.is_enabled() {
         commands.push(CREATE_DOCKER_SANDBOX);
+    }
+
+    if FeatureFlag::TmuxControlPrototype.is_enabled() {
+        commands.push(CREATE_TMUX_WORKSPACE);
     }
 
     if FeatureFlag::CreatingSharedSessions.is_enabled()
