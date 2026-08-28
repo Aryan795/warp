@@ -352,37 +352,67 @@ fn unregister_dedicated_server(socket: &Path) {
 
 /// Last-tab close on Linux quits the app without dropping pane managers.
 pub fn schedule_kill_registered_dedicated_servers() {
-    let sockets: Vec<PathBuf> = lock_dedicated_sockets().drain().collect();
-    rewrite_registry_list(&HashSet::new());
-    for socket in sockets {
-        schedule_kill_dedicated_server(socket);
+    #[cfg(unix)]
+    {
+        if ensure_app_exit_reaper() {
+            return;
+        }
+        let sockets: Vec<PathBuf> = lock_dedicated_sockets().iter().cloned().collect();
+        for socket in sockets {
+            schedule_kill_dedicated_server(socket);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let sockets: Vec<PathBuf> = lock_dedicated_sockets().drain().collect();
+        rewrite_registry_list(&HashSet::new());
+        for socket in sockets {
+            schedule_kill_dedicated_server(socket);
+        }
     }
 }
 
-fn ensure_app_exit_reaper() {
+fn ensure_app_exit_reaper() -> bool {
     #[cfg(unix)]
     {
-        let mut started = app_exit_reaper_started().lock();
-        if *started {
-            return;
-        }
-        let Some(tmux_path) = resolve_tmux_binary() else {
-            return;
-        };
-        let list = registry_list_path();
-        if spawn_app_exit_reaper(&list, &tmux_path) {
-            *started = true;
-        }
+        ensure_app_exit_reaper_with(resolve_tmux_binary().as_deref())
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+#[cfg(unix)]
+fn ensure_app_exit_reaper_with(tmux_path: Option<&Path>) -> bool {
+    let mut started = app_exit_reaper_started().lock();
+    if *started {
+        return true;
+    }
+    let Some(tmux_path) = tmux_path else {
+        return false;
+    };
+    if spawn_app_exit_reaper(&registry_list_path(), tmux_path) {
+        *started = true;
+        true
+    } else {
+        false
     }
 }
 
 /// Kill the dedicated server without blocking the caller.
 pub fn schedule_kill_dedicated_server(socket: PathBuf) {
-    unregister_dedicated_server(&socket);
     #[cfg(unix)]
-    spawn_detached_kill_helper(resolve_tmux_binary().as_deref(), &socket);
+    {
+        if spawn_detached_kill_helper(resolve_tmux_binary().as_deref(), &socket) {
+            unregister_dedicated_server(&socket);
+        }
+    }
     #[cfg(not(unix))]
-    spawn_kill_dedicated_server_thread(socket);
+    {
+        unregister_dedicated_server(&socket);
+        spawn_kill_dedicated_server_thread(socket);
+    }
 }
 
 #[cfg(not(unix))]
@@ -439,16 +469,16 @@ fn spawn_app_exit_reaper(list: &Path, tmux_path: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn spawn_detached_kill_helper(tmux_path: Option<&Path>, socket: &Path) {
+fn spawn_detached_kill_helper(tmux_path: Option<&Path>, socket: &Path) -> bool {
     let Some(tmux_path) = tmux_path else {
         log::error!(
             "leaving tmux socket {} in place: tmux binary not found",
             socket.display()
         );
-        return;
+        return false;
     };
     let config = socket.with_extension("conf");
-    if !spawn_setsid_sh(
+    let spawned = spawn_setsid_sh(
         DETACHED_KILL_BODY,
         "tmux-control-prototype-kill-server",
         &[
@@ -456,12 +486,14 @@ fn spawn_detached_kill_helper(tmux_path: Option<&Path>, socket: &Path) {
             socket.as_os_str(),
             config.as_os_str(),
         ],
-    ) {
+    );
+    if !spawned {
         log::error!(
             "failed to spawn tmux kill-server helper for {}",
             socket.display()
         );
     }
+    spawned
 }
 
 #[cfg(unix)]
@@ -518,11 +550,6 @@ fn registered_dedicated_server_count() -> usize {
 #[cfg(test)]
 fn app_exit_reaper_has_started() -> bool {
     *app_exit_reaper_started().lock()
-}
-
-#[cfg(test)]
-fn reset_app_exit_reaper_started() {
-    *app_exit_reaper_started().lock() = false;
 }
 
 fn try_kill_dedicated_server(

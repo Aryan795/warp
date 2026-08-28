@@ -258,7 +258,11 @@ fn register_then_kill_does_not_accumulate_tracked_sockets() {
     for socket in &sockets {
         schedule_kill_dedicated_server(socket.clone());
     }
-    assert_eq!(super::registered_dedicated_server_count(), before);
+    if super::resolve_tmux_binary().is_some() {
+        assert_eq!(super::registered_dedicated_server_count(), before);
+    } else {
+        assert_eq!(super::registered_dedicated_server_count(), before + 3);
+    }
     for socket in sockets {
         let _ = std::fs::remove_file(socket);
     }
@@ -335,22 +339,35 @@ fn app_exit_reaper_script_kills_listed_sockets_after_stdin_eof() {
 #[test]
 fn spawn_app_exit_reaper_marks_started_only_on_success() {
     let _guard = super::registry_test_lock();
-    super::reset_app_exit_reaper_started();
+    if super::app_exit_reaper_has_started() {
+        assert!(super::ensure_app_exit_reaper_with(None));
+        return;
+    }
+    assert!(!super::ensure_app_exit_reaper_with(None));
     assert!(!super::app_exit_reaper_has_started());
     let Some(tmux_path) = super::resolve_tmux_binary() else {
         return;
     };
-    let list = unique_temp_path("warp-tmux-started.list");
-    std::fs::write(&list, b"").expect("write empty list");
-    assert!(super::spawn_app_exit_reaper(&list, &tmux_path));
-    super::reset_app_exit_reaper_started();
-    assert!(!super::app_exit_reaper_has_started());
-    let socket = write_placeholder_socket();
-    super::register_dedicated_server(socket.clone());
+    assert!(super::ensure_app_exit_reaper_with(Some(&tmux_path)));
     assert!(super::app_exit_reaper_has_started());
-    super::schedule_kill_dedicated_server(socket.clone());
+}
+
+#[cfg(unix)]
+#[test]
+fn last_tab_exit_does_not_drop_sockets_before_cleanup_is_secured() {
+    let _guard = super::registry_test_lock();
+    let before = super::registered_dedicated_server_count();
+    let socket = write_placeholder_socket();
+    register_dedicated_server(socket.clone());
+    assert_eq!(super::registered_dedicated_server_count(), before + 1);
+    assert!(!super::spawn_detached_kill_helper(None, &socket));
+    assert_eq!(super::registered_dedicated_server_count(), before + 1);
+    super::schedule_kill_registered_dedicated_servers();
+    assert_eq!(super::registered_dedicated_server_count(), before + 1);
+    let list = std::fs::read_to_string(super::registry_list_path()).expect("read registry list");
+    assert!(list.contains(&socket.to_string_lossy().into_owned()));
+    schedule_kill_dedicated_server(socket.clone());
     let _ = std::fs::remove_file(&socket);
-    let _ = std::fs::remove_file(&list);
 }
 
 #[test]
