@@ -1247,7 +1247,7 @@ fn user_interactive_only_bundled_skills_are_omitted_from_cloud_listings() {
         assert!(!local_ids.contains("agent-add-mcp"));
 
         handle.update(&mut app, |manager, _| {
-            manager.set_cloud_environment(true);
+            manager.set_cloud_maa_listing(true);
         });
         let cloud_ids = handle.read(&app, |manager, ctx| {
             bundled_skill_ids(&manager.get_skills_for_working_directory(None, ctx))

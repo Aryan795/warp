@@ -52,6 +52,10 @@ pub struct SkillManager {
     /// environment with configured repos is active, so the agent sees every
     /// skill from every cloned repo.
     is_cloud_environment: bool,
+    /// When true, user-interactive-only bundled skills are omitted from listings.
+    /// Distinct from [`Self::is_cloud_environment`]: Oz cloud MAA runs enable this even
+    /// when no environment or global skill repos were loaded.
+    is_cloud_maa_listing: bool,
     #[allow(dead_code)]
     skill_watcher: ModelHandle<SkillWatcher>, // Can't remove this or it'll get cleaned up after new()
 }
@@ -84,6 +88,7 @@ impl SkillManager {
             bundled_skills: BundledSkills::default(),
             remote_home_directories: HashMap::new(),
             is_cloud_environment: false,
+            is_cloud_maa_listing: false,
             skill_watcher,
         }
     }
@@ -92,6 +97,10 @@ impl SkillManager {
     /// directory skills to be in scope regardless of the current working directory.
     pub fn set_cloud_environment(&mut self, value: bool) {
         self.is_cloud_environment = value;
+    }
+
+    pub fn set_cloud_maa_listing(&mut self, value: bool) {
+        self.is_cloud_maa_listing = value;
     }
 
     /// Returns skills available for the given working directory.
@@ -201,7 +210,7 @@ impl SkillManager {
                     .active_descriptors(path_origin, ctx)
                     .into_iter()
                     .filter(|skill| {
-                        include_bundled_skill_in_listing(self.is_cloud_environment, skill)
+                        include_bundled_skill_in_listing(self.is_cloud_maa_listing, skill)
                     }),
             );
         }
@@ -684,9 +693,9 @@ impl Entity for SkillManager {
 
 impl SingletonEntity for SkillManager {}
 
-fn include_bundled_skill_in_listing(is_cloud_environment: bool, skill: &SkillDescriptor) -> bool {
+fn include_bundled_skill_in_listing(is_cloud_maa_listing: bool, skill: &SkillDescriptor) -> bool {
     match &skill.reference {
-        SkillReference::BundledSkillId(id) if is_cloud_environment => {
+        SkillReference::BundledSkillId(id) if is_cloud_maa_listing => {
             !is_user_interactive_only_bundled_skill(id)
         }
         SkillReference::BundledSkillId(_) | SkillReference::Path(_) => true,
