@@ -1,8 +1,7 @@
 use chrono::Utc;
 use persistence::model::ConversationUsageMetadata;
-use warpui::{App, AppContext, EntityId, SingletonEntity, View, ViewHandle};
+use warpui::{App, EntityId, SingletonEntity, View, ViewHandle};
 
-use super::AgentInputFooter;
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{AIAgentHarness, ServerAIConversationMetadata};
 use crate::ai::agent_conversations_model::AgentConversationsModel;
@@ -69,21 +68,6 @@ fn open_claude_rich_input(view: &TerminalView, ctx: &mut warpui::ViewContext<Ter
     });
 }
 
-fn footer_indicator_kind(
-    footer: &AgentInputFooter,
-    app: &AppContext,
-) -> Option<CloudRoutingIndicatorKind> {
-    let terminal_model = footer.terminal_model.lock();
-    let button = footer.cloud_routing_indicator_button(&terminal_model, app)?;
-    if std::ptr::eq(button, &footer.live_session_indicator) {
-        Some(CloudRoutingIndicatorKind::LiveSession)
-    } else if std::ptr::eq(button, &footer.new_cloud_vm_indicator) {
-        Some(CloudRoutingIndicatorKind::NewCloudVm)
-    } else {
-        panic!("cloud routing indicator returned an unexpected button");
-    }
-}
-
 fn assert_cli_footer_indicator(
     terminal: &ViewHandle<TerminalView>,
     app: &App,
@@ -96,7 +80,6 @@ fn assert_cli_footer_indicator(
             footer.has_active_cli_agent_input_session(app),
             "precondition: CLI rich input should be open so Input mounts the CLI footer"
         );
-        assert_eq!(footer_indicator_kind(footer, app), expected);
 
         let rendered_ids = footer.render(app).debug_child_view_ids();
         let live_id = footer.live_session_indicator.id();
