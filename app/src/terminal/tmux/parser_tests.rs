@@ -72,6 +72,10 @@ fn begin_end_command_reply_is_not_pane_output() {
                 time: 1,
                 number: 2,
                 error: false,
+                payload: vec![
+                    "%output %0 should-not-leak".into(),
+                    "live-reply-line".into()
+                ],
             },
             ControlEvent::PaneOutput {
                 pane_id: PaneId::from("%0"),
@@ -94,6 +98,7 @@ fn error_ends_command_reply() {
                 time: 9,
                 number: 8,
                 error: true,
+                payload: vec!["nope".into()],
             },
         ]
     );
@@ -163,11 +168,65 @@ fn exit_with_and_without_reason() {
 }
 
 #[test]
+fn command_reply_payload_is_retained_on_end() {
+    let mut parser = ControlModeParser::new();
+    let events = enter_and_push(&mut parser, b"%begin 1 2\n%1\n%end 1 2\n");
+    assert_eq!(
+        events,
+        vec![
+            ControlEvent::EnteredControlMode,
+            ControlEvent::CommandBegin { time: 1, number: 2 },
+            ControlEvent::CommandEnd {
+                time: 1,
+                number: 2,
+                error: false,
+                payload: vec!["%1".into()],
+            },
+        ]
+    );
+}
+
+#[test]
+fn layout_and_window_notifications_are_parsed() {
+    use super::WindowId;
+    let mut parser = ControlModeParser::new();
+    let events = enter_and_push(
+        &mut parser,
+        b"%window-add @1\n%layout-change @1 1x1,0,0,0 1x1,0,0,0 *\n%session-window-changed $1 @1\n%window-pane-changed @1 %2\n%window-close @1\n",
+    );
+    assert_eq!(
+        events,
+        vec![
+            ControlEvent::EnteredControlMode,
+            ControlEvent::WindowAdd {
+                window_id: WindowId::from("@1"),
+            },
+            ControlEvent::LayoutChange {
+                window_id: WindowId::from("@1"),
+                layout: "1x1,0,0,0".into(),
+                visible_layout: Some("1x1,0,0,0".into()),
+                flags: Some("*".into()),
+            },
+            ControlEvent::SessionWindowChanged {
+                window_id: WindowId::from("@1"),
+            },
+            ControlEvent::WindowPaneChanged {
+                window_id: WindowId::from("@1"),
+                pane_id: PaneId::from("%2"),
+            },
+            ControlEvent::WindowClose {
+                window_id: WindowId::from("@1"),
+            },
+        ]
+    );
+}
+
+#[test]
 fn unknown_notifications_are_dropped() {
     let mut parser = ControlModeParser::new();
     let events = enter_and_push(
         &mut parser,
-        b"%session-window-changed @1\n%window-add @1\n%layout-change @1\n",
+        b"%sessions-changed\n%client-session-changed /dev/pts/0 $1\n",
     );
     assert_eq!(events, vec![ControlEvent::EnteredControlMode]);
 }

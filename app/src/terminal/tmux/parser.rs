@@ -22,15 +22,67 @@ impl From<&str> for PaneId {
     }
 }
 
+/// Identity of a tmux window as reported by control mode (`@0`, `@1`, ...).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WindowId(String);
+
+impl WindowId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for WindowId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
 /// Parsed control-mode notifications. Protocol chatter that is not pane output is either
 /// represented here or dropped; it is never treated as VT bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlEvent {
     EnteredControlMode,
-    CommandBegin { time: u64, number: u64 },
-    CommandEnd { time: u64, number: u64, error: bool },
-    PaneOutput { pane_id: PaneId, bytes: Vec<u8> },
-    Exit { reason: Option<String> },
+    CommandBegin {
+        time: u64,
+        number: u64,
+    },
+    CommandEnd {
+        time: u64,
+        number: u64,
+        error: bool,
+        payload: Vec<String>,
+    },
+    PaneOutput {
+        pane_id: PaneId,
+        bytes: Vec<u8>,
+    },
+    LayoutChange {
+        window_id: WindowId,
+        layout: String,
+        visible_layout: Option<String>,
+        flags: Option<String>,
+    },
+    WindowAdd {
+        window_id: WindowId,
+    },
+    WindowClose {
+        window_id: WindowId,
+    },
+    WindowRenamed {
+        window_id: WindowId,
+        name: String,
+    },
+    SessionWindowChanged {
+        window_id: WindowId,
+    },
+    WindowPaneChanged {
+        window_id: WindowId,
+        pane_id: PaneId,
+    },
+    Exit {
+        reason: Option<String>,
+    },
 }
 
 enum State {
@@ -40,6 +92,7 @@ enum State {
     InControlMode {
         line: Vec<u8>,
         in_command_reply: bool,
+        reply_payload: Vec<String>,
     },
 }
 
@@ -78,6 +131,7 @@ impl ControlModeParser {
                     self.state = State::InControlMode {
                         line: remainder,
                         in_command_reply: false,
+                        reply_payload: Vec::new(),
                     };
                     events.push(ControlEvent::EnteredControlMode);
                     events.extend(self.drain_control_lines());
@@ -99,6 +153,7 @@ impl ControlModeParser {
         let State::InControlMode {
             line,
             in_command_reply,
+            reply_payload,
         } = &mut self.state
         else {
             return Vec::new();
@@ -114,7 +169,7 @@ impl ControlModeParser {
             if raw_line.last() == Some(&b'\r') {
                 raw_line.pop();
             }
-            if let Some(event) = parse_control_line(&raw_line, in_command_reply) {
+            if let Some(event) = parse_control_line(&raw_line, in_command_reply, reply_payload) {
                 events.push(event);
             }
         }
@@ -122,7 +177,11 @@ impl ControlModeParser {
     }
 }
 
-fn parse_control_line(line: &[u8], in_command_reply: &mut bool) -> Option<ControlEvent> {
+fn parse_control_line(
+    line: &[u8],
+    in_command_reply: &mut bool,
+    reply_payload: &mut Vec<String>,
+) -> Option<ControlEvent> {
     let text = std::str::from_utf8(line).ok()?;
     if text.is_empty() {
         return None;
@@ -131,24 +190,29 @@ fn parse_control_line(line: &[u8], in_command_reply: &mut bool) -> Option<Contro
     if let Some(rest) = text.strip_prefix("%begin ") {
         let (time, number) = parse_begin_end_args(rest)?;
         *in_command_reply = true;
+        reply_payload.clear();
         return Some(ControlEvent::CommandBegin { time, number });
     }
     if let Some(rest) = text.strip_prefix("%end ") {
         let (time, number) = parse_begin_end_args(rest)?;
         *in_command_reply = false;
+        let payload = std::mem::take(reply_payload);
         return Some(ControlEvent::CommandEnd {
             time,
             number,
             error: false,
+            payload,
         });
     }
     if let Some(rest) = text.strip_prefix("%error ") {
         let (time, number) = parse_begin_end_args(rest)?;
         *in_command_reply = false;
+        let payload = std::mem::take(reply_payload);
         return Some(ControlEvent::CommandEnd {
             time,
             number,
             error: true,
+            payload,
         });
     }
     if let Some(rest) = text.strip_prefix("%exit") {
@@ -161,14 +225,32 @@ fn parse_control_line(line: &[u8], in_command_reply: &mut bool) -> Option<Contro
         return Some(ControlEvent::Exit { reason });
     }
 
-    // Command-reply payloads sit between %begin and %end/%error. They are protocol, not pane
-    // bytes, even when a line happens to look like %output.
     if *in_command_reply {
+        reply_payload.push(text.to_owned());
         return None;
     }
 
     if let Some(rest) = text.strip_prefix("%output ") {
         return parse_output_line(rest);
+    }
+    if let Some(rest) = text.strip_prefix("%layout-change ") {
+        return parse_layout_change(rest);
+    }
+    if let Some(rest) = text.strip_prefix("%window-add ") {
+        return parse_window_id_event(rest).map(|window_id| ControlEvent::WindowAdd { window_id });
+    }
+    if let Some(rest) = text.strip_prefix("%window-close ") {
+        return parse_window_id_event(rest)
+            .map(|window_id| ControlEvent::WindowClose { window_id });
+    }
+    if let Some(rest) = text.strip_prefix("%window-renamed ") {
+        return parse_window_renamed(rest);
+    }
+    if let Some(rest) = text.strip_prefix("%session-window-changed ") {
+        return parse_session_window_changed(rest);
+    }
+    if let Some(rest) = text.strip_prefix("%window-pane-changed ") {
+        return parse_window_pane_changed(rest);
     }
 
     None
@@ -194,6 +276,63 @@ fn parse_output_line(rest: &str) -> Option<ControlEvent> {
         pane_id: PaneId(format!("%{id}")),
         bytes: octal_unescape(data),
     })
+}
+
+fn parse_window_id_event(rest: &str) -> Option<WindowId> {
+    let id = rest.split_whitespace().next()?;
+    parse_window_id(id)
+}
+
+fn parse_window_id(id: &str) -> Option<WindowId> {
+    let digits = id.strip_prefix('@')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(WindowId(format!("@{digits}")))
+}
+
+fn parse_pane_id_token(id: &str) -> Option<PaneId> {
+    let digits = id.strip_prefix('%')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(PaneId(format!("%{digits}")))
+}
+
+fn parse_layout_change(rest: &str) -> Option<ControlEvent> {
+    let mut parts = rest.splitn(4, ' ');
+    let window_id = parse_window_id(parts.next()?)?;
+    let layout = parts.next()?.to_owned();
+    let visible_layout = parts.next().map(str::to_owned);
+    let flags = parts.next().map(str::to_owned);
+    Some(ControlEvent::LayoutChange {
+        window_id,
+        layout,
+        visible_layout,
+        flags,
+    })
+}
+
+fn parse_window_renamed(rest: &str) -> Option<ControlEvent> {
+    let (id, name) = rest.split_once(' ')?;
+    Some(ControlEvent::WindowRenamed {
+        window_id: parse_window_id(id)?,
+        name: name.to_owned(),
+    })
+}
+
+fn parse_session_window_changed(rest: &str) -> Option<ControlEvent> {
+    let mut parts = rest.split_whitespace();
+    let _session = parts.next()?;
+    let window_id = parse_window_id(parts.next()?)?;
+    Some(ControlEvent::SessionWindowChanged { window_id })
+}
+
+fn parse_window_pane_changed(rest: &str) -> Option<ControlEvent> {
+    let mut parts = rest.split_whitespace();
+    let window_id = parse_window_id(parts.next()?)?;
+    let pane_id = parse_pane_id_token(parts.next()?)?;
+    Some(ControlEvent::WindowPaneChanged { window_id, pane_id })
 }
 
 /// Decode tmux control-mode octal escapes (`\xxx` for bytes `< 0x20`, `\\`, or `>= 0x7f`).

@@ -38,7 +38,14 @@ where
             ControlEvent::Exit { .. } => {
                 result.exited = true;
             }
-            ControlEvent::CommandBegin { .. } | ControlEvent::CommandEnd { .. } => {}
+            ControlEvent::CommandBegin { .. }
+            | ControlEvent::CommandEnd { .. }
+            | ControlEvent::LayoutChange { .. }
+            | ControlEvent::WindowAdd { .. }
+            | ControlEvent::WindowClose { .. }
+            | ControlEvent::WindowRenamed { .. }
+            | ControlEvent::SessionWindowChanged { .. }
+            | ControlEvent::WindowPaneChanged { .. } => {}
         }
     }
     result

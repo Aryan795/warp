@@ -10,15 +10,52 @@ use warp_core::SessionId;
 use warp_terminal::shell::ShellType;
 
 use super::{
-    PaneBootstrap, cleanup_unspawned_dedicated_files, control_client_argv, kill_server_argv,
-    kill_server_command, pane_bootstrap_for_shell, refresh_client_command,
-    register_dedicated_server, schedule_kill_dedicated_server, send_keys_commands, zsh_init_bytes,
+    PaneBootstrap, cleanup_unspawned_dedicated_files, control_client_argv, detach_client_command,
+    kill_pane_command, kill_server_argv, kill_server_command, kill_window_command,
+    new_window_command, pane_bootstrap_for_shell, pipe_pane_journal_command,
+    refresh_client_command, register_dedicated_server, resize_pane_command,
+    schedule_kill_dedicated_server, select_pane_command, select_window_command, send_keys_commands,
+    split_window_command, zsh_init_bytes,
 };
-use crate::terminal::tmux::parser::PaneId;
+use crate::terminal::tmux::parser::{PaneId, WindowId};
 
 #[test]
 fn refresh_client_uses_columns_x_rows() {
     assert_eq!(refresh_client_command(80, 24), "refresh-client -C 80x24\n");
+}
+
+#[test]
+fn split_window_encodes_orientation_and_prints_pane_id() {
+    let pane = PaneId::from("%0");
+    assert_eq!(
+        split_window_command(&pane, true),
+        "split-window -h -t %0 -P -F '#{pane_id}'\n"
+    );
+    assert_eq!(
+        split_window_command(&pane, false),
+        "split-window -v -t %0 -P -F '#{pane_id}'\n"
+    );
+}
+
+#[test]
+fn pane_and_window_commands_target_tmux_ids() {
+    let pane = PaneId::from("%1");
+    let window = WindowId::from("@2");
+    assert_eq!(select_pane_command(&pane), "select-pane -t %1\n");
+    assert_eq!(kill_pane_command(&pane), "kill-pane -t %1\n");
+    assert_eq!(
+        resize_pane_command(&pane, 40, 12),
+        "resize-pane -t %1 -x 40 -y 12\n"
+    );
+    assert_eq!(new_window_command(), "new-window -P -F '#{window_id}'\n");
+    assert_eq!(select_window_command(&window), "select-window -t @2\n");
+    assert_eq!(kill_window_command(&window), "kill-window -t @2\n");
+    assert_eq!(detach_client_command(), "detach-client\n");
+    assert_ne!(detach_client_command(), kill_server_command());
+    assert_eq!(
+        pipe_pane_journal_command(&pane, "/tmp/warp-%1.journal"),
+        "pipe-pane -t %1 -O 'cat >> /tmp/warp-%1.journal'\n"
+    );
 }
 
 #[test]

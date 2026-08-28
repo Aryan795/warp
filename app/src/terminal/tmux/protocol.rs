@@ -219,6 +219,58 @@ pub fn refresh_client_command(columns: usize, rows: usize) -> String {
     format!("refresh-client -C {columns}x{rows}\n")
 }
 
+/// Side-by-side (`-h`) for Warp left/right splits; stacked (`-v`) for up/down.
+/// `-P -F '#{pane_id}'` puts the new pane id in the command-reply payload.
+pub fn split_window_command(target: &PaneId, side_by_side: bool) -> String {
+    let flag = if side_by_side { "-h" } else { "-v" };
+    format!(
+        "split-window {flag} -t {} -P -F '#{{pane_id}}'\n",
+        target.as_str()
+    )
+}
+
+pub fn select_pane_command(target: &PaneId) -> String {
+    format!("select-pane -t {}\n", target.as_str())
+}
+
+pub fn kill_pane_command(target: &PaneId) -> String {
+    format!("kill-pane -t {}\n", target.as_str())
+}
+
+pub fn resize_pane_command(target: &PaneId, columns: usize, rows: usize) -> String {
+    format!(
+        "resize-pane -t {} -x {columns} -y {rows}\n",
+        target.as_str()
+    )
+}
+
+pub fn new_window_command() -> String {
+    "new-window -P -F '#{window_id}'\n".to_owned()
+}
+
+pub fn select_window_command(window_id: &super::parser::WindowId) -> String {
+    format!("select-window -t {}\n", window_id.as_str())
+}
+
+pub fn kill_window_command(window_id: &super::parser::WindowId) -> String {
+    format!("kill-window -t {}\n", window_id.as_str())
+}
+
+/// Detach this control client without killing the tmux server or pane journals.
+pub fn detach_client_command() -> &'static str {
+    "detach-client\n"
+}
+
+/// Append-only pane journal. Replay from a stored byte offset on reattach; tmux
+/// `%output` is live-only and `capture-pane` drops Warp lifecycle hooks.
+pub fn pipe_pane_journal_command(target: &PaneId, journal_path: &str) -> String {
+    format!(
+        "pipe-pane -t {} -O 'cat >> {}'\n",
+        target.as_str(),
+        journal_path
+    )
+}
+
 /// Tear down the dedicated Warp tmux server. `kill-session` can leave that
 /// server process alive on this socket after the control client detaches.
 pub fn kill_server_command() -> &'static str {

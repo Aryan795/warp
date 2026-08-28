@@ -18,10 +18,10 @@ use crate::terminal::local_tty::{Pty, PtyOptions, mio_channel};
 use crate::terminal::session_settings::SessionSettings;
 use crate::terminal::tmux::event_loop::{ControlClientEventLoop, SharedControlState};
 use crate::terminal::tmux::protocol::{
-    DEDICATED_TMUX_CONFIG, PaneBootstrap, cleanup_unspawned_dedicated_files, control_client_argv,
-    dedicated_config_path, dedicated_socket_path, register_dedicated_server, resolve_tmux_binary,
-    tmux_shell_starter,
+    DEDICATED_TMUX_CONFIG, PaneBootstrap, cleanup_unspawned_dedicated_files, dedicated_config_path,
+    dedicated_socket_path, register_dedicated_server, resolve_tmux_binary, tmux_shell_starter,
 };
+use crate::terminal::tmux::transport::ControlTransportSpec;
 use crate::terminal::writeable_pty::Message;
 
 struct ControlClientSpawnHooks {
@@ -73,14 +73,15 @@ pub fn spawn_control_client(
     std::fs::write(&config, DEDICATED_TMUX_CONFIG).context("failed to write tmux config")?;
 
     let size = model.lock().block_list().size().to_owned();
-    let argv = control_client_argv(
-        &tmux_path,
-        &socket,
-        &config,
-        bootstrap,
-        size.columns(),
-        size.rows(),
-    );
+    let argv = ControlTransportSpec::LocalDedicated {
+        tmux_path: tmux_path.clone(),
+        socket: socket.clone(),
+        config: config.clone(),
+        bootstrap: bootstrap.clone(),
+        columns: size.columns(),
+        rows: size.rows(),
+    }
+    .spawn_argv();
     let starter = tmux_shell_starter(argv, bootstrap.session_id)
         .context("failed to construct tmux shell starter")?;
 
