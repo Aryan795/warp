@@ -3,6 +3,7 @@ use instant::Duration;
 use serde::{Deserialize, Serialize};
 use session_sharing_protocol::common::{Role, Scrollback, ScrollbackBlock, SessionId};
 use session_sharing_protocol::sharer::SessionSourceType;
+use warp_semantic_session::RequestedSessionContent;
 use warpui::keymap::ContextPredicate;
 use warpui::{AppContext, WindowId, id};
 
@@ -29,6 +30,12 @@ pub(super) mod shared_handlers;
 pub mod sharer;
 pub mod viewer;
 
+#[derive(Clone)]
+pub enum SemanticAgentEvent {
+    AcceptedMessageContext(warp_conversation_mutation_api::AcceptedMessageContext),
+    Response(warp_multi_agent_api::ResponseEvent),
+}
+
 #[cfg(test)]
 pub use tests::MAX_BYTES_SHAREABLE;
 
@@ -47,6 +54,7 @@ const SELECTION_THROTTLE_PERIOD: Duration = Duration::from_millis(20);
 pub struct SharedSessionSource {
     pub source_type: SessionSourceType,
     pub source_task_id: Option<String>,
+    requested_content: RequestedSessionContent,
 }
 
 impl SharedSessionSource {
@@ -54,15 +62,35 @@ impl SharedSessionSource {
         Self {
             source_type: SessionSourceType::User,
             source_task_id,
+            requested_content: RequestedSessionContent::FullTerminal,
+        }
+    }
+
+    pub(crate) fn from_network(
+        source_type: SessionSourceType,
+        source_task_id: Option<String>,
+    ) -> Self {
+        Self {
+            source_type,
+            source_task_id,
+            requested_content: RequestedSessionContent::FullTerminal,
         }
     }
 
     pub fn ambient_agent(task_id: Option<String>) -> Self {
+        Self::ambient_agent_with_content(task_id, RequestedSessionContent::FullTerminal)
+    }
+
+    pub fn ambient_agent_with_content(
+        task_id: Option<String>,
+        requested_content: RequestedSessionContent,
+    ) -> Self {
         Self {
             source_type: SessionSourceType::AmbientAgent {
                 task_id: task_id.clone(),
             },
             source_task_id: task_id,
+            requested_content,
         }
     }
 
@@ -72,6 +100,10 @@ impl SharedSessionSource {
             SessionSourceType::AmbientAgent { task_id } => task_id.as_deref(),
             SessionSourceType::User => None,
         })
+    }
+
+    pub fn requested_content(&self) -> &RequestedSessionContent {
+        &self.requested_content
     }
 }
 

@@ -42,6 +42,63 @@ use crate::terminal::view::{AIQueryRouting, TerminalAction, resolve_ai_query_rou
 use crate::test_util::add_window_with_terminal;
 use crate::test_util::terminal::initialize_app_for_terminal_view;
 use crate::{FeatureFlag, assert_lines_approx_eq};
+#[test]
+fn attempt_to_share_session_uses_trusted_source_content_only() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let emitted_content = Rc::new(RefCell::new(Vec::new()));
+        let emitted_content_for_subscription = emitted_content.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_view(&terminal, move |_, event, _| {
+                if let crate::terminal::view::Event::StartSharingCurrentSession {
+                    content, ..
+                } = event
+                {
+                    emitted_content_for_subscription
+                        .borrow_mut()
+                        .push(content.clone());
+                }
+            });
+        });
+
+        let semantic_content = warp_semantic_session::RequestedSessionContent::semantic_v1(
+            session_sharing_protocol::common::ExecutionIdentity {
+                conversation_id: "factory-conversation".to_string(),
+                execution_id: "factory-execution".to_string(),
+                run_id: Some("factory-run".to_string()),
+                request_id: Some("factory-request".to_string()),
+            },
+        );
+        terminal.update(&mut app, |view, ctx| {
+            view.attempt_to_share_session(
+                SharedSessionScrollbackType::All,
+                None,
+                SharedSessionSource::ambient_agent_with_content(
+                    Some("factory-run".to_string()),
+                    semantic_content.clone(),
+                ),
+                true,
+                ctx,
+            );
+            view.attempt_to_share_session(
+                SharedSessionScrollbackType::All,
+                None,
+                SharedSessionSource::user(None),
+                true,
+                ctx,
+            );
+        });
+
+        assert_eq!(
+            emitted_content.borrow().as_slice(),
+            &[
+                semantic_content,
+                warp_semantic_session::RequestedSessionContent::FullTerminal,
+            ]
+        );
+    });
+}
 
 #[test]
 fn test_prompt_context_menu_items_shared_session_viewer_no_edit_prompt() {
@@ -707,6 +764,7 @@ fn create_cloud_mode_task_for_user(creator_uid: &str) -> AmbientAgentTask {
         agent_config_snapshot: None,
         artifacts: vec![],
         last_event_sequence: None,
+        factory_semantic_session: None,
         children: vec![],
     }
 }
@@ -1056,6 +1114,8 @@ fn test_cloud_cloud_handoff_session_join_keeps_closed_details_panel_hidden() {
             view.handle_ambient_agent_event(
                 &crate::terminal::view::ambient_agent::AmbientAgentViewModelEvent::ExecutionSessionReady {
                     session_id: SessionId::new(),
+                    requested_content:
+                        warp_semantic_session::RequestedSessionContent::FullTerminal,
                 },
                 ctx,
             );
@@ -1120,6 +1180,8 @@ fn test_cloud_cloud_handoff_session_join_respects_details_panel_closed_after_fol
             view.handle_ambient_agent_event(
                 &crate::terminal::view::ambient_agent::AmbientAgentViewModelEvent::ExecutionSessionReady {
                     session_id: SessionId::new(),
+                    requested_content:
+                        warp_semantic_session::RequestedSessionContent::FullTerminal,
                 },
                 ctx,
             );
@@ -2361,6 +2423,8 @@ fn test_non_owned_tombstone_is_removed_for_followup_and_reinserted_after_complet
             view.handle_ambient_agent_event(
                 &crate::terminal::view::ambient_agent::AmbientAgentViewModelEvent::ExecutionSessionReady {
                     session_id: SessionId::new(),
+                    requested_content:
+                        warp_semantic_session::RequestedSessionContent::FullTerminal,
                 },
                 ctx,
             );

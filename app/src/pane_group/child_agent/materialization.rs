@@ -1,4 +1,5 @@
 use session_sharing_protocol::common::SessionId;
+use warp_semantic_session::RequestedSessionContent;
 
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::ambient_agents::{AmbientAgentLiveSessionState, AmbientAgentTask};
@@ -8,7 +9,13 @@ use crate::ai::ambient_agents::{AmbientAgentLiveSessionState, AmbientAgentTask};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChildPaneMaterialization {
     /// Attachable live session — join it in place using `session_id`.
-    AttachLive { session_id: SessionId },
+    AttachLive {
+        session_id: SessionId,
+        requested_content: RequestedSessionContent,
+    },
+    /// The server explicitly requested semantic mode, but its capability was
+    /// malformed or unsupported. Never downgrade this child to terminal mode.
+    InvalidSemanticCapability,
     /// No live session but a server conversation token is available; load
     /// the cloud transcript for it.
     LoadTranscript {
@@ -29,7 +36,18 @@ pub(crate) fn decide_child_pane_materialization(
     if let AmbientAgentLiveSessionState::Attachable { session_id } =
         task.active_live_session_state()
     {
-        return ChildPaneMaterialization::AttachLive { session_id };
+        return match task.requested_session_content() {
+            Ok(requested_content) => ChildPaneMaterialization::AttachLive {
+                session_id,
+                requested_content,
+            },
+            Err(err) => {
+                log::error!(
+                    "Refusing child viewer with invalid Factory semantic capability: {err:#}"
+                );
+                ChildPaneMaterialization::InvalidSemanticCapability
+            }
+        };
     }
 
     // Only terminal runs load a transcript. Empty/whitespace tokens would

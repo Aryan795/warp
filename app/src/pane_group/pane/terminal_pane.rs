@@ -1445,6 +1445,7 @@ fn handle_terminal_view_event(
             Event::EnsureSharedSessionViewerChildPane {
                 conversation_id,
                 session_id,
+                requested_content,
             } => {
                 // Emitted by `OrchestrationViewerModel` when a child of the
                 // orchestrator currently being viewed first surfaces a
@@ -1454,7 +1455,12 @@ fn handle_terminal_view_event(
                 // cloud-mode shell. Only reached while
                 // `OrchestrationUnifiedStack` is disabled; the unified stack
                 // emits `EnsureUnifiedViewerChildPane` instead.
-                group.ensure_shared_session_viewer_child_pane(*conversation_id, *session_id, ctx);
+                group.ensure_shared_session_viewer_child_pane(
+                    *conversation_id,
+                    *session_id,
+                    requested_content.clone(),
+                    ctx,
+                );
             }
             Event::OpenChildAgentInNewTab { conversation_id } => {
                 // Pane group can't add tabs; forward to the workspace.

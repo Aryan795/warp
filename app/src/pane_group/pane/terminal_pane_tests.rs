@@ -52,6 +52,7 @@ fn inherit_share_cascades_user_source_for_manually_shared_local_orchestrator() {
                 SharedSessionSource {
                     source_type: SessionSourceType::User,
                     source_task_id: Some(task_id),
+                    ..
                 },
         } => {
             assert_eq!(
@@ -80,6 +81,7 @@ fn inherit_share_cascades_ambient_source_for_cloud_orchestrator() {
                             task_id: Some(task_id),
                         },
                     source_task_id,
+                    ..
                 },
         } => {
             assert_eq!(task_id, expected_child_str);

@@ -613,6 +613,7 @@ impl PaneGroup {
         &mut self,
         child_conversation_id: AIConversationId,
         child_session_id: SessionId,
+        requested_content: warp_semantic_session::RequestedSessionContent,
         ctx: &mut ViewContext<Self>,
     ) {
         // Race recovery: a pill click before materialization had a
@@ -654,12 +655,13 @@ impl PaneGroup {
         // Per-child viewer: parent's model already discovers descendants, and
         // hidden child viewers aren't snapshotted, so `is_cloud_mode` stays
         // `false` (no `ambient_agent_view_model` needed for snapshot round-trip).
-        let (new_terminal_view, terminal_manager) = Self::create_shared_session_viewer(
+        let (new_terminal_view, terminal_manager) = Self::create_shared_session_viewer_with_content(
             child_session_id,
             resources,
             view_size,
             false, // enable_orchestration_polling
             false, // is_ambient_agent
+            requested_content,
             ctx,
         );
 

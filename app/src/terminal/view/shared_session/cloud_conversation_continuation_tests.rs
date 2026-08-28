@@ -218,6 +218,7 @@ fn ambient_agent_task(
         agent_config_snapshot: None,
         artifacts: vec![],
         last_event_sequence: None,
+        factory_semantic_session: None,
         children: vec![],
     }
 }

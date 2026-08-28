@@ -319,6 +319,7 @@ fn ambient_agent_task_for_current_user(task_id: AmbientAgentTaskId) -> AmbientAg
         agent_config_snapshot: None,
         artifacts: vec![],
         last_event_sequence: None,
+        factory_semantic_session: None,
         children: vec![],
     }
 }
@@ -2040,7 +2041,12 @@ fn attach_execution_session_refuses_read_only_transcript_viewer_pane() {
             );
 
             assert!(
-                !panes.attach_execution_session_to_ambient_pane(pane_id, SessionId::new(), ctx),
+                !panes.attach_execution_session_to_ambient_pane(
+                    pane_id,
+                    SessionId::new(),
+                    warp_semantic_session::RequestedSessionContent::FullTerminal,
+                    ctx,
+                ),
                 "a read-only transcript viewer must not report a successful live-session attach",
             );
         });
@@ -2077,7 +2083,12 @@ fn attach_execution_session_keeps_read_only_state_when_the_attach_fails() {
             );
 
             assert!(
-                !panes.attach_execution_session_to_ambient_pane(pane_id, SessionId::new(), ctx),
+                !panes.attach_execution_session_to_ambient_pane(
+                    pane_id,
+                    SessionId::new(),
+                    warp_semantic_session::RequestedSessionContent::FullTerminal,
+                    ctx,
+                ),
                 "precondition: this attach cannot succeed",
             );
             assert!(
@@ -2151,6 +2162,51 @@ fn create_shared_session_viewer_without_cloud_mode_does_not_populate_ambient_age
                 terminal_view.as_ref(ctx).ambient_agent_view_model().is_none(),
                 "non-cloud-mode shared-session viewer must not construct an ambient_agent_view_model; existing callers depend on this",
             );
+        });
+    });
+}
+
+#[test]
+fn create_shared_session_viewer_with_content_forwards_semantic_identity_to_network() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let resources = TerminalViewResources {
+                tips_completed: panes.tips_completed.clone(),
+                server_api: panes.server_api.clone(),
+                model_event_sender: panes.model_event_sender.clone(),
+            };
+            let requested_content = warp_semantic_session::RequestedSessionContent::semantic_v1(
+                session_sharing_protocol::common::ExecutionIdentity {
+                    conversation_id: "factory-conversation".to_string(),
+                    execution_id: "factory-execution".to_string(),
+                    run_id: Some("factory-run".to_string()),
+                    request_id: Some("factory-request".to_string()),
+                },
+            );
+            let (_terminal_view, terminal_manager) =
+                PaneGroup::create_shared_session_viewer_with_content(
+                    SessionId::new(),
+                    resources,
+                    Vector2F::new(800., 600.),
+                    false,
+                    true,
+                    requested_content.clone(),
+                    ctx,
+                );
+
+            terminal_manager.read(ctx, |terminal_manager, ctx| {
+                let viewer_manager = terminal_manager
+                    .as_any()
+                    .downcast_ref::<shared_session::viewer::TerminalManager>()
+                    .expect("content-aware constructor should return a viewer manager");
+                assert_eq!(
+                    viewer_manager.requested_content_for_test(ctx),
+                    Some(requested_content.clone())
+                );
+            });
         });
     });
 }

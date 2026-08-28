@@ -12615,7 +12615,7 @@ dependencies = [
 [[package]]
 name = "session-sharing-protocol"
 version = "0.0.0"
-source = "git+https://github.com/warpdotdev/session-sharing-protocol.git?rev=b30fdd06379a3d073b398eabd106abed5b443aae#b30fdd06379a3d073b398eabd106abed5b443aae"
+source = "git+https://github.com/warpdotdev/session-sharing-protocol.git?rev=70ce23ea754cf0a419d53183447bbae7037cd589#70ce23ea754cf0a419d53183447bbae7037cd589"
 dependencies = [
  "byte-unit",
  "serde",
@@ -15391,6 +15391,7 @@ dependencies = [
  "warp_channel_config",
  "warp_cli",
  "warp_completer",
+ "warp_conversation_mutation_api",
  "warp_core",
  "warp_editor",
  "warp_errors",
@@ -15404,6 +15405,7 @@ dependencies = [
  "warp_multi_agent_client",
  "warp_ripgrep",
  "warp_search_core",
+ "warp_semantic_session",
  "warp_server_auth",
  "warp_server_client",
  "warp_terminal",
@@ -15557,6 +15559,18 @@ dependencies = [
  "warp_js",
  "warp_util",
  "warpui_core",
+]
+
+[[package]]
+name = "warp_conversation_mutation_api"
+version = "0.0.0"
+source = "git+https://github.com/warpdotdev/warp-proto-apis.git?rev=cf6ad8536099ce0c5d7044beaf09d5d52cca8160#cf6ad8536099ce0c5d7044beaf09d5d52cca8160"
+dependencies = [
+ "prost",
+ "prost-reflect",
+ "prost-reflect-build",
+ "prost-types",
+ "regex",
 ]
 
 [[package]]
@@ -15904,6 +15918,30 @@ dependencies = [
  "warp_core",
  "warp_errors",
  "warpui_core",
+]
+
+[[package]]
+name = "warp_semantic_session"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-types",
+ "session-sharing-protocol",
+ "thiserror 2.0.17",
+ "uuid",
+ "warp_conversation_mutation_api",
+ "warp_multi_agent_api",
+]
+
+[[package]]
+name = "warp_semantic_session_wasm"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "serde_json",
+ "warp_conversation_mutation_api",
+ "warp_semantic_session",
+ "wasm-bindgen",
 ]
 
 [[package]]

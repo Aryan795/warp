@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use itertools::Itertools;
 use session_sharing_protocol::common::{AgentAttachment, ParticipantId, ServerConversationToken};
+use warp_conversation_mutation_api::AcceptedMessageContext;
 use warp_core::features::FeatureFlag;
 use warp_errors::report_error;
 use warp_multi_agent_api::client_action::Action;
@@ -664,6 +665,7 @@ impl BlocklistAIController {
         server_conversation_token: Option<ServerConversationToken>,
         attachments: Vec<AgentAttachment>,
         participant_id: ParticipantId,
+        accepted_message_context: Option<AcceptedMessageContext>,
         ctx: &mut ModelContext<Self>,
     ) {
         // Map server token to sharer's local conversation ID
@@ -726,6 +728,7 @@ impl BlocklistAIController {
                 conversation_id,
                 participant_id,
                 HashMap::new(),
+                accepted_message_context,
                 ctx,
             );
             return;
@@ -741,6 +744,7 @@ impl BlocklistAIController {
                 conversation_id,
                 participant_id,
                 HashMap::new(),
+                accepted_message_context,
                 ctx,
             );
             return;
@@ -752,6 +756,7 @@ impl BlocklistAIController {
                 conversation_id,
                 participant_id,
                 HashMap::new(),
+                accepted_message_context,
                 ctx,
             );
             return;
@@ -824,6 +829,7 @@ impl BlocklistAIController {
                     conversation_id,
                     participant_id,
                     file_attachments,
+                    accepted_message_context,
                     ctx,
                 );
             },
@@ -838,8 +844,14 @@ impl BlocklistAIController {
         conversation_id: Option<AIConversationId>,
         participant_id: ParticipantId,
         file_attachments: HashMap<String, AIAgentAttachment>,
+        accepted_message_context: Option<AcceptedMessageContext>,
         ctx: &mut ModelContext<Self>,
     ) {
+        if let Some(context) = accepted_message_context {
+            self.terminal_model
+                .lock()
+                .send_accepted_message_context_for_shared_session(context);
+        }
         if let Some(conversation_id) = conversation_id {
             if FeatureFlag::AgentView.is_enabled() {
                 // Enter agent view for this conversation so the sharer's UI state is correct

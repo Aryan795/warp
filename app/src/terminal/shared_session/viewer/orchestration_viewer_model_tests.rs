@@ -757,6 +757,7 @@ fn task(id: &str, state: AmbientAgentTaskState, title: &str) -> AmbientAgentTask
         agent_config_snapshot: None,
         artifacts: vec![],
         last_event_sequence: None,
+        factory_semantic_session: None,
         children: vec![],
     }
 }

@@ -902,6 +902,7 @@ impl AmbientAgentViewModel {
     pub fn attach_execution_session(
         &mut self,
         session_id: SessionId,
+        requested_content: warp_semantic_session::RequestedSessionContent,
         ctx: &mut ModelContext<Self>,
     ) {
         self.stop_progress_timer();
@@ -909,7 +910,10 @@ impl AmbientAgentViewModel {
         self.last_ended_execution_session_id = None;
         self.pending_followup_prompt = None;
         self.status = Status::AgentRunning;
-        ctx.emit(AmbientAgentViewModelEvent::ExecutionSessionReady { session_id });
+        ctx.emit(AmbientAgentViewModelEvent::ExecutionSessionReady {
+            session_id,
+            requested_content,
+        });
     }
 
     pub fn submit_cloud_followup(&mut self, prompt: String, ctx: &mut ModelContext<Self>) {
@@ -1261,12 +1265,14 @@ impl AmbientAgentViewModel {
                 if let Some(session_id) = session_join_info.session_id {
                     self.stop_progress_timer();
                     let event_session_id = session_id;
+                    let requested_content = session_join_info.requested_content;
                     let event = match &self.status {
                         Status::WaitingForSession {
                             kind: SessionStartupKind::InitialRun,
                             ..
                         } => AmbientAgentViewModelEvent::SessionReady {
                             session_id: event_session_id,
+                            requested_content,
                         },
                         Status::WaitingForSession {
                             kind: SessionStartupKind::Followup,
@@ -1275,6 +1281,7 @@ impl AmbientAgentViewModel {
                         | Status::AgentRunning => {
                             AmbientAgentViewModelEvent::ExecutionSessionReady {
                                 session_id: event_session_id,
+                                requested_content,
                             }
                         }
                         Status::Setup
@@ -1549,10 +1556,12 @@ pub enum AmbientAgentViewModelEvent {
     /// The ambient agent has started sharing its session.
     SessionReady {
         session_id: SessionId,
+        requested_content: warp_semantic_session::RequestedSessionContent,
     },
     /// An execution has started sharing a session for an already-canonical ambient pane.
     ExecutionSessionReady {
         session_id: SessionId,
+        requested_content: warp_semantic_session::RequestedSessionContent,
     },
     /// An environment was selected.
     EnvironmentSelected,

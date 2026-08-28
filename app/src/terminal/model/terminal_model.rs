@@ -78,7 +78,6 @@ use crate::terminal::model::index::VisibleRow;
 use crate::terminal::model::iterm_image::{ITermImage, ITermImageMetadata};
 use crate::terminal::model::secrets::ObfuscateSecrets;
 use crate::terminal::model::session::SessionInfo;
-use crate::terminal::shared_session::ai_agent::encode_agent_response_event;
 use crate::terminal::shared_session::{SharedSessionSource, SharedSessionStatus};
 use crate::terminal::shell::{ShellName, ShellType};
 use crate::terminal::ssh::util::{InteractiveSshCommand, SshLoginState};
@@ -500,6 +499,9 @@ pub struct TerminalModel {
     /// TODO: consider combining this with `shared_session_status` because
     /// the state can technically diverge.
     ordered_terminal_events_for_shared_session_tx: Option<Sender<OrderedTerminalEventType>>,
+
+    semantic_agent_events_for_shared_session_tx:
+        Option<Sender<crate::terminal::shared_session::SemanticAgentEvent>>,
 
     /// A sender for write to pty events for a shared session viewer.
     ///
@@ -1091,6 +1093,7 @@ impl TerminalModel {
             is_dummy_cloud_mode_session,
             conversation_transcript_viewer_status: None,
             ordered_terminal_events_for_shared_session_tx: None,
+            semantic_agent_events_for_shared_session_tx: None,
             write_to_pty_events_for_shared_session_tx: None,
             is_receiving_agent_conversation_replay: false,
             notify_on_end_of_ssh_login: None,
@@ -1246,6 +1249,28 @@ impl TerminalModel {
 
     pub fn clear_ordered_terminal_events_for_shared_session_tx(&mut self) {
         self.ordered_terminal_events_for_shared_session_tx = None;
+        self.semantic_agent_events_for_shared_session_tx = None;
+    }
+
+    pub fn set_semantic_agent_events_for_shared_session_tx(
+        &mut self,
+        tx: Sender<crate::terminal::shared_session::SemanticAgentEvent>,
+    ) {
+        self.semantic_agent_events_for_shared_session_tx = Some(tx);
+    }
+
+    pub fn send_accepted_message_context_for_shared_session(
+        &mut self,
+        context: warp_conversation_mutation_api::AcceptedMessageContext,
+    ) {
+        let Some(tx) = &self.semantic_agent_events_for_shared_session_tx else {
+            return;
+        };
+        if let Err(error) = tx.try_send(
+            crate::terminal::shared_session::SemanticAgentEvent::AcceptedMessageContext(context),
+        ) {
+            log::warn!("Failed to send accepted semantic message context: {error}");
+        }
     }
 
     fn ai_metadata_to_protocol(metadata: &AgentInteractionMetadata) -> AICommandMetadata {
@@ -1301,8 +1326,19 @@ impl TerminalModel {
         }
 
         if self.shared_session_status().is_sharer() {
+            if let Some(tx) = &self.semantic_agent_events_for_shared_session_tx {
+                if let Err(e) = tx.try_send(
+                    crate::terminal::shared_session::SemanticAgentEvent::Response(response.clone()),
+                ) {
+                    log::warn!("Failed to send typed semantic agent response event: {e}");
+                }
+                return;
+            }
             if let Some(tx) = &self.ordered_terminal_events_for_shared_session_tx {
-                let encoded = encode_agent_response_event(response);
+                let encoded =
+                    crate::terminal::shared_session::ai_agent::encode_agent_response_event(
+                        response,
+                    );
                 if let Err(e) = tx.try_send(OrderedTerminalEventType::AgentResponseEvent {
                     response_initiator,
                     response_event: encoded,

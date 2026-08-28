@@ -27,7 +27,9 @@ use crate::ai::agent::conversation::{
     AIAgentHarness, AIConversation, AIConversationId, ConversationStatus,
     ServerAIConversationMetadata,
 };
-use crate::ai::ambient_agents::task::{HarnessConfig, TaskPrincipalInfo, TaskStatusMessage};
+use crate::ai::ambient_agents::task::{
+    FactorySemanticSession, HarnessConfig, TaskPrincipalInfo, TaskStatusMessage,
+};
 use crate::ai::ambient_agents::{
     AgentConfigSnapshot, AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState,
     ExecutionLocation,
@@ -78,8 +80,127 @@ fn create_test_task(
         artifacts: vec![],
         is_sandbox_running: false,
         last_event_sequence: None,
+        factory_semantic_session: None,
         children: vec![],
     }
+}
+fn factory_semantic_capability(
+    task: &AmbientAgentTask,
+    session_id: &str,
+) -> FactorySemanticSession {
+    FactorySemanticSession {
+        content_mode: "semantic_conversation_only".to_string(),
+        schema_version: 1,
+        conversation_id: "factory-conversation".to_string(),
+        execution_id: "factory-execution".to_string(),
+        run_id: task.task_id.to_string(),
+        request_id: Some("factory-request".to_string()),
+        session_id: Some(session_id.to_string()),
+        accepted_message_context: None,
+    }
+}
+
+#[test]
+fn test_resolve_open_action_preserves_factory_semantic_identity() {
+    App::test((), |mut app| async move {
+        add_entry_projection_test_models(&mut app);
+
+        let session_id = make_uuid(8209);
+        let mut task = create_test_task(&make_uuid(8210), "user-a", Utc::now());
+        task.state = AmbientAgentTaskState::InProgress;
+        task.session_id = Some(session_id.clone());
+        task.session_link = Some("https://example.com/session".to_string());
+        task.is_sandbox_running = true;
+        task.factory_semantic_session =
+            Some(factory_semantic_capability(&task, session_id.as_str()));
+        let task_id = task.task_id;
+
+        app.add_singleton_model(|_| {
+            let mut model = create_test_model();
+            model.tasks.insert(task_id, task);
+            model
+        });
+
+        app.update(|ctx| {
+            let action = AgentConversationsModel::resolve_open_action(
+                AgentConversationNavigationSubject::Entry(AgentConversationEntryId::AmbientRun(
+                    task_id,
+                )),
+                None,
+                ctx,
+            );
+
+            let Some(WorkspaceAction::OpenOrAttachAmbientAgentConversation {
+                session_id: resolved_session_id,
+                task_id: resolved_task_id,
+                requested_content,
+            }) = action
+            else {
+                panic!("capable live Factory task should open its semantic session");
+            };
+            assert_eq!(resolved_session_id.to_string(), session_id);
+            assert_eq!(resolved_task_id, task_id);
+            let warp_semantic_session::RequestedSessionContent::SemanticConversation {
+                schema_version,
+                execution_identity,
+                initial_accepted_message_context,
+            } = requested_content
+            else {
+                panic!("Factory capability should select semantic content");
+            };
+            assert_eq!(schema_version, 1);
+            assert_eq!(execution_identity.conversation_id, "factory-conversation");
+            assert_eq!(execution_identity.execution_id, "factory-execution");
+            let expected_run_id = task_id.to_string();
+            assert_eq!(
+                execution_identity.run_id.as_deref(),
+                Some(expected_run_id.as_str())
+            );
+            assert_eq!(
+                execution_identity.request_id.as_deref(),
+                Some("factory-request")
+            );
+            assert!(initial_accepted_message_context.is_none());
+        });
+    });
+}
+
+#[test]
+fn test_resolve_open_action_rejects_invalid_factory_semantic_capability() {
+    App::test((), |mut app| async move {
+        add_entry_projection_test_models(&mut app);
+
+        let session_id = make_uuid(8211);
+        let mut task = create_test_task(&make_uuid(8212), "user-a", Utc::now());
+        task.state = AmbientAgentTaskState::InProgress;
+        task.session_id = Some(session_id.clone());
+        task.session_link = Some("https://example.com/session".to_string());
+        task.is_sandbox_running = true;
+        let mut capability = factory_semantic_capability(&task, session_id.as_str());
+        capability.schema_version = 2;
+        task.factory_semantic_session = Some(capability);
+        let task_id = task.task_id;
+
+        app.add_singleton_model(|_| {
+            let mut model = create_test_model();
+            model.tasks.insert(task_id, task);
+            model
+        });
+
+        app.update(|ctx| {
+            let action = AgentConversationsModel::resolve_open_action(
+                AgentConversationNavigationSubject::Entry(AgentConversationEntryId::AmbientRun(
+                    task_id,
+                )),
+                None,
+                ctx,
+            );
+            assert!(
+                action.is_none(),
+                "an explicit unsupported Factory capability must not downgrade to terminal"
+            );
+        });
+    });
 }
 
 type CapturedConversationUpdate = Mutex<Option<ConversationUpdateKind>>;
@@ -1444,7 +1565,6 @@ fn test_resolve_open_action_prefers_active_ambient_terminal() {
         });
     });
 }
-
 #[test]
 fn test_resolve_open_action_opens_active_ambient_session() {
     App::test((), |mut app| async move {
@@ -1479,6 +1599,8 @@ fn test_resolve_open_action_opens_active_ambient_session() {
                 Some(WorkspaceAction::OpenOrAttachAmbientAgentConversation {
                     session_id: resolved_session_id,
                     task_id: resolved_task_id,
+                    requested_content:
+                        warp_semantic_session::RequestedSessionContent::FullTerminal,
                 }) if resolved_session_id.to_string() == session_id && resolved_task_id == task_id
             ));
         });
@@ -1518,6 +1640,8 @@ fn test_resolve_open_action_opens_active_ambient_session_from_link() {
                 Some(WorkspaceAction::OpenOrAttachAmbientAgentConversation {
                     session_id: resolved_session_id,
                     task_id: resolved_task_id,
+                    requested_content:
+                        warp_semantic_session::RequestedSessionContent::FullTerminal,
                 }) if resolved_session_id.to_string() == session_id && resolved_task_id == task_id
             ));
         });
@@ -1557,6 +1681,8 @@ fn test_resolve_open_action_opens_retained_failed_ambient_session_from_link() {
                 Some(WorkspaceAction::OpenOrAttachAmbientAgentConversation {
                     session_id: resolved_session_id,
                     task_id: resolved_task_id,
+                    requested_content:
+                        warp_semantic_session::RequestedSessionContent::FullTerminal,
                 }) if resolved_session_id.to_string() == session_id && resolved_task_id == task_id
             ));
 
@@ -2098,6 +2224,8 @@ fn test_resolve_open_action_reopens_ambient_session_after_terminal_unregister() 
                 Some(WorkspaceAction::OpenOrAttachAmbientAgentConversation {
                     session_id: resolved_session_id,
                     task_id: resolved_task_id,
+                    requested_content:
+                        warp_semantic_session::RequestedSessionContent::FullTerminal,
                 }) if resolved_session_id.to_string() == session_id && resolved_task_id == task_id
             ));
         });
@@ -2120,6 +2248,8 @@ fn test_resolve_open_action_reopens_ambient_session_after_terminal_unregister() 
                 Some(WorkspaceAction::OpenOrAttachAmbientAgentConversation {
                     session_id: resolved_session_id,
                     task_id: resolved_task_id,
+                    requested_content:
+                        warp_semantic_session::RequestedSessionContent::FullTerminal,
                 }) if resolved_session_id.to_string() == session_id && resolved_task_id == task_id
             ));
         });

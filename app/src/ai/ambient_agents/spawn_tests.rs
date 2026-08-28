@@ -9,6 +9,7 @@ use super::{
     spawn_task, submit_run_followup,
 };
 use crate::ai::agent::UserQueryMode;
+use crate::ai::ambient_agents::task::FactorySemanticSession;
 use crate::ai::ambient_agents::{AmbientAgentTask, AmbientAgentTaskState};
 use crate::server::server_api::ai::{MockAIClient, SpawnAgentResponse, TaskStatusMessage};
 use crate::terminal::shared_session;
@@ -41,8 +42,109 @@ fn task_with(
         artifacts: vec![],
         is_sandbox_running: true,
         last_event_sequence: None,
+        factory_semantic_session: None,
         children: vec![],
     }
+}
+fn semantic_capability(task: &AmbientAgentTask, session_id: SessionId) -> FactorySemanticSession {
+    FactorySemanticSession {
+        content_mode: "semantic_conversation_only".to_string(),
+        schema_version: 1,
+        conversation_id: "factory-conversation".to_string(),
+        execution_id: "factory-execution".to_string(),
+        run_id: task.task_id.to_string(),
+        request_id: Some("factory-request".to_string()),
+        session_id: Some(session_id.to_string()),
+        accepted_message_context: None,
+    }
+}
+
+#[test]
+fn session_join_info_preserves_factory_semantic_identity() {
+    let session_id = SessionId::new();
+    let mut task = task_with(
+        AmbientAgentTaskState::InProgress,
+        Some(session_id.to_string()),
+        Some("https://example.com/session/semantic".to_string()),
+    );
+    task.factory_semantic_session = Some(semantic_capability(&task, session_id));
+
+    let join_info = SessionJoinInfo::try_from_task(&task)
+        .expect("valid capability")
+        .expect("joinable session");
+    assert_eq!(join_info.session_id, Some(session_id));
+    let warp_semantic_session::RequestedSessionContent::SemanticConversation {
+        schema_version,
+        execution_identity,
+        initial_accepted_message_context,
+    } = join_info.requested_content
+    else {
+        panic!("Factory capability should select semantic content");
+    };
+    assert_eq!(schema_version, 1);
+    assert_eq!(execution_identity.conversation_id, "factory-conversation");
+    assert_eq!(execution_identity.execution_id, "factory-execution");
+    let expected_run_id = task.task_id.to_string();
+    assert_eq!(
+        execution_identity.run_id.as_deref(),
+        Some(expected_run_id.as_str())
+    );
+    assert_eq!(
+        execution_identity.request_id.as_deref(),
+        Some("factory-request")
+    );
+    assert!(initial_accepted_message_context.is_none());
+}
+
+#[tokio::test]
+async fn monitor_spawned_task_fails_closed_for_invalid_factory_capability() {
+    use futures::StreamExt;
+
+    let session_id = SessionId::new();
+    let mut task = task_with(
+        AmbientAgentTaskState::InProgress,
+        Some(session_id.to_string()),
+        Some("https://example.com/session/semantic".to_string()),
+    );
+    let mut capability = semantic_capability(&task, session_id);
+    capability.schema_version = 2;
+    task.factory_semantic_session = Some(capability);
+
+    let mut mock = MockAIClient::new();
+    mock.expect_spawn_agent().times(0);
+    mock.expect_get_ambient_agent_task()
+        .times(1)
+        .return_once(move |_| Ok(task));
+    let mut stream = Box::pin(monitor_spawned_task(
+        run_id(),
+        "already-created-run".to_owned(),
+        false,
+        Arc::new(mock),
+        None,
+    ));
+
+    assert!(matches!(
+        stream.next().await.expect("spawned event").expect("ok"),
+        AmbientAgentEvent::TaskSpawned { .. }
+    ));
+    assert!(matches!(
+        stream.next().await.expect("state event").expect("ok"),
+        AmbientAgentEvent::StateChanged {
+            state: AmbientAgentTaskState::InProgress,
+            ..
+        }
+    ));
+    let error = stream
+        .next()
+        .await
+        .expect("capability error")
+        .expect_err("invalid capability must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("Invalid server-authored Factory semantic session capability")
+    );
+    assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]

@@ -1463,9 +1463,24 @@ impl AgentConversationsModel {
                 .map(AmbientAgentTask::active_live_session_state)
             {
                 Some(AmbientAgentLiveSessionState::Attachable { session_id }) => {
+                    let requested_content = match self
+                        .tasks
+                        .get(&task_id)
+                        .expect("live-session state came from this task")
+                        .requested_session_content()
+                    {
+                        Ok(content) => content,
+                        Err(err) => {
+                            log::error!(
+                                "Refusing to open ambient session with invalid Factory semantic capability: {err:#}"
+                            );
+                            return None;
+                        }
+                    };
                     return Some(WorkspaceAction::OpenOrAttachAmbientAgentConversation {
                         session_id,
                         task_id,
+                        requested_content,
                     });
                 }
                 Some(AmbientAgentLiveSessionState::ActiveUnattachable) => {

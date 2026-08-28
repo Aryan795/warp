@@ -16,19 +16,21 @@ use session_sharing_protocol::common::{
     ActivePrompt, ActivePromptUpdate, AddGuestsResponse, AgentAttachment, AgentPromptFailureReason,
     AgentPromptRequest, AgentPromptRequestId, CommandExecutionFailureReason, ControlAction,
     ControlActionFailureReason, FeatureSupport, InputOperationId, InputOperationSeqNo, InputUpdate,
-    LinkAccessLevelUpdateResponse, ParticipantId, ParticipantList, ParticipantPresenceUpdate,
-    RemoveGuestResponse, Role, RoleRequestId, RoleRequestResponse, Selection, SelectionUpdate,
-    ServerConversationToken, SessionId, TeamAccessLevelUpdateResponse, TeamAclData,
-    TelemetryContext, UniversalDeveloperInputContext, UniversalDeveloperInputContextUpdate,
-    UpdatePendingUserRoleResponse, UserID, WindowSize, WriteToPtyFailureReason,
-    WriteToPtyRequestId, WriteToPtySeqNo,
+    LinkAccessLevelUpdateResponse, OrderedTerminalEventType, ParticipantId, ParticipantList,
+    ParticipantPresenceUpdate, RemoveGuestResponse, Role, RoleRequestId, RoleRequestResponse,
+    Selection, SelectionUpdate, SemanticResyncReason, ServerConversationToken, SessionId,
+    TeamAccessLevelUpdateResponse, TeamAclData, TelemetryContext, UniversalDeveloperInputContext,
+    UniversalDeveloperInputContextUpdate, UpdatePendingUserRoleResponse, UserID, WindowSize,
+    WriteToPtyFailureReason, WriteToPtyRequestId, WriteToPtySeqNo,
 };
 use session_sharing_protocol::viewer::{
     DownstreamMessage, InitPayload, RoleUpdatedReason, SessionEndedReason, UpstreamMessage,
     ViewerRemovedReason,
 };
+use warp_conversation_mutation_api::ConversationMutation;
 use warp_core::features::FeatureFlag;
 use warp_errors::report_error;
+use warp_semantic_session::{ConsumeOutcome, RequestedSessionContent, SemanticConsumer};
 use warp_server_client::iap::IapManager;
 use warpui::r#async::{SpawnedFutureHandle, Timer};
 use warpui::{
@@ -105,10 +107,31 @@ struct CachedLatestState {
     universal_developer_input_context: Option<UniversalDeveloperInputContext>,
 }
 
+fn semantic_join_has_terminal_state(
+    scrollback: &session_sharing_protocol::common::Scrollback,
+    active_prompt: &ActivePrompt,
+    window_size: WindowSize,
+    init_block_id: &session_sharing_protocol::common::BlockId,
+    input_replica_id: &session_sharing_protocol::common::InputReplicaId,
+    universal_developer_input_context: &Option<UniversalDeveloperInputContext>,
+) -> bool {
+    !scrollback.blocks.is_empty()
+        || scrollback.is_alt_screen_active
+        || !matches!(active_prompt, ActivePrompt::PS1)
+        || window_size.num_rows != 0
+        || window_size.num_cols != 0
+        || !init_block_id.to_string().is_empty()
+        || !input_replica_id.to_string().is_empty()
+        || universal_developer_input_context.is_some()
+}
+
 /// The network interface to allow communication to and from the
 /// cloud-backed shared session.
 pub struct Network {
     session_id: SessionId,
+    content: RequestedSessionContent,
+    semantic_consumer: Option<SemanticConsumer>,
+    semantic_last_event_no: Option<usize>,
     /// [`None`] until the viewer receives the successful join ack.
     event_loop: Option<ModelHandle<EventLoop>>,
 
@@ -150,6 +173,10 @@ pub struct Network {
 }
 
 impl Network {
+    #[cfg(test)]
+    pub(super) fn requested_content_for_test(&self) -> &RequestedSessionContent {
+        &self.content
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: SessionId,
@@ -159,6 +186,7 @@ impl Network {
         write_to_pty_events_rx: Receiver<Vec<u8>>,
         initial_load_mode: SharedSessionInitialLoadMode,
         remote_update_guard: RemoteUpdateGuard,
+        content: RequestedSessionContent,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         let (ws_proxy_tx, ws_proxy_rx) = async_channel::unbounded();
@@ -166,6 +194,17 @@ impl Network {
         let selection_throttled_rx = throttle(SELECTION_THROTTLE_PERIOD, selection_rx);
         let model = Network {
             session_id,
+            semantic_consumer: content.execution_identity().cloned().map(|identity| {
+                SemanticConsumer::new(
+                    session_id,
+                    identity,
+                    content
+                        .schema_version()
+                        .expect("semantic content has a schema"),
+                )
+            }),
+            content,
+            semantic_last_event_no: None,
             event_loop: None,
             ws_proxy_tx,
             #[cfg(test)]
@@ -229,6 +268,9 @@ impl Network {
 
         let model = Network {
             session_id,
+            content: RequestedSessionContent::FullTerminal,
+            semantic_consumer: None,
+            semantic_last_event_no: None,
             event_loop: None,
             ws_proxy_tx,
             ws_proxy_rx,
@@ -254,13 +296,14 @@ impl Network {
         };
 
         ctx.emit(NetworkEvent::JoinedSuccessfully {
+            is_semantic: false,
             active_prompt,
             viewer_id,
             viewer_firebase_uid,
             participant_list: Default::default(),
             input_replica_id: ReplicaId::random(),
             universal_developer_input_context: None,
-            source: SharedSessionSource::default(),
+            source: Box::new(SharedSessionSource::default()),
         });
 
         model.start_write_to_pty_events_listener(write_to_pty_events_rx, ctx);
@@ -407,7 +450,12 @@ impl Network {
                             supports_agent_view: FeatureFlag::AgentView.is_enabled(),
                             supports_full_role: true,
                             supports_full_role_for_real: true,
+                            supports_semantic_conversation: true,
                         },
+                        content_mode: network.content.content_mode(),
+                        semantic_schema_version: network.content.schema_version(),
+                        execution_identity: network.content.execution_identity().cloned(),
+                        semantic_cursor: None,
                     });
                     if let Err(e) = network.ws_proxy_tx.try_send(initialize_message) {
                         report_error!(anyhow::Error::new(e)
@@ -449,10 +497,11 @@ impl Network {
         // timer. Stage is guaranteed not Reconnecting here, so close() will
         // not abort any in-progress reconnect handle.
         self.close();
-        let Some(event_loop) = self.event_loop.clone() else {
+        let event_loop = self.event_loop.clone();
+        if !self.content.is_semantic() && event_loop.is_none() {
             report_error!("Cannot reconnect to server as viewer when event loop does not exist");
             return;
-        };
+        }
         let session_id = self.session_id;
         let auth_client = ServerApiProvider::as_ref(ctx).get_auth_client();
         let auth_state = AuthStateProvider::as_ref(ctx).get().clone();
@@ -478,19 +527,47 @@ impl Network {
             move |network, conn, ctx| match conn {
                 RequestState::RequestSucceeded(((sink, stream), user_id)) => {
                     log::info!("Successfully reconnected to server as viewer");
-                    let last_received_event_no = event_loop.as_ref(ctx).last_received_event_no();
-                    let latest_block_id = network.terminal_model.lock().block_list().active_block_id().clone();
+                    let last_received_event_no = if network.content.is_semantic() {
+                        network.semantic_last_event_no
+                    } else {
+                        event_loop
+                            .as_ref()
+                            .expect("full-terminal viewers have an event loop")
+                            .as_ref(ctx)
+                            .last_received_event_no()
+                    };
+                    let latest_block_id = if network.content.is_semantic() {
+                        None
+                    } else {
+                        Some(
+                            network
+                                .terminal_model
+                                .lock()
+                                .block_list()
+                                .active_block_id()
+                                .clone()
+                                .into(),
+                        )
+                    };
                     let initialize_message = UpstreamMessage::Initialize(InitPayload {
                         viewer_id: network.id.clone(),
                         user_id,
                         last_received_event_no,
-                        latest_block_id: Some(latest_block_id.into()),
+                        latest_block_id,
                         telemetry_context: Some(TelemetryContext(telemetry_context().as_value())),
                         feature_support: FeatureSupport {
                             supports_agent_view: FeatureFlag::AgentView.is_enabled(),
                             supports_full_role: true,
                             supports_full_role_for_real: true,
+                            supports_semantic_conversation: true,
                         },
+                        content_mode: network.content.content_mode(),
+                        semantic_schema_version: network.content.schema_version(),
+                        execution_identity: network.content.execution_identity().cloned(),
+                        semantic_cursor: network
+                            .semantic_consumer
+                            .as_ref()
+                            .and_then(SemanticConsumer::cursor),
                     });
                     let (ws_proxy_tx, ws_proxy_rx) = async_channel::unbounded();
                     network.ws_proxy_tx = ws_proxy_tx;
@@ -550,6 +627,21 @@ impl Network {
             log::warn!("Got unexpected message from shared session viewer websocket");
             return;
         };
+        if self.content.is_semantic()
+            && !matches!(
+                &msg,
+                DownstreamMessage::JoinedSuccessfully { .. }
+                    | DownstreamMessage::RejoinedSuccessfully { .. }
+                    | DownstreamMessage::SemanticResyncRequired { .. }
+                    | DownstreamMessage::FailedToJoin { .. }
+                    | DownstreamMessage::SessionEnded { .. }
+                    | DownstreamMessage::ViewerRemoved { .. }
+                    | DownstreamMessage::OrderedTerminalEvent(_)
+                    | DownstreamMessage::Pong { .. }
+            )
+        {
+            return;
+        }
         match msg {
             DownstreamMessage::JoinedSuccessfully {
                 scrollback,
@@ -559,22 +651,47 @@ impl Network {
                 participant_list,
                 viewer_id,
                 viewer_firebase_uid,
+                init_block_id,
                 input_replica_id,
                 universal_developer_input_context,
                 // We use the more detailed source type here,
                 // ignoring the legacy source_type field (which was kept around for backwards compatibility).
                 detailed_source_type: source_type,
                 source_task_id,
+                negotiated_content,
                 ..
             } => {
-                let source = SharedSessionSource {
-                    source_type,
-                    source_task_id,
-                };
+                let source = SharedSessionSource::from_network(source_type, source_task_id);
                 if matches!(self.stage, Stage::JoinedSuccessfully) {
                     log::warn!(
                         "Received unexpected JoinedSuccessfully message when we've already joined"
                     );
+                    return;
+                }
+                if let Err(error) = self.content.validate_echo(negotiated_content.as_ref()) {
+                    log::warn!("Session content negotiation failed: {error:?}");
+                    self.close_without_reconnection();
+                    ctx.emit(NetworkEvent::FailedToJoin {
+                        reason: FailedToJoinReason::Unknown,
+                    });
+                    return;
+                }
+                let is_semantic = self.content.is_semantic();
+                if is_semantic
+                    && semantic_join_has_terminal_state(
+                        &scrollback,
+                        &active_prompt,
+                        window_size,
+                        &init_block_id,
+                        &input_replica_id,
+                        &universal_developer_input_context,
+                    )
+                {
+                    log::warn!("Semantic shared session returned terminal state");
+                    self.close_without_reconnection();
+                    ctx.emit(NetworkEvent::FailedToJoin {
+                        reason: FailedToJoinReason::Unknown,
+                    });
                     return;
                 }
                 self.id = Some(viewer_id.clone());
@@ -582,39 +699,52 @@ impl Network {
 
                 // Initialize the cache with the server's initial context so that subsequent
                 // local changes are correctly compared against what the server knows.
-                self.cached_latest_state.universal_developer_input_context =
-                    universal_developer_input_context.clone();
+                if !is_semantic {
+                    self.cached_latest_state.universal_developer_input_context =
+                        universal_developer_input_context.clone();
+                }
 
-                // Create the event loop now that we've joined and are ready to receive events from the server.
-                let event_loop = ctx.add_model(|ctx| {
-                    EventLoop::new(
-                        self.terminal_model.clone(),
-                        self.terminal_view.clone(),
-                        self.channel_event_proxy.clone(),
-                        window_size,
-                        *scrollback,
-                        latest_event_no,
-                        self.initial_load_mode,
-                        self.remote_update_guard.clone(),
-                        ctx,
-                    )
-                });
-                self.event_loop = Some(event_loop);
+                if !is_semantic {
+                    let event_loop = ctx.add_model(|ctx| {
+                        EventLoop::new(
+                            self.terminal_model.clone(),
+                            self.terminal_view.clone(),
+                            self.channel_event_proxy.clone(),
+                            window_size,
+                            *scrollback,
+                            latest_event_no,
+                            self.initial_load_mode,
+                            self.remote_update_guard.clone(),
+                            ctx,
+                        )
+                    });
+                    self.event_loop = Some(event_loop);
+                }
                 ctx.emit(NetworkEvent::JoinedSuccessfully {
+                    is_semantic,
                     active_prompt,
                     viewer_id,
                     viewer_firebase_uid: UserUid::new(viewer_firebase_uid.as_str()),
                     participant_list: Box::new(*participant_list),
                     input_replica_id: input_replica_id.into(),
                     universal_developer_input_context,
-                    source,
+                    source: Box::new(source),
                 });
             }
-            DownstreamMessage::RejoinedSuccessfully { participant_list } => {
+            DownstreamMessage::RejoinedSuccessfully {
+                participant_list,
+                negotiated_content,
+            } => {
                 if matches!(self.stage, Stage::JoinedSuccessfully) {
                     log::warn!(
                         "Received unexpected RejoinedSuccessfully message when we've already joined"
                     );
+                    return;
+                }
+                if let Err(error) = self.content.validate_echo(negotiated_content.as_ref()) {
+                    log::warn!("Session content reconnect negotiation failed: {error:?}");
+                    self.close_without_reconnection();
+                    ctx.emit(NetworkEvent::FailedToReconnect);
                     return;
                 }
                 log::info!("Successfully reconnected to shared session as viewer.");
@@ -628,6 +758,20 @@ impl Network {
                 )));
             }
             DownstreamMessage::OrderedTerminalEvent(event) => {
+                if self.content.is_semantic() {
+                    if !matches!(self.stage, Stage::JoinedSuccessfully) {
+                        log::warn!(
+                            "Received semantic mutation before session content negotiation completed"
+                        );
+                        self.close_without_reconnection();
+                        ctx.emit(NetworkEvent::SemanticResyncRequired {
+                            reason: SemanticResyncReason::SessionStateUnavailable,
+                        });
+                        return;
+                    }
+                    self.process_semantic_event(event, ctx);
+                    return;
+                }
                 if let Some(event_loop) = &self.event_loop {
                     event_loop.update(ctx, |event_loop, ctx| {
                         event_loop.process_ordered_terminal_event(event, ctx);
@@ -645,6 +789,10 @@ impl Network {
             DownstreamMessage::ViewerRemoved { reason } => {
                 self.close_without_reconnection();
                 ctx.emit(NetworkEvent::ViewerRemoved { reason })
+            }
+            DownstreamMessage::SemanticResyncRequired { reason } => {
+                self.close_without_reconnection();
+                ctx.emit(NetworkEvent::SemanticResyncRequired { reason });
             }
             DownstreamMessage::ActivePromptUpdated(active_prompt_update) => {
                 ctx.emit(NetworkEvent::SharerActivePromptUpdated(
@@ -770,6 +918,70 @@ impl Network {
         }
     }
 
+    fn process_semantic_event(
+        &mut self,
+        event: session_sharing_protocol::common::OrderedTerminalEvent,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let event_no = event.event_no;
+        let expected_mutation_sequence = u64::try_from(event_no)
+            .ok()
+            .and_then(|event_no| event_no.checked_add(1));
+        let mutation_sequence = match &event.event_type {
+            OrderedTerminalEventType::SemanticConversationMutation { cursor, .. } => {
+                Some(cursor.mutation_sequence)
+            }
+            _ => None,
+        };
+        if mutation_sequence != expected_mutation_sequence {
+            self.close_without_reconnection();
+            ctx.emit(NetworkEvent::SemanticResyncRequired {
+                reason: SemanticResyncReason::SessionStateUnavailable,
+            });
+            return;
+        }
+        let expected_event_no = self
+            .semantic_last_event_no
+            .map_or(0, |last_event_no| last_event_no + 1);
+        if event_no > expected_event_no {
+            self.close_without_reconnection();
+            ctx.emit(NetworkEvent::SemanticResyncRequired {
+                reason: SemanticResyncReason::SessionStateUnavailable,
+            });
+            return;
+        }
+        let is_replay = event_no < expected_event_no;
+        let outcome = self
+            .semantic_consumer
+            .as_mut()
+            .expect("semantic content has a consumer")
+            .consume(event);
+        match outcome {
+            Ok(ConsumeOutcome::Applied(mutation)) if !is_replay => {
+                self.semantic_last_event_no = Some(event_no);
+                ctx.emit(NetworkEvent::SemanticMutationApplied(mutation));
+            }
+            Ok(ConsumeOutcome::Duplicate) if is_replay => {}
+            Ok(ConsumeOutcome::Applied(_) | ConsumeOutcome::Duplicate) => {
+                self.close_without_reconnection();
+                ctx.emit(NetworkEvent::SemanticResyncRequired {
+                    reason: SemanticResyncReason::SessionStateUnavailable,
+                });
+            }
+            Ok(ConsumeOutcome::ResyncRequired(reason)) => {
+                self.close_without_reconnection();
+                ctx.emit(NetworkEvent::SemanticResyncRequired { reason });
+            }
+            Err(error) => {
+                log::warn!("Failed to consume semantic mutation: {error}");
+                self.close_without_reconnection();
+                ctx.emit(NetworkEvent::SemanticResyncRequired {
+                    reason: SemanticResyncReason::SessionStateUnavailable,
+                });
+            }
+        }
+    }
+
     /// Start a process to listen for and batch pty write events.
     fn start_write_to_pty_events_listener(
         &self,
@@ -779,6 +991,9 @@ impl Network {
         ctx.spawn_stream_local(
             events_rx,
             move |network, bytes, ctx| {
+                if network.content.is_semantic() {
+                    return;
+                }
                 match &mut network.pty_bytes_batch_status {
                     PtyBytesBatchStatus::NotBatching { last_sent_at } => {
                         // Start batching
@@ -830,6 +1045,14 @@ impl Network {
         let Stage::JoinedSuccessfully = self.stage else {
             return;
         };
+        if self.content.is_semantic()
+            && !matches!(
+                &message,
+                UpstreamMessage::Ping { .. } | UpstreamMessage::Reauthenticated { .. }
+            )
+        {
+            return;
+        }
         if let Err(e) = self.ws_proxy_tx.try_send(message) {
             log::warn!("Failed to send message over ws_proxy channel in viewer network: {e}");
         }
@@ -846,6 +1069,9 @@ impl Network {
 
     /// Send the presence selection to the server, with a throttle period.
     pub fn send_presence_selection(&mut self, selection: Selection) {
+        if self.content.is_semantic() {
+            return;
+        }
         self.cached_latest_state.selection = selection.clone();
         if let Err(e) = self.selection_throttled_tx.try_send(selection) {
             log::warn!(
@@ -859,6 +1085,9 @@ impl Network {
         block_id: &BlockId,
         operations: impl Iterator<Item = &'a CrdtOperation>,
     ) {
+        if self.content.is_semantic() {
+            return;
+        }
         let Some(viewer_id) = self.id.clone() else {
             return;
         };
@@ -907,6 +1136,16 @@ impl Network {
     }
 
     pub fn send_write_to_pty(&mut self) {
+        if self.content.is_semantic() {
+            if let PtyBytesBatchStatus::Batching { abort_handle, .. } = &self.pty_bytes_batch_status
+            {
+                abort_handle.abort();
+                self.pty_bytes_batch_status = PtyBytesBatchStatus::NotBatching {
+                    last_sent_at: Instant::now(),
+                };
+            }
+            return;
+        }
         let Some(viewer_id) = self.id.clone() else {
             return;
         };
@@ -953,6 +1192,7 @@ impl Network {
             server_conversation_token,
             prompt,
             attachments,
+            accepted_message_context: None,
         };
         self.send_message_to_server(UpstreamMessage::SendAgentPrompt(request));
     }
@@ -1006,6 +1246,10 @@ impl Network {
 
     /// Sends all input updates buffered during disconnection to the server, then clears the buffer.
     fn flush_pending_input_updates_to_server(&mut self) {
+        if self.content.is_semantic() {
+            self.pending_input_updates.clear();
+            return;
+        }
         for update in self.pending_input_updates.drain(..) {
             if let Err(e) = self
                 .ws_proxy_tx
@@ -1022,6 +1266,9 @@ impl Network {
     /// Send everything in `self.cached_latest_state` to the server.
     /// This is needed when we reconnect to the server, since all values were dropped before we were connected.
     fn send_latest_state_to_server(&mut self) {
+        if self.content.is_semantic() {
+            return;
+        }
         self.send_presence_selection(self.cached_latest_state.selection.clone())
     }
 
@@ -1043,6 +1290,9 @@ impl Network {
         &mut self,
         update: UniversalDeveloperInputContextUpdate,
     ) {
+        if self.content.is_semantic() {
+            return;
+        }
         // Skip update if nothing would change
         if let Some(ref cached) = self.cached_latest_state.universal_developer_input_context
             && !update.changes_cached_context(cached)
@@ -1183,13 +1433,14 @@ pub fn control_action_failure_reason_string(reason: &ControlActionFailureReason)
 
 pub enum NetworkEvent {
     JoinedSuccessfully {
+        is_semantic: bool,
         active_prompt: ActivePrompt,
         viewer_id: ParticipantId,
         viewer_firebase_uid: UserUid,
         participant_list: Box<ParticipantList>,
         input_replica_id: ReplicaId,
         universal_developer_input_context: Option<UniversalDeveloperInputContext>,
-        source: SharedSessionSource,
+        source: Box<SharedSessionSource>,
     },
     FailedToJoin {
         reason: FailedToJoinReason,
@@ -1197,6 +1448,10 @@ pub enum NetworkEvent {
     FailedToReconnect,
     SessionEnded {
         reason: SessionEndedReason,
+    },
+    SemanticMutationApplied(Box<ConversationMutation>),
+    SemanticResyncRequired {
+        reason: SemanticResyncReason,
     },
     SharerActivePromptUpdated(ActivePromptUpdate),
     UniversalDeveloperInputContextUpdated(UniversalDeveloperInputContextUpdate),

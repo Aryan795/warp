@@ -1933,8 +1933,12 @@ impl PaneGroup {
                         ) {
                             Some(WorkspaceAction::OpenOrAttachAmbientAgentConversation {
                                 session_id,
+                                requested_content,
                                 ..
-                            }) => AmbientRestoreKind::SharedSession { session_id },
+                            }) => AmbientRestoreKind::SharedSession {
+                                session_id,
+                                requested_content,
+                            },
                             // Transcript viewer and other non-session actions depend on conversation metadata from
                             // BlocklistAIHistoryModel, which is loaded asynchronously.
                             // Defer to the pending-restoration handler so it can retry once that metadata arrives.
@@ -1954,11 +1958,17 @@ impl PaneGroup {
 
                 let mut pending_task: Option<AmbientAgentTaskId> = None;
                 let (terminal_view, terminal_manager) = match restore_kind {
-                    AmbientRestoreKind::SharedSession { session_id } => {
-                        Self::create_shared_session_viewer(
-                            session_id, resources, view_size,
+                    AmbientRestoreKind::SharedSession {
+                        session_id,
+                        requested_content,
+                    } => {
+                        Self::create_shared_session_viewer_with_content(
+                            session_id,
+                            resources,
+                            view_size,
                             true, // enable_orchestration_polling
                             true, // is_ambient_agent
+                            requested_content,
                             ctx,
                         )
                     }
@@ -3591,13 +3601,36 @@ impl PaneGroup {
         is_ambient_agent: bool,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
+        Self::new_for_shared_session_viewer_with_content(
+            session_id,
+            tips_completed,
+            user_default_shell_unsupported_banner_model_handle,
+            server_api,
+            model_event_sender,
+            is_ambient_agent,
+            warp_semantic_session::RequestedSessionContent::FullTerminal,
+            ctx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_shared_session_viewer_with_content(
+        session_id: SessionId,
+        tips_completed: ModelHandle<TipsCompleted>,
+        user_default_shell_unsupported_banner_model_handle: ModelHandle<BannerState>,
+        server_api: Arc<ServerApi>,
+        model_event_sender: Option<SyncSender<ModelEvent>>,
+        is_ambient_agent: bool,
+        requested_content: warp_semantic_session::RequestedSessionContent,
+        ctx: &mut ViewContext<Self>,
+    ) -> Self {
         let model_event_sender_clone = model_event_sender.clone();
         let initial_layout = move |resources,
                                    pane_contents: &mut HashMap<PaneId, Box<dyn AnyPaneContent>>,
                                    pane_history: &mut Vec<PaneId>,
                                    view_bounds: RectF,
                                    ctx: &mut ViewContext<Self>| {
-            let (view, terminal_manager) = PaneGroup::create_shared_session_viewer(
+            let (view, terminal_manager) = PaneGroup::create_shared_session_viewer_with_content(
                 session_id,
                 resources,
                 view_bounds.size(),
@@ -3607,6 +3640,7 @@ impl PaneGroup {
                 // link may still turn out to be ambient, in which case the model is
                 // created lazily at `SessionJoined`.
                 is_ambient_agent,
+                requested_content,
                 ctx,
             );
 
@@ -6231,7 +6265,7 @@ impl PaneGroup {
     /// generic shared-session joins: if such a session turns out to be ambient,
     /// the model is created lazily at `SessionJoined` via
     /// `TerminalView::begin_viewing_ambient_session`.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     fn create_shared_session_viewer(
         session_id: SessionId,
         resources: TerminalViewResources,
@@ -6243,14 +6277,39 @@ impl PaneGroup {
         ViewHandle<TerminalView>,
         ModelHandle<Box<dyn TerminalManager>>,
     ) {
+        Self::create_shared_session_viewer_with_content(
+            session_id,
+            resources,
+            initial_size,
+            enable_orchestration_polling,
+            is_ambient_agent,
+            warp_semantic_session::RequestedSessionContent::FullTerminal,
+            ctx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_shared_session_viewer_with_content(
+        session_id: SessionId,
+        resources: TerminalViewResources,
+        initial_size: Vector2F,
+        enable_orchestration_polling: bool,
+        is_ambient_agent: bool,
+        requested_content: warp_semantic_session::RequestedSessionContent,
+        ctx: &mut ViewContext<Self>,
+    ) -> (
+        ViewHandle<TerminalView>,
+        ModelHandle<Box<dyn TerminalManager>>,
+    ) {
         let window_id = ctx.window_id();
-        let terminal_init = shared_session::viewer::TerminalManager::new(
+        let terminal_init = shared_session::viewer::TerminalManager::new_with_content(
             session_id,
             resources,
             initial_size,
             window_id,
             enable_orchestration_polling,
             is_ambient_agent,
+            requested_content,
             ctx,
         );
         let viewer_manager = terminal_init.manager;
@@ -6321,6 +6380,7 @@ impl PaneGroup {
     fn create_ambient_orchestration_child_pane(
         session_id: SessionId,
         conversation_id: AIConversationId,
+        requested_content: warp_semantic_session::RequestedSessionContent,
         resources: TerminalViewResources,
         initial_size: Vector2F,
         ctx: &mut ViewContext<Self>,
@@ -6332,6 +6392,7 @@ impl PaneGroup {
             shared_session::viewer::TerminalManager::new_for_ambient_orchestration_child(
                 session_id,
                 conversation_id,
+                requested_content,
                 resources,
                 initial_size,
                 ctx.window_id(),
@@ -7162,6 +7223,7 @@ impl PaneGroup {
         &mut self,
         pane_id: PaneId,
         session_id: SessionId,
+        requested_content: warp_semantic_session::RequestedSessionContent,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
         let Some(terminal_view) = self.terminal_view_from_pane_id(pane_id, ctx) else {
@@ -7197,7 +7259,7 @@ impl PaneGroup {
             .cloned()
         {
             ambient_agent_view_model.update(ctx, |model, ctx| {
-                model.attach_execution_session(session_id, ctx);
+                model.attach_execution_session(session_id, requested_content.clone(), ctx);
             });
             terminal_view.update(ctx, |view, ctx| {
                 view.prepare_for_live_session_reattach(ctx);
@@ -7228,7 +7290,8 @@ impl PaneGroup {
                 );
                 return;
             };
-            attached = manager.attach_execution_session(session_id, ctx);
+            attached =
+                manager.attach_execution_session_with_content(session_id, requested_content, ctx);
         });
 
         if attached {

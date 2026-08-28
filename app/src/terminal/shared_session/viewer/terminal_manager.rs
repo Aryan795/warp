@@ -6,14 +6,15 @@ use parking_lot::FairMutex;
 use pathfinder_geometry::vector::Vector2F;
 use session_sharing_protocol::common::{
     ActivePrompt, AddGuestsResponse, CLIAgentSessionState, CommandExecutionFailureReason,
-    LinkAccessLevelUpdateResponse, LongRunningCommandAgentInteraction, RemoveGuestResponse,
-    SelectedAgentModel, SessionId, TeamAccessLevelUpdateResponse,
+    ExecutionIdentity, LinkAccessLevelUpdateResponse, LongRunningCommandAgentInteraction,
+    RemoveGuestResponse, SelectedAgentModel, SessionId, TeamAccessLevelUpdateResponse,
     UniversalDeveloperInputContextUpdate, UpdatePendingUserRoleResponse,
 };
 use session_sharing_protocol::sharer::SessionSourceType;
 use session_sharing_protocol::viewer::SessionEndedReason;
 use settings::Setting as _;
 use warp_errors::report_error;
+use warp_semantic_session::{RequestedSessionContent, SemanticTranscript};
 use warpui::{
     AppContext, ModelContext, ModelHandle, SingletonEntity, ViewContext, ViewHandle,
     WeakViewHandle, WindowId,
@@ -97,6 +98,7 @@ pub struct TerminalManager {
     network_state: NetworkState,
     network_resources: NetworkResources,
     current_network: Arc<FairMutex<Option<ModelHandle<Network>>>>,
+    semantic_transcript: Arc<FairMutex<SemanticTranscript>>,
     viewer_remote_update_guard: RemoteUpdateGuard,
     outbound_handlers_registered: bool,
     /// Owns child discovery + status polling for an orchestrated ambient
@@ -122,6 +124,17 @@ pub struct TerminalManagerInit {
 }
 
 impl TerminalManager {
+    #[cfg(test)]
+    pub(crate) fn requested_content_for_test(
+        &self,
+        ctx: &AppContext,
+    ) -> Option<RequestedSessionContent> {
+        Self::current_network(&self.current_network).map(|network| {
+            network.read(ctx, |network, _| {
+                network.requested_content_for_test().clone()
+            })
+        })
+    }
     fn send_selected_conversation_update_for_viewer_to_current_network(
         guard: &RemoteUpdateGuard,
         model: &Arc<FairMutex<TerminalModel>>,
@@ -153,6 +166,7 @@ impl TerminalManager {
     pub fn new_for_ambient_orchestration_child(
         session_id: SessionId,
         conversation_id: AIConversationId,
+        requested_content: RequestedSessionContent,
         resources: TerminalViewResources,
         initial_size: Vector2F,
         window_id: WindowId,
@@ -173,11 +187,39 @@ impl TerminalManager {
         terminal_manager.connect_session(
             session_id,
             SharedSessionInitialLoadMode::ReplaceFromSessionScrollback,
+            requested_content,
             ctx,
         );
         TerminalManagerInit {
             manager: terminal_manager,
             view: terminal_view,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn connect_to_semantic_session(
+        &mut self,
+        session_id: SessionId,
+        execution_identity: ExecutionIdentity,
+        ctx: &mut AppContext,
+    ) -> bool {
+        match self.network_state {
+            NetworkState::Idle => {
+                self.connect_session(
+                    session_id,
+                    SharedSessionInitialLoadMode::ReplaceFromSessionScrollback,
+                    RequestedSessionContent::semantic_v1(execution_identity),
+                    ctx,
+                );
+                true
+            }
+            NetworkState::Connecting => {
+                log::warn!(
+                    "connect_to_semantic_session called while already connecting to shared session"
+                );
+                false
+            }
+            NetworkState::Active(_) => false,
         }
     }
 
@@ -361,6 +403,7 @@ impl TerminalManager {
                 channel_event_proxy,
             },
             current_network: Arc::new(FairMutex::new(None)),
+            semantic_transcript: Arc::new(FairMutex::new(SemanticTranscript::default())),
             viewer_remote_update_guard: RemoteUpdateGuard::new(),
             outbound_handlers_registered: false,
             orchestration_viewer_model: Arc::new(FairMutex::new(None)),
@@ -383,7 +426,7 @@ impl TerminalManager {
     /// that only discover the session is ambient at `JoinedSuccessfully` (e.g. a
     /// raw `shared_session` link) pass `false` and get the model created lazily
     /// then via `TerminalView::begin_viewing_ambient_session`.
-    #[allow(clippy::new_ret_no_self)]
+    #[allow(clippy::new_ret_no_self, dead_code)]
     pub fn new(
         session_id: SessionId,
         resources: TerminalViewResources,
@@ -391,6 +434,29 @@ impl TerminalManager {
         window_id: WindowId,
         enable_orchestration_polling: bool,
         is_ambient_agent: bool,
+        ctx: &mut AppContext,
+    ) -> TerminalManagerInit {
+        Self::new_with_content(
+            session_id,
+            resources,
+            initial_size,
+            window_id,
+            enable_orchestration_polling,
+            is_ambient_agent,
+            RequestedSessionContent::FullTerminal,
+            ctx,
+        )
+    }
+
+    #[allow(clippy::new_ret_no_self, clippy::too_many_arguments)]
+    pub fn new_with_content(
+        session_id: SessionId,
+        resources: TerminalViewResources,
+        initial_size: Vector2F,
+        window_id: WindowId,
+        enable_orchestration_polling: bool,
+        is_ambient_agent: bool,
+        requested_content: RequestedSessionContent,
         ctx: &mut AppContext,
     ) -> TerminalManagerInit {
         let TerminalManagerInit {
@@ -409,6 +475,7 @@ impl TerminalManager {
         terminal_manager.connect_session(
             session_id,
             SharedSessionInitialLoadMode::ReplaceFromSessionScrollback,
+            requested_content,
             ctx,
         );
 
@@ -448,10 +515,26 @@ impl TerminalManager {
     /// Local-to-cloud handoff panes set this to `true` so the pre-populated
     /// forked conversation is not replaced by the cloud session's replay
     /// scrollback.
+    #[allow(dead_code)]
     pub fn connect_to_session(
         &mut self,
         session_id: SessionId,
         append_followup_scrollback: bool,
+        ctx: &mut AppContext,
+    ) -> bool {
+        self.connect_to_session_with_content(
+            session_id,
+            append_followup_scrollback,
+            RequestedSessionContent::FullTerminal,
+            ctx,
+        )
+    }
+
+    pub fn connect_to_session_with_content(
+        &mut self,
+        session_id: SessionId,
+        append_followup_scrollback: bool,
+        requested_content: RequestedSessionContent,
         ctx: &mut AppContext,
     ) -> bool {
         let load_mode = if append_followup_scrollback {
@@ -461,7 +544,7 @@ impl TerminalManager {
         };
         match self.network_state {
             NetworkState::Idle => {
-                self.connect_session(session_id, load_mode, ctx);
+                self.connect_session(session_id, load_mode, requested_content, ctx);
                 true
             }
             NetworkState::Connecting => {
@@ -472,9 +555,23 @@ impl TerminalManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn attach_execution_session(
         &mut self,
         session_id: SessionId,
+        ctx: &mut AppContext,
+    ) -> bool {
+        self.attach_execution_session_with_content(
+            session_id,
+            RequestedSessionContent::FullTerminal,
+            ctx,
+        )
+    }
+
+    pub fn attach_execution_session_with_content(
+        &mut self,
+        session_id: SessionId,
+        requested_content: RequestedSessionContent,
         ctx: &mut AppContext,
     ) -> bool {
         match std::mem::replace(&mut self.network_state, NetworkState::Connecting) {
@@ -502,6 +599,7 @@ impl TerminalManager {
         self.connect_session(
             session_id,
             SharedSessionInitialLoadMode::AppendFollowupScrollback,
+            requested_content,
             ctx,
         );
         self.start_cloud_mode_setup_command_tracking();
@@ -523,6 +621,7 @@ impl TerminalManager {
         &mut self,
         session_id: SessionId,
         initial_load_mode: SharedSessionInitialLoadMode,
+        content: RequestedSessionContent,
         ctx: &mut AppContext,
     ) {
         match std::mem::replace(&mut self.network_state, NetworkState::Connecting) {
@@ -557,6 +656,7 @@ impl TerminalManager {
                 write_to_pty_events_rx,
                 initial_load_mode,
                 self.viewer_remote_update_guard.clone(),
+                content,
                 ctx,
             )
         });
@@ -567,6 +667,7 @@ impl TerminalManager {
             &self.view,
             self.model.clone(),
             self.current_network.clone(),
+            self.semantic_transcript.clone(),
             self.network_resources.prompt_type.clone(),
             self.viewer_remote_update_guard.clone(),
             self.orchestration_viewer_model.clone(),
@@ -811,6 +912,7 @@ impl TerminalManager {
         view: &ViewHandle<TerminalView>,
         model: Arc<FairMutex<TerminalModel>>,
         current_network: Arc<FairMutex<Option<ModelHandle<Network>>>>,
+        semantic_transcript: Arc<FairMutex<SemanticTranscript>>,
         prompt_type: ModelHandle<PromptType>,
         viewer_remote_update_guard: RemoteUpdateGuard,
         orchestration_viewer_model: Arc<FairMutex<Option<ModelHandle<OrchestrationViewerModel>>>>,
@@ -824,6 +926,7 @@ impl TerminalManager {
 
         ctx.subscribe_to_model(network, move |network, event, ctx| match event {
             NetworkEvent::JoinedSuccessfully {
+                is_semantic,
                 active_prompt,
                 viewer_id,
                 viewer_firebase_uid,
@@ -832,42 +935,56 @@ impl TerminalManager {
                 universal_developer_input_context,
                 source,
             } => {
-                model.lock().set_shared_session_source(source.clone());
+                model
+                    .lock()
+                    .set_shared_session_source(source.as_ref().clone());
 
-                Self::handle_active_prompt_update(
-                    model.clone(),
-                    prompt_type.clone(),
-                    weak_view_handle.clone(),
-                    active_prompt,
-                    ctx,
-                );
-
-                // Apply the universal developer input context if present.
-                let active_remote_update = viewer_remote_update_guard.start_remote_update();
-                if let Some(universal_developer_input_context) = universal_developer_input_context {
-                    if let Some(ref model) = universal_developer_input_context.selected_model {
-                        Self::handle_selected_agent_model_update(&weak_view_handle, model, &active_remote_update, ctx);
-                    }
-                    if let Some(ref input_mode) = universal_developer_input_context.input_mode {
-                        Self::handle_input_mode_update(&weak_view_handle, input_mode, &active_remote_update, ctx);
-                    }
-                    apply_cli_agent_state_update(
-                        &weak_view_handle,
-                        &universal_developer_input_context.cli_agent_session,
-                        &active_remote_update,
+                if !*is_semantic {
+                    Self::handle_active_prompt_update(
+                        model.clone(),
+                        prompt_type.clone(),
+                        weak_view_handle.clone(),
+                        active_prompt,
                         ctx,
                     );
-                    if let Some(ref selected_conversation) = universal_developer_input_context.selected_conversation {
-                        Self::handle_selected_conversation_update(
+
+                    let active_remote_update = viewer_remote_update_guard.start_remote_update();
+                    if let Some(universal_developer_input_context) =
+                        universal_developer_input_context
+                    {
+                        if let Some(ref model) = universal_developer_input_context.selected_model {
+                            Self::handle_selected_agent_model_update(
+                                &weak_view_handle,
+                                model,
+                                &active_remote_update,
+                                ctx,
+                            );
+                        }
+                        if let Some(ref input_mode) = universal_developer_input_context.input_mode {
+                            Self::handle_input_mode_update(
+                                &weak_view_handle,
+                                input_mode,
+                                &active_remote_update,
+                                ctx,
+                            );
+                        }
+                        apply_cli_agent_state_update(
                             &weak_view_handle,
-                            selected_conversation,
+                            &universal_developer_input_context.cli_agent_session,
                             &active_remote_update,
                             ctx,
                         );
+                        if let Some(ref selected_conversation) =
+                            universal_developer_input_context.selected_conversation
+                        {
+                            Self::handle_selected_conversation_update(
+                                &weak_view_handle,
+                                selected_conversation,
+                                &active_remote_update,
+                                ctx,
+                            );
+                        }
                     }
-                    // TODO(roland): we do not apply universal_developer_input_context.long_running_command_agent_interaction here
-                    // because the block it should apply to won't exist yet, until the `OrderedTerminalEvents` that come after are processed.
-                    // We should try to apply it after catching up to the latest state.
                 }
                 let Some(view) = weak_view_handle.upgrade(ctx) else {
                     return;
@@ -930,15 +1047,26 @@ impl TerminalManager {
                         }
                     }
 
-                    terminal_view.on_session_share_joined(
-                        viewer_id.clone(),
-                        *viewer_firebase_uid,
-                        input_replica_id.clone(),
-                        participant_list.clone(),
-                        session_id,
-                        source.source_type.clone(),
-                        ctx,
-                    );
+                    if *is_semantic {
+                        terminal_view.on_semantic_session_share_joined(
+                            viewer_id.clone(),
+                            *viewer_firebase_uid,
+                            participant_list.clone(),
+                            session_id,
+                            source.source_type.clone(),
+                            ctx,
+                        );
+                    } else {
+                        terminal_view.on_session_share_joined(
+                            viewer_id.clone(),
+                            *viewer_firebase_uid,
+                            input_replica_id.clone(),
+                            participant_list.clone(),
+                            session_id,
+                            source.source_type.clone(),
+                            ctx,
+                        );
+                    }
                 });
 
                 #[cfg(target_family = "wasm")]
@@ -984,6 +1112,47 @@ impl TerminalManager {
                             );
                         }
                     }
+                });
+            }
+            NetworkEvent::SemanticMutationApplied(mutation) => {
+                if let Err(error) = semantic_transcript.lock().apply(mutation) {
+                    log::warn!("Failed to project semantic mutation: {error}");
+                    network.update(ctx, |network, _| network.close_without_reconnection());
+                    if let Some(view) = weak_view_handle.upgrade(ctx) {
+                        view.update(ctx, |terminal_view, ctx| {
+                            terminal_view.show_persistent_toast(
+                                "The semantic session could not be projected. Please reconnect."
+                                    .to_owned(),
+                                ToastFlavor::Error,
+                                ctx,
+                            );
+                        });
+                    }
+                }
+            }
+            NetworkEvent::SemanticResyncRequired { reason } => {
+                log::warn!("Semantic shared session requires resync: {reason:?}");
+                let Some(view) = weak_view_handle.upgrade(ctx) else {
+                    return;
+                };
+                let is_ambient_agent = model.lock().is_shared_ambient_agent_session();
+                if !Self::handle_viewer_session_end(
+                    &view,
+                    model.clone(),
+                    &current_network,
+                    &network,
+                    &orchestration_viewer_model,
+                    is_ambient_agent,
+                    ctx,
+                ) {
+                    return;
+                }
+                view.update(ctx, |terminal_view, ctx| {
+                    terminal_view.show_persistent_toast(
+                        "The semantic session fell out of sync. Please reconnect.".to_string(),
+                        ToastFlavor::Error,
+                        ctx,
+                    );
                 });
             }
             NetworkEvent::ViewerRemoved { reason } => {

@@ -1784,6 +1784,7 @@ pub enum Event {
     StartSharingCurrentSession {
         scrollback_type: SharedSessionScrollbackType,
         source: SharedSessionSource,
+        content: warp_semantic_session::RequestedSessionContent,
     },
     EstablishedSharedSession {
         session_id: session_sharing_protocol::common::SessionId,
@@ -2023,6 +2024,7 @@ pub enum Event {
     EnsureSharedSessionViewerChildPane {
         conversation_id: AIConversationId,
         session_id: session_sharing_protocol::common::SessionId,
+        requested_content: warp_semantic_session::RequestedSessionContent,
     },
     /// Unified-stack counterpart to [`Self::EnsureSharedSessionViewerChildPane`].
     /// Carries the fetched task snapshot so pane construction uses the same

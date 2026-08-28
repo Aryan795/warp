@@ -17,15 +17,17 @@ use futures_util::stream::AbortHandle;
 use futures_util::{SinkExt, StreamExt};
 use instant::Instant;
 use parking_lot::FairMutex;
+use prost::Message as _;
 use session_sharing_protocol::common::{
     ActivePrompt, ActivePromptUpdate, AgentPromptFailureReason, AgentPromptRequest,
-    AgentPromptRequestId, CommandExecutionFailureReason, CommandExecutionRequestId, ControlAction,
-    ControlActionFailureReason, ControlActionRequestId, FeatureSupport, InputOperationId,
-    InputOperationSeqNo, InputUpdate, OrderedTerminalEvent, OrderedTerminalEventType,
-    ParticipantId, ParticipantList, ParticipantPresenceUpdate, Role, RoleRequestId,
-    RoleRequestResponse, Scrollback, Selection, SelectionUpdate, SessionId,
-    UniversalDeveloperInputContext, UniversalDeveloperInputContextUpdate, UserID, WindowSize,
-    WriteToPtyFailureReason, WriteToPtyRequestId,
+    AgentPromptRequestId, BlockId as SharedBlockId, CommandExecutionFailureReason,
+    CommandExecutionRequestId, ControlAction, ControlActionFailureReason, ControlActionRequestId,
+    FeatureSupport, InputOperationId, InputOperationSeqNo, InputReplicaId, InputUpdate,
+    OrderedTerminalEvent, OrderedTerminalEventType, ParticipantId, ParticipantList,
+    ParticipantPresenceUpdate, Role, RoleRequestId, RoleRequestResponse, Scrollback, Selection,
+    SelectionUpdate, SemanticResyncReason, SessionId, UniversalDeveloperInputContext,
+    UniversalDeveloperInputContextUpdate, UserID, WindowSize, WriteToPtyFailureReason,
+    WriteToPtyRequestId,
 };
 #[cfg(not(any(test, feature = "integration_tests")))]
 use session_sharing_protocol::common::{SelectedAgentModel, TelemetryContext};
@@ -38,9 +40,12 @@ use session_sharing_protocol::sharer::{
     SessionTerminatedReason, TeamAccessLevelUpdateResponse, UpdatePendingUserRoleResponse,
     UpstreamMessage,
 };
+use warp_conversation_mutation_api::{ConversationMutation, InterruptionReason};
 use warp_core::features::FeatureFlag;
 use warp_errors::report_error;
+use warp_semantic_session::{RequestedSessionContent, SemanticMutationProducer};
 use warp_server_client::iap::IapManager;
+use warp_terminal::model::secrets::{SECRETS_REGEX, find_secrets_in_text_with_levels_using_regex};
 use warpui::r#async::Timer;
 use warpui::{Entity, ModelContext, RequestState, RetryOption, SingletonEntity};
 use websocket::{Message, Sink, Stream, WebSocket, WebsocketMessage as _};
@@ -55,7 +60,8 @@ use crate::terminal::model::block::BlockId;
 #[cfg(not(any(test, feature = "integration_tests")))]
 use crate::terminal::shared_session::SharedSessionScrollbackType;
 use crate::terminal::shared_session::{
-    EventNumber, SELECTION_THROTTLE_PERIOD, SharedSessionSource, connect_endpoint,
+    EventNumber, SELECTION_THROTTLE_PERIOD, SemanticAgentEvent, SharedSessionSource,
+    connect_endpoint,
 };
 use crate::throttle::throttle;
 
@@ -72,6 +78,8 @@ const PTY_READS_BATCH_THRESHOLD: Duration = Duration::from_millis(250);
 const CREATE_SESSION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg_attr(any(test, feature = "integration_tests"), allow(dead_code))]
 const AMBIENT_CREATE_SESSION_MAX_ATTEMPTS: usize = 3;
+const MAX_UNACKED_EVENTS: usize = 4_096;
+const MAX_UNACKED_EVENT_BYTES: u64 = 16 * 1024 * 1024;
 /// Exponential backoff when retrying reconnection. This configuration has us retry for ~128 seconds before giving up,
 /// where the last interval between retries is 26s.
 /// We should be somewhat generous with the amount of retries allowed when a sharer wants to recover their session,
@@ -169,6 +177,36 @@ struct StartupConfig {
     selected_model_id: String,
 }
 
+struct InitialTerminalState {
+    active_prompt: ActivePrompt,
+    window_size: WindowSize,
+    selection: Selection,
+    init_block_id: SharedBlockId,
+    input_replica_id: InputReplicaId,
+    universal_developer_input_context: Option<UniversalDeveloperInputContext>,
+}
+
+fn semantic_initial_terminal_state() -> InitialTerminalState {
+    InitialTerminalState {
+        active_prompt: ActivePrompt::default(),
+        window_size: WindowSize::default(),
+        selection: Selection::default(),
+        init_block_id: SharedBlockId::default(),
+        input_replica_id: InputReplicaId::default(),
+        universal_developer_input_context: None,
+    }
+}
+
+fn redact_semantic_content(text: &str) -> String {
+    let secrets_regex = SECRETS_REGEX.lock().clone();
+    let ranges = find_secrets_in_text_with_levels_using_regex(text, &secrets_regex);
+    let mut redacted = text.to_owned();
+    for (range, _) in ranges.into_iter().rev() {
+        redacted.replace_range(range.byte_range, "[REDACTED]");
+    }
+    redacted
+}
+
 #[derive(Debug)]
 struct StartupRetryState {
     current_attempt: usize,
@@ -194,6 +232,7 @@ impl StartupRetryState {
 enum StartupFailure {
     Transport,
     InitializeSend,
+    Negotiation,
     WebsocketClosedBeforeStarted,
     WebsocketError,
     Timeout,
@@ -208,6 +247,7 @@ impl StartupFailure {
             | Self::WebsocketClosedBeforeStarted
             | Self::WebsocketError
             | Self::Timeout => true,
+            Self::Negotiation => false,
             Self::ServerRejected(reason) => matches!(
                 reason,
                 FailedToInitializeSessionReason::InternalServerError { .. }
@@ -226,7 +266,7 @@ impl StartupFailure {
             Self::Timeout => FailedToInitializeSessionReason::InternalServerError {
                 details: "Timed out creating shared session".to_string(),
             },
-            Self::Transport | Self::InitializeSend | Self::WebsocketError => {
+            Self::Transport | Self::InitializeSend | Self::Negotiation | Self::WebsocketError => {
                 FailedToInitializeSessionReason::internal_server_error_without_details()
             }
         }
@@ -236,6 +276,7 @@ impl StartupFailure {
         match self {
             Self::Transport => "transport_error",
             Self::InitializeSend => "initialize_send_error",
+            Self::Negotiation => "negotiation_error",
             Self::WebsocketClosedBeforeStarted => "websocket_closed_before_started",
             Self::WebsocketError => "websocket_error",
             Self::Timeout => "timeout",
@@ -294,10 +335,16 @@ pub struct Network {
     sharer_id: Option<ParticipantId>,
     startup_config: Option<StartupConfig>,
     source: SharedSessionSource,
+    content: RequestedSessionContent,
+    semantic_producer: Option<SemanticMutationProducer>,
+    pending_semantic_mutations: Vec<ConversationMutation>,
+    pending_semantic_mutation_bytes: usize,
+    semantic_last_sequence: Option<u64>,
 
     /// HashMap from event_no to the event. We keep these in memory to support reconnections
     /// until the server acks that they have been processed and are safe to remove.
     unacked_terminal_events: HashMap<usize, OrderedTerminalEvent>,
+    unacked_terminal_event_bytes: u64,
 
     /// The parameters for the next input operation to send.
     next_buffer_seq_no: (BlockId, InputOperationSeqNo),
@@ -347,7 +394,13 @@ impl Network {
             sharer_id: None,
             startup_config: None,
             source: SharedSessionSource::default(),
+            content: RequestedSessionContent::FullTerminal,
+            semantic_producer: None,
+            pending_semantic_mutations: Vec::new(),
+            pending_semantic_mutation_bytes: 0,
+            semantic_last_sequence: None,
             unacked_terminal_events: HashMap::new(),
+            unacked_terminal_event_bytes: 0,
             next_buffer_seq_no: (init_block_id, InputOperationSeqNo::zero()),
             pending_input_updates: Vec::new(),
         };
@@ -387,11 +440,20 @@ impl Network {
         universal_developer_input_context: UniversalDeveloperInputContext,
         lifetime: Lifetime,
         source: SharedSessionSource,
+        content: RequestedSessionContent,
+        semantic_agent_events_rx: Receiver<SemanticAgentEvent>,
         max_session_size: Byte,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         let (ws_proxy_tx, ws_proxy_rx) = async_channel::unbounded();
-        let scrollback = scrollback_type.to_scrollback(&model.lock());
+        let scrollback = if content.is_semantic() {
+            Scrollback {
+                blocks: Vec::new(),
+                is_alt_screen_active: false,
+            }
+        } else {
+            scrollback_type.to_scrollback(&model.lock())
+        };
         let num_bytes_scrollback = scrollback.num_bytes();
         let (selection_throttled_tx, selection_rx) = async_channel::unbounded();
         let selection_throttled_rx = throttle(SELECTION_THROTTLE_PERIOD, selection_rx);
@@ -419,6 +481,16 @@ impl Network {
             selected_model_id,
         };
 
+        let semantic_producer = content.execution_identity().cloned().map(|identity| {
+            let mut producer =
+                SemanticMutationProducer::new_with_redactor(identity, redact_semantic_content);
+            if let Some(context) = content.initial_accepted_message_context() {
+                producer
+                    .register_accepted_message_context(context.clone())
+                    .expect("requested semantic content has validated initial context");
+            }
+            producer
+        });
         let mut network = Network {
             event_no: EventNumber::new(),
             selection_event_no: EventNumber::new(),
@@ -442,7 +514,13 @@ impl Network {
             sharer_id: None,
             startup_config: Some(startup_config),
             source,
+            content,
+            semantic_producer,
+            pending_semantic_mutations: Vec::new(),
+            pending_semantic_mutation_bytes: 0,
+            semantic_last_sequence: None,
             unacked_terminal_events: HashMap::new(),
+            unacked_terminal_event_bytes: 0,
             next_buffer_seq_no: (init_block_id.clone(), InputOperationSeqNo::zero()),
             pending_input_updates: Vec::new(),
         };
@@ -459,6 +537,7 @@ impl Network {
             });
         } else {
             network.start_ordered_terminal_events_listener(ordered_events_rx, ctx);
+            network.start_semantic_agent_events_listener(semantic_agent_events_rx, ctx);
             network.start_create_session_attempt(ctx);
         }
         ctx.spawn_stream_local(
@@ -527,6 +606,9 @@ impl Network {
     }
 
     fn send_active_prompt_update(&mut self, active_prompt: ActivePrompt) {
+        if self.content.is_semantic() {
+            return;
+        }
         let message = UpstreamMessage::UpdateActivePrompt(ActivePromptUpdate {
             active_prompt: active_prompt.clone(),
             last_event_no: self.event_no.into(),
@@ -546,6 +628,9 @@ impl Network {
 
     /// Send the presence selection to the server, with a throttle period.
     fn send_presence_selection(&mut self, selection: Selection) {
+        if self.content.is_semantic() {
+            return;
+        }
         self.cached_latest_state.selection = selection.clone();
         if let Err(e) = self.selection_throttled_tx.try_send(selection) {
             sharer_warn!(
@@ -617,6 +702,9 @@ impl Network {
         block_id: &BlockId,
         operations: impl Iterator<Item = &'a CrdtOperation>,
     ) {
+        if self.content.is_semantic() {
+            return;
+        }
         let Some(sharer_id) = self.sharer_id.clone() else {
             return;
         };
@@ -733,6 +821,9 @@ impl Network {
         &mut self,
         update: UniversalDeveloperInputContextUpdate,
     ) {
+        if self.content.is_semantic() {
+            return;
+        }
         // Skip update if nothing would change
         if let Some(ref cached) = self.cached_latest_state.universal_developer_input_context
             && !update.changes_cached_context(cached)
@@ -835,25 +926,42 @@ impl Network {
                     network.clear_startup_transport_handle(attempt);
                     // We don't use the `send_message_to_server` API here
                     // because we don't want to buffer this message.
-                    let universal_developer_input_context = network
-                        .cached_latest_state
-                        .universal_developer_input_context
-                        .clone()
-                        .unwrap_or_else(|| config.universal_developer_input_context.clone());
+                    let initial_terminal_state = if network.content.is_semantic() {
+                        semantic_initial_terminal_state()
+                    } else {
+                        let universal_developer_input_context = network
+                            .cached_latest_state
+                            .universal_developer_input_context
+                            .clone()
+                            .unwrap_or_else(|| config.universal_developer_input_context.clone());
+                        InitialTerminalState {
+                            active_prompt: network.cached_latest_state.prompt.clone(),
+                            window_size: config.window_size,
+                            selection: network.cached_latest_state.selection.clone(),
+                            init_block_id: config.init_block_id.clone().into(),
+                            input_replica_id: config.input_replica_id.clone().to_string().into(),
+                            universal_developer_input_context: Some(
+                                UniversalDeveloperInputContext {
+                                    selected_model: Some(SelectedAgentModel::new(
+                                        config.selected_model_id.clone(),
+                                    )),
+                                    ..universal_developer_input_context
+                                },
+                            ),
+                        }
+                    };
 
                     let message = UpstreamMessage::Initialize(InitPayload {
                         scrollback: config.scrollback,
-                        active_prompt: network.cached_latest_state.prompt.clone(),
-                        window_size: config.window_size,
+                        active_prompt: initial_terminal_state.active_prompt,
+                        window_size: initial_terminal_state.window_size,
                         user_id,
-                        selection: network.cached_latest_state.selection.clone(),
-                        init_block_id: config.init_block_id.into(),
-                        input_replica_id: config.input_replica_id.into(),
+                        selection: initial_terminal_state.selection,
+                        init_block_id: initial_terminal_state.init_block_id,
+                        input_replica_id: initial_terminal_state.input_replica_id,
                         telemetry_context: Some(TelemetryContext(telemetry_context().as_value())),
-                        universal_developer_input_context: Some(UniversalDeveloperInputContext {
-                            selected_model: Some(SelectedAgentModel::new(config.selected_model_id)),
-                            ..universal_developer_input_context
-                        }),
+                        universal_developer_input_context: initial_terminal_state
+                            .universal_developer_input_context,
                         lifetime: config.lifetime,
                         source_type: network.source.source_type.clone(),
                         source_task_id: network.source.source_task_id.clone(),
@@ -861,7 +969,11 @@ impl Network {
                             supports_agent_view: FeatureFlag::AgentView.is_enabled(),
                             supports_full_role: true,
                             supports_full_role_for_real: true,
+                            supports_semantic_conversation: true,
                         },
+                        content_mode: network.content.content_mode(),
+                        semantic_schema_version: network.content.schema_version(),
+                        execution_identity: network.content.execution_identity().cloned(),
                     });
                     if let Err(e) = network.ws_proxy_tx.try_send(message) {
                         sharer_error!(network, "Sharer failed to send initialization message: {e}");
@@ -1130,7 +1242,12 @@ impl Network {
                                 supports_agent_view: FeatureFlag::AgentView.is_enabled(),
                                 supports_full_role: true,
                                 supports_full_role_for_real: true,
+                                supports_semantic_conversation: true,
                             },
+                            content_mode: network.content.content_mode(),
+                            semantic_schema_version: network.content.schema_version(),
+                            execution_identity: network.content.execution_identity().cloned(),
+                            semantic_cursor: network.semantic_cursor(),
                         });
                         if let Err(e) = network.ws_proxy_tx.try_send(message) {
                             sharer_error!(network, "Sharer failed to send reconnect message: {e}");
@@ -1284,6 +1401,61 @@ impl Network {
         );
     }
 
+    fn start_semantic_agent_events_listener(
+        &self,
+        events_rx: Receiver<SemanticAgentEvent>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        ctx.spawn_stream_local(
+            events_rx,
+            |network, event, _ctx| {
+                if !network.content.is_semantic() {
+                    return;
+                }
+                let producer = network
+                    .semantic_producer
+                    .as_mut()
+                    .expect("semantic content has a producer");
+                let result = match event {
+                    SemanticAgentEvent::AcceptedMessageContext(context) => producer
+                        .register_accepted_message_context(context)
+                        .map(|_| Vec::new()),
+                    SemanticAgentEvent::Response(response) => producer.normalize(&response),
+                };
+                match result {
+                    Ok(mutations) => {
+                        for mutation in mutations {
+                            if !network.send_semantic_mutation(mutation) {
+                                sharer_warn!(
+                                    network,
+                                    "Stopping semantic session after pending mutation limit"
+                                );
+                                network.end_session(SessionEndedReason::ExceededSizeLimit);
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        sharer_warn!(
+                            network,
+                            "Stopping semantic session after unsupported response event: {error}"
+                        );
+                        if network.session_id.is_some() {
+                            let interruption = network
+                                .semantic_producer
+                                .as_mut()
+                                .expect("semantic content has a producer")
+                                .interruption(InterruptionReason::ProtocolError, false);
+                            let _ = network.send_semantic_mutation(interruption);
+                        }
+                        network.end_session(SessionEndedReason::EndedBySharer);
+                    }
+                }
+            },
+            |_, _| {},
+        );
+    }
+
     fn process_websocket_message(&mut self, message: Message, ctx: &mut ModelContext<Self>) {
         // Ignore non-text frames (e.g. ping frames sent by the server).
         let Some(text) = message.text() else {
@@ -1296,13 +1468,30 @@ impl Network {
             );
             return;
         };
+        if self.content.is_semantic()
+            && !matches!(
+                &downstream_message,
+                DownstreamMessage::SessionInitialized { .. }
+                    | DownstreamMessage::FailedToInitializeSession { .. }
+                    | DownstreamMessage::SessionReconnected { .. }
+                    | DownstreamMessage::FailedToReconnect { .. }
+                    | DownstreamMessage::SessionTerminated { .. }
+                    | DownstreamMessage::SemanticResyncRequired { .. }
+                    | DownstreamMessage::EventsProcessedAck { .. }
+                    | DownstreamMessage::AgentPromptRequested { .. }
+                    | DownstreamMessage::Pong { .. }
+            )
+        {
+            return;
+        }
         match downstream_message {
             DownstreamMessage::SessionInitialized {
                 session_id,
+                session_secret: _,
                 reconnect_token,
                 sharer_id,
                 sharer_firebase_uid,
-                ..
+                negotiated_content,
             } => {
                 let Stage::BeforeStarted { startup_retry } = &self.stage else {
                     sharer_warn!(
@@ -1313,6 +1502,16 @@ impl Network {
                 };
                 let attempt = startup_retry.current_attempt;
                 let max_attempts = startup_retry.max_attempts;
+                if let Err(error) = self.content.validate_echo(negotiated_content.as_ref()) {
+                    self.handle_startup_failure_with_cause(
+                        StartupFailure::Negotiation,
+                        Some(Arc::new(anyhow::anyhow!(
+                            "session content negotiation failed: {error:?}"
+                        ))),
+                        ctx,
+                    );
+                    return;
+                }
                 self.session_id = Some(session_id);
                 self.reconnect_token = Some(reconnect_token);
                 self.sharer_id = Some(sharer_id.clone());
@@ -1329,6 +1528,7 @@ impl Network {
 
                 // Flush all events starting from the very first event 0, since events were buffered before the session was initialized.
                 self.flush_terminal_events_to_server(0);
+                self.flush_pending_semantic_mutations();
                 // Non terminal events where we only care about the latest value were dropped before we were connected.
                 self.send_latest_state_to_server();
 
@@ -1345,12 +1545,22 @@ impl Network {
             DownstreamMessage::SessionReconnected {
                 last_received_event_no,
                 participant_list,
+                negotiated_content,
             } => {
                 if !matches!(self.stage, Stage::Reconnecting { .. }) {
                     sharer_warn!(
                         self,
                         "Received unexpected SessionReconnected message when we weren't reconnecting"
                     );
+                    return;
+                }
+                if let Err(error) = self.content.validate_echo(negotiated_content.as_ref()) {
+                    sharer_warn!(
+                        self,
+                        "Session content reconnect negotiation failed: {error:?}"
+                    );
+                    self.close_without_reconnection();
+                    ctx.emit(NetworkEvent::FailedToReconnect);
                     return;
                 }
                 sharer_info!(
@@ -1389,13 +1599,25 @@ impl Network {
                 self.close_without_reconnection();
                 ctx.emit(NetworkEvent::SessionTerminated { reason });
             }
+            DownstreamMessage::SemanticResyncRequired { reason } => {
+                self.close_without_reconnection();
+                ctx.emit(NetworkEvent::SemanticResyncRequired { reason });
+            }
             DownstreamMessage::EventsProcessedAck {
                 latest_processed_event_no,
             } => {
-                let mut event_no = latest_processed_event_no;
-                // Remove all stored events before latest_processed_event_no to free up memory.
-                while self.unacked_terminal_events.remove(&event_no).is_some() && event_no > 0 {
-                    event_no -= 1;
+                let acknowledged: Vec<_> = self
+                    .unacked_terminal_events
+                    .keys()
+                    .copied()
+                    .filter(|event_no| *event_no <= latest_processed_event_no)
+                    .collect();
+                for event_no in acknowledged {
+                    if let Some(event) = self.unacked_terminal_events.remove(&event_no) {
+                        self.unacked_terminal_event_bytes = self
+                            .unacked_terminal_event_bytes
+                            .saturating_sub(event.num_bytes().as_u64());
+                    }
                 }
             }
             DownstreamMessage::ParticipantListUpdated(participant_list) => {
@@ -1482,10 +1704,60 @@ impl Network {
                 participant_id,
                 request,
             } => {
+                let accepted_message_context = if self.content.is_semantic() {
+                    if !matches!(self.stage, Stage::StartedSuccessfully { .. }) {
+                        self.send_agent_prompt_rejection(
+                            id,
+                            participant_id,
+                            AgentPromptFailureReason::InvalidConversation,
+                        );
+                        return;
+                    }
+                    let Some(bytes) = request.accepted_message_context.as_deref() else {
+                        self.send_agent_prompt_rejection(
+                            id,
+                            participant_id,
+                            AgentPromptFailureReason::InvalidConversation,
+                        );
+                        return;
+                    };
+                    let Some(execution_identity) = self.content.execution_identity() else {
+                        self.send_agent_prompt_rejection(
+                            id,
+                            participant_id,
+                            AgentPromptFailureReason::InvalidConversation,
+                        );
+                        return;
+                    };
+                    let Some(schema_version) = self.content.schema_version() else {
+                        self.send_agent_prompt_rejection(
+                            id,
+                            participant_id,
+                            AgentPromptFailureReason::InvalidConversation,
+                        );
+                        return;
+                    };
+                    let Ok(context) = warp_semantic_session::decode_accepted_message_context(
+                        bytes,
+                        execution_identity,
+                        schema_version,
+                    ) else {
+                        self.send_agent_prompt_rejection(
+                            id,
+                            participant_id,
+                            AgentPromptFailureReason::InvalidConversation,
+                        );
+                        return;
+                    };
+                    Some(context)
+                } else {
+                    None
+                };
                 ctx.emit(NetworkEvent::AgentPromptRequested {
                     id,
                     participant_id,
                     request,
+                    accepted_message_context: accepted_message_context.map(Box::new),
                 });
             }
             DownstreamMessage::LinkAccessLevelUpdateResponse(response) => {
@@ -1536,6 +1808,9 @@ impl Network {
         ctx.spawn_stream_local(
             events_rx,
             move |network, event_type, ctx| {
+                if network.content.is_semantic() {
+                    return;
+                }
                 let should_send = {
                     let model = network.model.lock();
                     !model.is_receiving_in_band_command_output()
@@ -1597,6 +1872,17 @@ impl Network {
     /// Flushes the accumulated PTY reads into a single [`OrderedTerminalEventType::PtyBytesRead`]
     /// which is then sent to the server.
     fn send_pty_bytes_read_message(&mut self) {
+        if self.content.is_semantic() {
+            if let PtyBytesBatchStatus::Batching { abort_handle, .. } = std::mem::replace(
+                &mut self.pty_bytes_batch_status,
+                PtyBytesBatchStatus::NotBatching {
+                    last_sent_at: Instant::now(),
+                },
+            ) {
+                abort_handle.abort();
+            }
+            return;
+        }
         // We need to check this since we might have flushed the PTY bytes read before the timer expired
         // (for example, when a non-pty bytes read eevnt is received while we're batching).
         // Since Rust can't infer that we'll replace the batch status with a new one if we're currently batching,
@@ -1631,9 +1917,31 @@ impl Network {
     }
 
     fn send_ordered_terminal_event_message(&mut self, event_type: OrderedTerminalEventType) {
+        if self.content.is_semantic()
+            && !matches!(
+                &event_type,
+                OrderedTerminalEventType::SemanticConversationMutation { .. }
+            )
+        {
+            return;
+        }
         // If this send is going to exceed the max number of shareable bytes,
         // let's just end the session.
         let num_bytes = event_type.num_bytes();
+        if self.content.is_semantic()
+            && (self.unacked_terminal_events.len() >= MAX_UNACKED_EVENTS
+                || self
+                    .unacked_terminal_event_bytes
+                    .saturating_add(num_bytes.as_u64())
+                    > MAX_UNACKED_EVENT_BYTES)
+        {
+            sharer_warn!(
+                self,
+                "Stopping shared session because unacknowledged event limits were exceeded"
+            );
+            self.end_session(SessionEndedReason::ExceededSizeLimit);
+            return;
+        }
         self.num_bytes_shared = self.num_bytes_shared.add(num_bytes).unwrap_or(Byte::MAX);
         if self.num_bytes_shared > self.max_session_size {
             sharer_info!(self, "Stopping shared session because max bytes exceeded.");
@@ -1655,7 +1963,27 @@ impl Network {
     /// TODO(roland): non OrderedTerminalEvents (like warp prompt) can be dropped if we're not connected. For non OrderedTerminalEvents,
     /// we only need the latest value and can drop old values. We can send the latest value of needed events as part of reconnection.
     fn send_message_to_server(&mut self, message: UpstreamMessage) {
+        if self.content.is_semantic()
+            && !matches!(
+                &message,
+                UpstreamMessage::Initialize(_)
+                    | UpstreamMessage::Reconnect(_)
+                    | UpstreamMessage::Ping { .. }
+                    | UpstreamMessage::EndSession { .. }
+                    | UpstreamMessage::ExtendSessionRetention { .. }
+                    | UpstreamMessage::RejectAgentPromptRequest { .. }
+                    | UpstreamMessage::OrderedTerminalEvent(OrderedTerminalEvent {
+                        event_type: OrderedTerminalEventType::SemanticConversationMutation { .. },
+                        ..
+                    })
+            )
+        {
+            return;
+        }
         if let UpstreamMessage::OrderedTerminalEvent(event) = &message {
+            self.unacked_terminal_event_bytes = self
+                .unacked_terminal_event_bytes
+                .saturating_add(event.num_bytes().as_u64());
             self.unacked_terminal_events
                 .insert(event.event_no, event.clone());
         }
@@ -1682,6 +2010,10 @@ impl Network {
     /// This is more a best-effort attempt because these events are not critical - that's why they are not ordered terminal events.
     /// With ordered terminal events we require an ack from the server before the client can remove them from the buffer, but we don't do that for these events.
     fn flush_pending_input_updates_to_server(&mut self) {
+        if self.content.is_semantic() {
+            self.pending_input_updates.clear();
+            return;
+        }
         // Take the updates out of self to avoid a borrow conflict with sharer_warn!, which
         // borrows all of self while drain() holds a mutable borrow on pending_input_updates.
         let updates = std::mem::take(&mut self.pending_input_updates);
@@ -1722,6 +2054,9 @@ impl Network {
     /// Send everything in `self.cached_latest_state` to the server.
     /// This is needed when we (re)connect to the server, since all values were dropped before we were connected.
     fn send_latest_state_to_server(&mut self) {
+        if self.content.is_semantic() {
+            return;
+        }
         self.send_active_prompt_update(self.cached_latest_state.prompt.clone());
 
         // Only send a selection update if we've sent selection updates before or the selection update is non-trivial.
@@ -1747,6 +2082,54 @@ impl Network {
     pub fn is_connected(&self) -> bool {
         matches!(self.stage, Stage::StartedSuccessfully { .. })
     }
+
+    fn send_semantic_mutation(&mut self, mutation: ConversationMutation) -> bool {
+        let Some(identity) = mutation.identity.as_ref() else {
+            return false;
+        };
+        self.semantic_last_sequence = Some(identity.sequence);
+        let Some(session_id) = self.session_id else {
+            let encoded_len = mutation.encoded_len();
+            if self.pending_semantic_mutations.len() >= MAX_UNACKED_EVENTS
+                || self
+                    .pending_semantic_mutation_bytes
+                    .saturating_add(encoded_len)
+                    > MAX_UNACKED_EVENT_BYTES as usize
+            {
+                return false;
+            }
+            self.pending_semantic_mutation_bytes = self
+                .pending_semantic_mutation_bytes
+                .saturating_add(encoded_len);
+            self.pending_semantic_mutations.push(mutation);
+            return true;
+        };
+        let Some(cursor) = self.content.cursor(session_id, identity.sequence) else {
+            return false;
+        };
+        self.send_ordered_terminal_event_message(
+            OrderedTerminalEventType::SemanticConversationMutation {
+                cursor,
+                mutation: mutation.encode_to_vec(),
+            },
+        );
+        true
+    }
+
+    fn flush_pending_semantic_mutations(&mut self) {
+        self.pending_semantic_mutation_bytes = 0;
+        for mutation in std::mem::take(&mut self.pending_semantic_mutations) {
+            if !self.send_semantic_mutation(mutation) {
+                self.end_session(SessionEndedReason::ExceededSizeLimit);
+                break;
+            }
+        }
+    }
+
+    fn semantic_cursor(&self) -> Option<session_sharing_protocol::common::SemanticCursor> {
+        self.content
+            .cursor(self.session_id?, self.semantic_last_sequence?)
+    }
 }
 
 const NO_QUOTA_REMAINING_MESSAGE: &str =
@@ -1755,6 +2138,7 @@ fn session_terminated_reason_diagnostic_label(reason: &SessionTerminatedReason) 
     match reason {
         SessionTerminatedReason::NoUserQuotaRemaining {} => "no_user_quota_remaining",
         SessionTerminatedReason::ExceededSizeLimit => "exceeded_size_limit",
+        SessionTerminatedReason::StorageUnavailable => "storage_unavailable",
         SessionTerminatedReason::InternalServerError { .. } => "internal_server_error",
     }
 }
@@ -1772,6 +2156,10 @@ pub fn session_terminated_reason_string(
         SessionTerminatedReason::ExceededSizeLimit => {
             let max_bytes = max_session_size.get_appropriate_unit(UnitType::Decimal);
             format!("Session limit ({max_bytes}) exceeded. Please reshare to continue.")
+        }
+        SessionTerminatedReason::StorageUnavailable => {
+            "The semantic session ended because durable storage is unavailable. Please retry."
+                .to_string()
         }
         SessionTerminatedReason::InternalServerError { .. } => {
             "Session ended due to an internal error. Please try sharing again.".to_string()
@@ -1825,6 +2213,9 @@ pub enum NetworkEvent {
     SessionTerminated {
         reason: SessionTerminatedReason,
     },
+    SemanticResyncRequired {
+        reason: SemanticResyncReason,
+    },
     Reconnecting,
     ParticipantListUpdated(Box<ParticipantList>),
     ParticipantPresenceUpdated(ParticipantPresenceUpdate),
@@ -1861,6 +2252,8 @@ pub enum NetworkEvent {
         id: AgentPromptRequestId,
         participant_id: ParticipantId,
         request: AgentPromptRequest,
+        accepted_message_context:
+            Option<Box<warp_conversation_mutation_api::AcceptedMessageContext>>,
     },
     LinkAccessLevelUpdateResponse {
         response: LinkAccessLevelUpdateResponse,

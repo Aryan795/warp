@@ -229,12 +229,14 @@ warp-workflows.workspace = true
 warp_assets.workspace = true
 warp_channel_config.workspace = true
 warp_completer.workspace = true
+warp_conversation_mutation_api.workspace = true
 warp_core.workspace = true
 warp_errors = { workspace = true, features = ["reqwest-errors"] }
 warp_editor.workspace = true
 warp_graphql.workspace = true
 warp_js = { workspace = true, optional = true }
 warp_search_core.workspace = true
+warp_semantic_session.workspace = true
 warp_server_auth.workspace = true
 warp_server_client.workspace = true
 warp_util.workspace = true

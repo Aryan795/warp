@@ -515,6 +515,9 @@ pub struct AgentDriverOptions {
     pub parent_run_id: Option<String>,
     /// Whether the agent run should share its session.
     pub should_share: bool,
+    /// Exact shared-session content requested by authoritative run metadata.
+    /// Ordinary and locally-created runs use the full-terminal default.
+    pub requested_session_content: warp_semantic_session::RequestedSessionContent,
     /// How long to keep the session alive after the agent run completes, if at all.
     pub idle_on_complete: Option<Duration>,
     /// How long to keep the session alive after the agent run ends in a terminal error, if at
@@ -936,6 +939,7 @@ impl AgentDriver {
             task_id,
             parent_run_id,
             should_share,
+            requested_session_content,
             idle_on_complete,
             idle_on_fail,
             secrets,
@@ -1022,6 +1026,7 @@ impl AgentDriver {
                 working_dir: working_dir.clone(),
                 env_vars: HashMap::clone(&resolved_env_vars),
                 should_share,
+                requested_session_content,
                 task_id,
                 conversation_restoration,
             },

@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use futures::{FutureExt, Stream, StreamExt, select};
 use session_sharing_protocol::common::SessionId;
+use warp_semantic_session::RequestedSessionContent;
 
 use super::{AmbientAgentTask, AmbientAgentTaskId, AmbientAgentTaskState};
 use crate::server::retry_strategies::with_bounded_retry;
@@ -38,15 +39,24 @@ const MAX_STALE_POLLS_BEFORE_FAILURE: usize = 10;
 pub struct SessionJoinInfo {
     pub session_id: Option<SessionId>,
     pub session_link: String,
+    pub requested_content: RequestedSessionContent,
 }
 
 impl SessionJoinInfo {
     pub fn from_task(task: &AmbientAgentTask) -> Option<Self> {
+        Self::try_from_task(task).ok().flatten()
+    }
+
+    pub fn try_from_task(task: &AmbientAgentTask) -> anyhow::Result<Option<Self>> {
         let run_execution = task.active_run_execution();
         // The cloud-mode pane joins on `session_id`; a standalone `session_link` isn't
         // actionable without it.
-        let session_id_str = run_execution.session_id?;
-        let session_id = SessionId::from_str(session_id_str).ok()?;
+        let Some(session_id_str) = run_execution.session_id else {
+            return Ok(None);
+        };
+        let Ok(session_id) = SessionId::from_str(session_id_str) else {
+            return Ok(None);
+        };
 
         // Prefer the server-provided `session_link`; fall back to constructing one from
         // `session_id`. `active_run_execution()` already filters out empty links.
@@ -54,10 +64,12 @@ impl SessionJoinInfo {
             .session_link
             .map(String::from)
             .unwrap_or_else(|| shared_session::join_link(&session_id));
-        Some(Self {
+        let requested_content = task.requested_session_content()?;
+        Ok(Some(Self {
             session_id: Some(session_id),
             session_link,
-        })
+            requested_content,
+        }))
     }
 }
 
@@ -300,8 +312,17 @@ fn poll_run_until_joinable_session(
                                 return;
                             }
 
-                            if task.state == AmbientAgentTaskState::InProgress
-                                && let Some(session_join_info) = SessionJoinInfo::from_task(&task) {
+                            if task.state == AmbientAgentTaskState::InProgress {
+                                let session_join_info = match SessionJoinInfo::try_from_task(&task) {
+                                    Ok(session_join_info) => session_join_info,
+                                    Err(err) => {
+                                        yield Err(err.context(
+                                            "Invalid server-authored Factory semantic session capability"
+                                        ));
+                                        return;
+                                    }
+                                };
+                                if let Some(session_join_info) = session_join_info {
                                     let has_new_session = match &mode {
                                         RunPollMode::InitialRun
                                         | RunPollMode::Followup {
@@ -321,6 +342,7 @@ fn poll_run_until_joinable_session(
                                         return;
                                     }
                                 }
+                            }
                         }
                         Err(err) => {
                             yield Err(err);

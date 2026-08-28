@@ -1,9 +1,15 @@
 use chrono::{Duration, Utc};
+use prost::Message as _;
 use serde_json::{Value, json};
+use warp_conversation_mutation_api::{
+    AcceptedMessageContext, Attribution, Author, Origin, SchemaVersion, author, origin,
+};
+use warp_semantic_session::RequestedSessionContent;
 
 use super::{
     AgentConfigSnapshot, AgentSource, AmbientAgentLiveSessionState, AmbientAgentTask,
-    AmbientAgentTaskState, ExecutionLocation, TaskStatusErrorCode, TaskStatusMessage,
+    AmbientAgentTaskState, ExecutionLocation, FactorySemanticSession, TaskStatusErrorCode,
+    TaskStatusMessage,
 };
 
 fn make_task(snapshot_name: Option<&str>, title: &str) -> AmbientAgentTask {
@@ -35,8 +41,120 @@ fn make_task(snapshot_name: Option<&str>, title: &str) -> AmbientAgentTask {
         agent_config_snapshot,
         artifacts: vec![],
         last_event_sequence: None,
+        factory_semantic_session: None,
         children: vec![],
     }
+}
+
+fn accepted_message_context() -> AcceptedMessageContext {
+    AcceptedMessageContext {
+        schema_version: SchemaVersion::V1 as i32,
+        conversation_id: "conversation-1".to_string(),
+        execution_id: "execution-1".to_string(),
+        message_id: "initial-message".to_string(),
+        attribution: Some(Attribution {
+            author: Some(Author {
+                id: "factory-user".to_string(),
+                kind: author::Kind::User as i32,
+                display_name: "Factory User".to_string(),
+            }),
+            origin: Some(Origin {
+                kind: origin::Kind::Factory as i32,
+                source_id: "factory".to_string(),
+                subtype: "linear".to_string(),
+            }),
+            source_delivery: None,
+        }),
+        media: Vec::new(),
+    }
+}
+
+fn valid_factory_semantic_session(task: &AmbientAgentTask) -> FactorySemanticSession {
+    FactorySemanticSession {
+        content_mode: "semantic_conversation_only".to_string(),
+        schema_version: 1,
+        conversation_id: "conversation-1".to_string(),
+        execution_id: "execution-1".to_string(),
+        run_id: task.task_id.to_string(),
+        request_id: Some("request-1".to_string()),
+        session_id: task.session_id.clone(),
+        accepted_message_context: None,
+    }
+}
+
+#[test]
+fn missing_factory_capability_preserves_full_terminal_mode() {
+    let task = make_task(None, "ordinary ambient run");
+    assert_eq!(
+        task.requested_session_content().unwrap(),
+        RequestedSessionContent::FullTerminal
+    );
+}
+
+#[test]
+fn valid_factory_capability_selects_semantic_v1_with_exact_identity() {
+    let mut task = make_task(None, "Factory run");
+    task.factory_semantic_session = Some(valid_factory_semantic_session(&task));
+
+    let RequestedSessionContent::SemanticConversation {
+        schema_version,
+        execution_identity,
+        initial_accepted_message_context,
+    } = task.requested_session_content().unwrap()
+    else {
+        panic!("Factory capability should select semantic conversation mode");
+    };
+    assert_eq!(schema_version, 1);
+    assert_eq!(execution_identity.conversation_id, "conversation-1");
+    assert_eq!(execution_identity.execution_id, "execution-1");
+    let expected_run_id = task.task_id.to_string();
+    assert_eq!(
+        execution_identity.run_id.as_deref(),
+        Some(expected_run_id.as_str())
+    );
+    assert_eq!(execution_identity.request_id.as_deref(), Some("request-1"));
+    assert!(initial_accepted_message_context.is_none());
+}
+
+#[test]
+fn factory_capability_preserves_validated_initial_accepted_message_context() {
+    let mut task = make_task(None, "Factory run");
+    let context = accepted_message_context();
+    let mut capability = valid_factory_semantic_session(&task);
+    capability.accepted_message_context = Some(context.encode_to_vec());
+    task.factory_semantic_session = Some(capability);
+
+    let requested_content = task.requested_session_content().unwrap();
+    assert_eq!(
+        requested_content.initial_accepted_message_context(),
+        Some(&context)
+    );
+
+    let mut invalid = accepted_message_context();
+    invalid.execution_id = "different-execution".to_string();
+    let mut capability = valid_factory_semantic_session(&task);
+    capability.accepted_message_context = Some(invalid.encode_to_vec());
+    task.factory_semantic_session = Some(capability);
+    assert!(task.requested_session_content().is_err());
+}
+
+#[test]
+fn explicit_invalid_factory_capability_never_downgrades_to_terminal() {
+    let mut task = make_task(None, "Factory run");
+    let mut capability = valid_factory_semantic_session(&task);
+    capability.schema_version = 2;
+    task.factory_semantic_session = Some(capability);
+    assert!(task.requested_session_content().is_err());
+
+    let mut capability = valid_factory_semantic_session(&task);
+    capability.run_id = "different-run".to_string();
+    task.factory_semantic_session = Some(capability);
+    assert!(task.requested_session_content().is_err());
+
+    let mut capability = valid_factory_semantic_session(&task);
+    capability.execution_id = " ".to_string();
+    task.factory_semantic_session = Some(capability);
+    assert!(task.requested_session_content().is_err());
 }
 
 fn task_json_with_run_time(run_time_key: &str, run_time: Value) -> Value {

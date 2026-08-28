@@ -415,6 +415,11 @@ impl EventLoop {
                         });
                     }
                 }
+                OrderedTerminalEventType::SemanticConversationMutation { .. } => {
+                    warp_errors::report_error!(
+                        "Semantic mutation reached the legacy terminal event loop"
+                    );
+                }
             }
 
             if Some(self.next_event_no) == self.catching_up_to_event_no

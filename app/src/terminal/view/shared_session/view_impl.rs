@@ -75,6 +75,25 @@ impl TerminalView {
         self.shared_session.as_ref().map(|s| s.kind())
     }
 
+    pub fn attempt_to_share_semantic_session(
+        &mut self,
+        execution_identity: session_sharing_protocol::common::ExecutionIdentity,
+        source: SharedSessionSource,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.model
+            .lock()
+            .set_shared_session_status(SharedSessionStatus::SharePending);
+        self.notify_shared_session_link_changed(ctx);
+        ctx.emit(Event::StartSharingCurrentSession {
+            scrollback_type: SharedSessionScrollbackType::None,
+            source,
+            content: warp_semantic_session::RequestedSessionContent::semantic_v1(
+                execution_identity,
+            ),
+        });
+    }
+
     pub fn sharer_session_kind_mut(&mut self) -> Option<&mut Kind> {
         self.shared_session.as_mut().map(|s| s.kind_mut())
     }
@@ -622,10 +641,12 @@ impl TerminalView {
             .set_shared_session_status(SharedSessionStatus::SharePending);
         self.notify_shared_session_link_changed(ctx);
         log::info!("Emitting request to start sharing current session");
+        let content = source.requested_content().clone();
 
         ctx.emit(Event::StartSharingCurrentSession {
             scrollback_type,
             source,
+            content,
         });
         if let Some(action_source) = action_source {
             send_telemetry_from_ctx!(
@@ -751,6 +772,48 @@ impl TerminalView {
         source_type: SessionSourceType,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.on_session_share_joined_internal(
+            viewer_id,
+            firebase_uid,
+            Some(input_replica_id),
+            participant_list,
+            session_id,
+            source_type,
+            ctx,
+        );
+    }
+
+    pub fn on_semantic_session_share_joined(
+        &mut self,
+        viewer_id: ParticipantId,
+        firebase_uid: UserUid,
+        participant_list: Box<ParticipantList>,
+        session_id: SessionId,
+        source_type: SessionSourceType,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.on_session_share_joined_internal(
+            viewer_id,
+            firebase_uid,
+            None,
+            participant_list,
+            session_id,
+            source_type,
+            ctx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn on_session_share_joined_internal(
+        &mut self,
+        viewer_id: ParticipantId,
+        firebase_uid: UserUid,
+        input_replica_id: Option<ReplicaId>,
+        participant_list: Box<ParticipantList>,
+        session_id: SessionId,
+        source_type: SessionSourceType,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let started_at = Local::now();
         let self_handle = ctx.handle();
         let adapter = Adapter::new_for_viewer(
@@ -773,33 +836,33 @@ impl TerminalView {
             ctx,
         );
 
-        self.input.update(ctx, |input, ctx| {
-            input.on_session_share_joined(input_replica_id, presence_manager, ctx);
-        });
-
-        // Mark this terminal as a viewer for chips and AI context menu once on join
-        let is_ambient = self.is_ambient_agent_session(ctx);
-        self.input().update(ctx, |input, ctx| {
-            input
-                .prompt_render_helper
-                .prompt_view()
-                .update(ctx, |prompt_display, ctx| {
-                    prompt_display.update_shared_session_viewer_status(true, ctx);
-                });
-
-            input.editor().update(ctx, |editor, ctx| {
-                if let Some(ai_context_menu) = editor.ai_context_menu() {
-                    ai_context_menu.update(ctx, |menu, ctx| {
-                        menu.set_is_shared_session_viewer(true, ctx);
-                        menu.set_is_in_ambient_agent(is_ambient, ctx);
-                    });
-                }
+        if let Some(input_replica_id) = input_replica_id {
+            self.input.update(ctx, |input, ctx| {
+                input.on_session_share_joined(input_replica_id, presence_manager, ctx);
             });
-        });
 
-        // If viewer joined as an executor, make sure the view state is updated.
-        if let Some(role) = role {
-            self.on_self_role_updated(role, ctx);
+            let is_ambient = self.is_ambient_agent_session(ctx);
+            self.input().update(ctx, |input, ctx| {
+                input
+                    .prompt_render_helper
+                    .prompt_view()
+                    .update(ctx, |prompt_display, ctx| {
+                        prompt_display.update_shared_session_viewer_status(true, ctx);
+                    });
+
+                input.editor().update(ctx, |editor, ctx| {
+                    if let Some(ai_context_menu) = editor.ai_context_menu() {
+                        ai_context_menu.update(ctx, |menu, ctx| {
+                            menu.set_is_shared_session_viewer(true, ctx);
+                            menu.set_is_in_ambient_agent(is_ambient, ctx);
+                        });
+                    }
+                });
+            });
+
+            if let Some(role) = role {
+                self.on_self_role_updated(role, ctx);
+            }
         }
 
         self.pane_configuration.update(ctx, |pane_config, ctx| {

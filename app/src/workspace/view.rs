@@ -4356,8 +4356,23 @@ impl Workspace {
         is_ambient_agent: bool,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.add_tab_for_joining_shared_session_with_content(
+            session_id,
+            is_ambient_agent,
+            warp_semantic_session::RequestedSessionContent::FullTerminal,
+            ctx,
+        );
+    }
+
+    fn add_tab_for_joining_shared_session_with_content(
+        &mut self,
+        session_id: SharedSessionId,
+        is_ambient_agent: bool,
+        requested_content: warp_semantic_session::RequestedSessionContent,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let new_pane_group = ctx.add_typed_action_view(|ctx| {
-            PaneGroup::new_for_shared_session_viewer(
+            PaneGroup::new_for_shared_session_viewer_with_content(
                 session_id,
                 self.tips_completed.clone(),
                 self.user_default_shell_unsupported_banner_model_handle
@@ -4365,6 +4380,7 @@ impl Workspace {
                 self.server_api.clone(),
                 self.model_event_sender.clone(),
                 is_ambient_agent,
+                requested_content,
                 ctx,
             )
         });
@@ -25486,6 +25502,7 @@ impl TypedActionView for Workspace {
             OpenOrAttachAmbientAgentConversation {
                 session_id,
                 task_id,
+                requested_content,
             } => {
                 // An existing pane for this run is only reusable if it can host the live session.
                 // A read-only pane (e.g. a conversation transcript viewer opened earlier for the
@@ -25503,6 +25520,7 @@ impl TypedActionView for Workspace {
                         pane_group.attach_execution_session_to_ambient_pane(
                             locator.pane_id,
                             *session_id,
+                            requested_content.clone(),
                             ctx,
                         )
                     });
@@ -25514,7 +25532,12 @@ impl TypedActionView for Workspace {
                 match attached_locator {
                     Some(locator) => self.focus_pane(locator, ctx),
                     // Attaching to a known ambient run: build the pane in ambient mode.
-                    None => self.add_tab_for_joining_shared_session(*session_id, true, ctx),
+                    None => self.add_tab_for_joining_shared_session_with_content(
+                        *session_id,
+                        true,
+                        requested_content.clone(),
+                        ctx,
+                    ),
                 }
             }
             OpenConversationTranscriptViewer {

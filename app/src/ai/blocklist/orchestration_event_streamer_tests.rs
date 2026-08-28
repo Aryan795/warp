@@ -338,6 +338,7 @@ fn make_ambient_task_with_event_seq(
         artifacts: vec![],
         is_sandbox_running: false,
         last_event_sequence,
+        factory_semantic_session: None,
         children: vec![],
     }
 }

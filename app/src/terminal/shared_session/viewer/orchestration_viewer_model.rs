@@ -653,9 +653,19 @@ impl OrchestrationViewerModel {
                 .as_deref()
                 .and_then(|session_id| session_id.parse::<SessionId>().ok())
             {
+                let requested_content = match task.requested_session_content() {
+                    Ok(content) => content,
+                    Err(err) => {
+                        log::error!(
+                            "Refusing legacy child viewer with invalid Factory semantic capability: {err:#}"
+                        );
+                        return;
+                    }
+                };
                 ctx.emit(TerminalViewEvent::EnsureSharedSessionViewerChildPane {
                     conversation_id,
                     session_id,
+                    requested_content,
                 });
             }
         });

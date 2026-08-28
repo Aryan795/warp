@@ -1,6 +1,7 @@
 use session_sharing_protocol::common::SessionId;
 use uuid::Uuid;
 use warp_errors::report_error;
+use warp_semantic_session::RequestedSessionContent;
 use warpui::{SingletonEntity, ViewContext, ViewHandle};
 
 use crate::ai::agent::api::ServerConversationToken;
@@ -16,7 +17,10 @@ use crate::workspace::WorkspaceAction;
 /// The restoration path for an ambient agent pane.
 pub(in crate::pane_group) enum AmbientRestoreKind {
     /// Active shared session
-    SharedSession { session_id: SessionId },
+    SharedSession {
+        session_id: SessionId,
+        requested_content: RequestedSessionContent,
+    },
     /// Conversation data isn't loaded yet — show a loading pane and
     /// defer the real restoration to the pending-restoration subscription
     /// (which waits for the data to be loaded async).
@@ -98,14 +102,16 @@ impl PaneGroup {
             ) {
                 Some(WorkspaceAction::OpenOrAttachAmbientAgentConversation {
                     session_id,
+                    requested_content,
                     task_id: _,
                 }) => {
-                    let (view, terminal_manager) = Self::create_shared_session_viewer(
+                    let (view, terminal_manager) = Self::create_shared_session_viewer_with_content(
                         session_id,
                         resources.clone(),
                         view_size,
                         true, // enable_orchestration_polling
                         true, // is_ambient_agent
+                        requested_content,
                         ctx,
                     );
                     let new_pane = TerminalPane::new(

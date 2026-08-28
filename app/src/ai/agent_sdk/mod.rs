@@ -1053,6 +1053,8 @@ impl AgentDriverRunner {
                     task_id,
                     parent_run_id: None,
                     should_share,
+                    requested_session_content:
+                        warp_semantic_session::RequestedSessionContent::FullTerminal,
                     idle_on_complete: args.idle_on_complete.map(|d| d.into()),
                     idle_on_fail: args.idle_on_fail.map(|d| d.into()),
                     secrets: Default::default(),
@@ -1323,8 +1325,12 @@ impl AgentDriverRunner {
             task_harness,
             task_harness_model_config,
             additional_source_repos,
+            requested_session_content,
         ) = match task_metadata_result {
             Ok(Some(task_metadata)) => {
+                let requested_session_content = task_metadata
+                    .requested_session_content()
+                    .map_err(AgentDriverError::TaskMetadataFetchFailed)?;
                 // The task's harness is stored on the snapshot; if absent, it's the default Oz.
                 let agent_config_snapshot = task_metadata.agent_config_snapshot;
                 let task_harness_config = agent_config_snapshot
@@ -1343,9 +1349,17 @@ impl AgentDriverRunner {
                     Some(task_harness),
                     task_harness_model_config,
                     additional_source_repos,
+                    requested_session_content,
                 )
             }
-            Ok(None) => (None, None, None, None, Vec::new()),
+            Ok(None) => (
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                warp_semantic_session::RequestedSessionContent::FullTerminal,
+            ),
             Err(err) => return Err(AgentDriverError::TaskMetadataFetchFailed(err)),
         };
 
@@ -1364,6 +1378,7 @@ impl AgentDriverRunner {
         driver_options.task_id = parsed_task_id;
         driver_options.parent_run_id = parent_run_id;
         driver_options.additional_source_repos = additional_source_repos;
+        driver_options.requested_session_content = requested_session_content;
         driver_options.secrets = secrets;
         // CLI flags continue to take precedence so users can still override per-invocation.
         if driver_options.third_party_harness_model_config.is_none() {

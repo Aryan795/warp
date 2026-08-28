@@ -94,6 +94,7 @@ fn build_manager_with_registered_ovm(app: &mut App) -> (TerminalManager, Ambient
             channel_event_proxy,
         },
         current_network: Arc::new(FairMutex::new(None)),
+        semantic_transcript: Arc::new(FairMutex::new(SemanticTranscript::default())),
         viewer_remote_update_guard: RemoteUpdateGuard::new(),
         outbound_handlers_registered: false,
         orchestration_viewer_model: Arc::new(FairMutex::new(Some(ovm_handle))),

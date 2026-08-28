@@ -14,6 +14,7 @@ use warp_cli::share::{ShareAccessLevel, ShareRequest, ShareSubject};
 use warp_completer::completer::CommandOutput;
 use warp_core::command::ExitCode;
 use warp_core::features::FeatureFlag;
+use warp_semantic_session::RequestedSessionContent;
 use warp_terminal::model::grid::Dimensions;
 use warp_util::path::ShellFamily;
 use warpui::r#async::FutureExt;
@@ -110,6 +111,7 @@ pub(crate) struct TerminalDriverOptions {
     pub working_dir: PathBuf,
     pub env_vars: HashMap<OsString, OsString>,
     pub should_share: bool,
+    pub requested_session_content: RequestedSessionContent,
     pub task_id: Option<AmbientAgentTaskId>,
     pub conversation_restoration: Option<ConversationRestorationInNewPaneType>,
 }
@@ -192,7 +194,10 @@ fn create_terminal_view(
 ) -> Result<ViewHandle<TerminalView>, AgentDriverError> {
     let is_shared_session_creator = if options.should_share {
         IsSharedSessionCreator::Yes {
-            source: SharedSessionSource::ambient_agent(options.task_id.map(|t| t.to_string())),
+            source: SharedSessionSource::ambient_agent_with_content(
+                options.task_id.map(|t| t.to_string()),
+                options.requested_session_content,
+            ),
         }
     } else {
         IsSharedSessionCreator::No

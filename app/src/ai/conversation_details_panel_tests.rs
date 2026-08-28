@@ -48,6 +48,7 @@ fn create_test_task(task_id: &str) -> AmbientAgentTask {
         artifacts: vec![],
         is_sandbox_running: false,
         last_event_sequence: None,
+        factory_semantic_session: None,
         children: vec![],
     }
 }

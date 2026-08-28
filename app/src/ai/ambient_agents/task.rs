@@ -6,10 +6,13 @@ pub use cloud_object_models::HarnessModelConfig;
 pub use cloud_object_models::{AgentConfigSnapshot, HarnessAuthSecretsConfig, HarnessConfig};
 use iso8601_duration::Duration as Iso8601Duration;
 use serde::{Deserialize, Serialize};
-use session_sharing_protocol::common::SessionId;
+use session_sharing_protocol::common::{
+    ExecutionIdentity, SEMANTIC_CONVERSATION_SCHEMA_VERSION_V1, SessionId,
+};
 use url::Url;
 use warp_core::ui::theme::WarpTheme;
 use warp_errors::report_error;
+use warp_semantic_session::{RequestedSessionContent, decode_accepted_message_context};
 use warpui::color::ColorU;
 use warpui::{SingletonEntity, View, ViewContext};
 
@@ -201,6 +204,101 @@ where
     })
 }
 
+const FACTORY_SEMANTIC_CONTENT_MODE: &str = "semantic_conversation_only";
+
+/// Server-authored capability for a Factory run whose shared session carries
+/// semantic conversation mutations instead of terminal state.
+///
+/// This object must only be populated from the active server-side Factory
+/// execution binding. Client-authored task metadata and agent configuration
+/// are not capability signals.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct FactorySemanticSession {
+    pub content_mode: String,
+    pub schema_version: u32,
+    pub conversation_id: String,
+    pub execution_id: String,
+    pub run_id: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub accepted_message_context: Option<Vec<u8>>,
+}
+
+impl FactorySemanticSession {
+    fn validate_identifier(field: &'static str, value: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !value.is_empty() && value.trim() == value,
+            "invalid Factory semantic session {field}"
+        );
+        Ok(())
+    }
+
+    fn requested_content(
+        &self,
+        task_id: AmbientAgentTaskId,
+        active_session_id: Option<&str>,
+    ) -> anyhow::Result<RequestedSessionContent> {
+        anyhow::ensure!(
+            self.content_mode == FACTORY_SEMANTIC_CONTENT_MODE,
+            "unsupported Factory semantic session content mode {:?}",
+            self.content_mode
+        );
+        anyhow::ensure!(
+            self.schema_version == SEMANTIC_CONVERSATION_SCHEMA_VERSION_V1,
+            "unsupported Factory semantic session schema version {}",
+            self.schema_version
+        );
+        Self::validate_identifier("conversation_id", &self.conversation_id)?;
+        Self::validate_identifier("execution_id", &self.execution_id)?;
+        Self::validate_identifier("run_id", &self.run_id)?;
+        anyhow::ensure!(
+            self.run_id == task_id.to_string(),
+            "Factory semantic session run_id does not match task_id"
+        );
+        if let Some(request_id) = self.request_id.as_deref() {
+            Self::validate_identifier("request_id", request_id)?;
+        }
+        if let Some(session_id) = self.session_id.as_deref() {
+            Self::validate_identifier("session_id", session_id)?;
+            let parsed_capability_session_id = session_id
+                .parse::<SessionId>()
+                .map_err(|_| anyhow::anyhow!("invalid Factory semantic session session_id"))?;
+            if let Some(active_session_id) = active_session_id {
+                let parsed_active_session_id = active_session_id
+                    .parse::<SessionId>()
+                    .map_err(|_| anyhow::anyhow!("invalid active shared-session session_id"))?;
+                anyhow::ensure!(
+                    parsed_capability_session_id == parsed_active_session_id,
+                    "Factory semantic session session_id does not match active session"
+                );
+            }
+        }
+
+        let execution_identity = ExecutionIdentity {
+            conversation_id: self.conversation_id.clone(),
+            execution_id: self.execution_id.clone(),
+            run_id: Some(self.run_id.clone()),
+            request_id: self.request_id.clone(),
+        };
+        match self.accepted_message_context.as_deref() {
+            Some(bytes) => {
+                let context = decode_accepted_message_context(
+                    bytes,
+                    &execution_identity,
+                    self.schema_version,
+                )?;
+                Ok(RequestedSessionContent::semantic_v1_with_initial_context(
+                    execution_identity,
+                    context,
+                )?)
+            }
+            None => Ok(RequestedSessionContent::semantic_v1(execution_identity)),
+        }
+    }
+}
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct AmbientAgentTask {
     pub task_id: AmbientAgentTaskId,
@@ -240,6 +338,11 @@ pub struct AmbientAgentTask {
     /// server supports it; `None` on older servers.
     #[serde(default)]
     pub last_event_sequence: Option<i64>,
+    /// Explicit semantic-session capability derived from the active
+    /// server-side Factory execution binding. Absence preserves the legacy
+    /// full-terminal session.
+    #[serde(default)]
+    pub factory_semantic_session: Option<FactorySemanticSession>,
 
     /// The server-recorded `run_id`s of direct children of this run. Used
     /// by orchestration event-delivery restore to discover children whose
@@ -328,6 +431,19 @@ impl AmbientAgentTask {
 
     pub fn conversation_id(&self) -> Option<&str> {
         self.conversation_id.as_deref()
+    }
+    /// Resolves the exact content contract requested by this run.
+    ///
+    /// An absent capability is the backwards-compatible full-terminal path.
+    /// Once the server emits the capability, malformed or unsupported values
+    /// are errors and must never downgrade to terminal sharing.
+    pub fn requested_session_content(&self) -> anyhow::Result<RequestedSessionContent> {
+        match self.factory_semantic_session.as_ref() {
+            Some(capability) => {
+                capability.requested_content(self.task_id, self.active_run_execution().session_id)
+            }
+            None => Ok(RequestedSessionContent::FullTerminal),
+        }
     }
 
     /// Returns true when this task's source must not accept user-triggered cloud follow-ups.

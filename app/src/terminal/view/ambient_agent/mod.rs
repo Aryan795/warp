@@ -113,22 +113,37 @@ pub fn wire_ambient_agent_session_events(
                 return;
             };
             match event {
-                AmbientAgentViewModelEvent::SessionReady { session_id } => {
+                AmbientAgentViewModelEvent::SessionReady {
+                    session_id,
+                    requested_content,
+                } => {
                     // Local-to-cloud handoff panes pre-populate the forked
                     // conversation on chip click. Use append-mode scrollback
                     // + replay suppression so the cloud agent's replay doesn't
                     // duplicate the blocks we already have.
                     let append_followup_scrollback =
                         view_model.as_ref(ctx).is_local_to_cloud_handoff();
-                    if manager.connect_to_session(*session_id, append_followup_scrollback, ctx) {
+                    if manager.connect_to_session_with_content(
+                        *session_id,
+                        append_followup_scrollback,
+                        requested_content.clone(),
+                        ctx,
+                    ) {
                         manager.start_cloud_mode_setup_command_tracking();
                     }
                 }
-                AmbientAgentViewModelEvent::ExecutionSessionReady { session_id } => {
+                AmbientAgentViewModelEvent::ExecutionSessionReady {
+                    session_id,
+                    requested_content,
+                } => {
                     // Returns false when the viewer is mid-connect, in which case the pane stays
                     // on its current session. Recoverable, but silent otherwise: the attach is
                     // driven by an event, so the caller that requested it has already returned.
-                    if !manager.attach_execution_session(*session_id, ctx) {
+                    if !manager.attach_execution_session_with_content(
+                        *session_id,
+                        requested_content.clone(),
+                        ctx,
+                    ) {
                         log::warn!(
                             "Ambient viewer could not re-attach to execution session {session_id}"
                         );

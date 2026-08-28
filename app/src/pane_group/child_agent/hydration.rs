@@ -166,7 +166,10 @@ impl PaneGroup {
         ctx: &mut ViewContext<Self>,
     ) {
         match decide_child_pane_materialization(&task) {
-            ChildPaneMaterialization::AttachLive { session_id } => {
+            ChildPaneMaterialization::AttachLive {
+                session_id,
+                requested_content,
+            } => {
                 let child_id = child_conversation.id();
                 if self.failed_viewer_child_sessions.get(&child_id) == Some(&session_id) {
                     // The session already failed to join; wait for a later
@@ -188,7 +191,12 @@ impl PaneGroup {
                 if let Some(task_id) = child_conversation.task_id() {
                     self.pending_child_hydrations.remove(&task_id);
                 }
-                self.attach_ambient_orchestration_child_session(child_id, session_id, ctx);
+                self.attach_ambient_orchestration_child_session(
+                    child_id,
+                    session_id,
+                    requested_content,
+                    ctx,
+                );
             }
             ChildPaneMaterialization::LoadTranscript { server_token } => {
                 let child_id = child_conversation.id();
@@ -229,6 +237,11 @@ impl PaneGroup {
                 self.pending_child_hydrations.insert(task_id, child_id);
                 self.ensure_pending_ambient_restoration_subscription(ctx);
             }
+            ChildPaneMaterialization::InvalidSemanticCapability => {
+                log::error!(
+                    "Refusing to materialize orchestration child with invalid semantic capability"
+                );
+            }
         }
     }
 
@@ -241,6 +254,7 @@ impl PaneGroup {
         &mut self,
         child_id: AIConversationId,
         session_id: SessionId,
+        requested_content: warp_semantic_session::RequestedSessionContent,
         ctx: &mut ViewContext<Self>,
     ) {
         let Some(child_conversation) = BlocklistAIHistoryModel::as_ref(ctx)
@@ -280,7 +294,12 @@ impl PaneGroup {
         };
         let view_size = Self::estimated_view_bounds(ctx).size();
         let (new_terminal_view, terminal_manager) = Self::create_ambient_orchestration_child_pane(
-            session_id, child_id, resources, view_size, ctx,
+            session_id,
+            child_id,
+            requested_content,
+            resources,
+            view_size,
+            ctx,
         );
         let pane_data = TerminalPane::new(
             Uuid::new_v4().as_bytes().to_vec(),
@@ -694,14 +713,22 @@ impl PaneGroup {
             };
 
             match decide_child_pane_materialization(&task) {
-                ChildPaneMaterialization::AttachLive { session_id }
+                ChildPaneMaterialization::AttachLive { session_id, .. }
                     if self.failed_viewer_child_sessions.get(&child_id) == Some(&session_id) =>
                 {
                     self.pending_child_hydrations.insert(task_id, child_id);
                 }
-                ChildPaneMaterialization::AttachLive { session_id } => {
+                ChildPaneMaterialization::AttachLive {
+                    session_id,
+                    requested_content,
+                } => {
                     self.failed_viewer_child_sessions.remove(&child_id);
-                    self.attach_ambient_orchestration_child_session(child_id, session_id, ctx);
+                    self.attach_ambient_orchestration_child_session(
+                        child_id,
+                        session_id,
+                        requested_content,
+                        ctx,
+                    );
                 }
                 ChildPaneMaterialization::LoadTranscript { server_token } => {
                     self.failed_viewer_child_sessions.remove(&child_id);
@@ -709,6 +736,11 @@ impl PaneGroup {
                 }
                 ChildPaneMaterialization::Pending => {
                     self.pending_child_hydrations.insert(task_id, child_id);
+                }
+                ChildPaneMaterialization::InvalidSemanticCapability => {
+                    log::error!(
+                        "Refusing to materialize orchestration child with invalid semantic capability"
+                    );
                 }
             }
         }

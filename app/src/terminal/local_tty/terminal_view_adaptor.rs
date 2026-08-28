@@ -687,6 +687,7 @@ impl TerminalManager<TerminalView> {
         scrollback_type: SharedSessionScrollbackType,
         lifetime: Lifetime,
         source: SharedSessionSource,
+        content: warp_semantic_session::RequestedSessionContent,
         model: Arc<FairMutex<TerminalModel>>,
         window_id: WindowId,
         sharer_remote_update_guard: RemoteUpdateGuard,
@@ -748,6 +749,7 @@ impl TerminalManager<TerminalView> {
         });
 
         let (events_tx, events_rx) = async_channel::unbounded();
+        let (semantic_agent_events_tx, semantic_agent_events_rx) = async_channel::unbounded();
 
         let scrollback_first_block_index = scrollback_type.first_block_index(&model.lock());
         let max_session_size = max_session_size(window_id, ctx);
@@ -757,6 +759,7 @@ impl TerminalManager<TerminalView> {
         cfg_if::cfg_if! {
             if #[cfg(any(test, feature = "integration_tests"))] {
                 let _ = lifetime;
+                let _ = semantic_agent_events_rx;
                 let network = ctx.add_model(|ctx| Network::new_for_test(
                     model.clone(),
                     events_rx,
@@ -856,6 +859,8 @@ impl TerminalManager<TerminalView> {
                         universal_developer_input_context,
                         lifetime,
                         source.clone(),
+                        content.clone(),
+                        semantic_agent_events_rx,
                         max_session_size,
                         ctx,
                     )
@@ -865,14 +870,21 @@ impl TerminalManager<TerminalView> {
 
         // Secret redaction relies on a lookback, so it can't work with
         // real-time session sharing.
-        model
-            .lock()
-            .disable_secret_obfuscation_for_shared_sesson_creator(scrollback_first_block_index);
+        if !content.is_semantic() {
+            model
+                .lock()
+                .disable_secret_obfuscation_for_shared_sesson_creator(scrollback_first_block_index);
+        }
 
         // Set the event sender on the model for ordered terminal events.
         model
             .lock()
             .set_ordered_terminal_events_for_shared_session_tx(events_tx);
+        if content.is_semantic() {
+            model
+                .lock()
+                .set_semantic_agent_events_for_shared_session_tx(semantic_agent_events_tx);
+        }
 
         let shared_session_model_clone = shared_session_model.clone();
         ctx.subscribe_to_model(&network, move |network, event, ctx| match event {
@@ -927,26 +939,28 @@ impl TerminalManager<TerminalView> {
 
                 // Flush the initial input operations that the sharer performed
                 // in the latest buffer before the share was started.
-                let is_ambient = model.lock().is_shared_ambient_agent_session();
-                let init_input_ops: Vec<CrdtOperation> = terminal_view
-                    .as_ref(ctx)
-                    .input()
-                    .as_ref(ctx)
-                    .latest_buffer_operations()
-                    .filter(|op| !should_skip_sharer_op(is_ambient, op))
-                    .cloned()
-                    .collect();
-                if !init_input_ops.is_empty() {
-                    network.update(ctx, |network, _ctx| {
-                        network.send_input_update(
-                            model.lock().block_list().active_block_id(),
-                            init_input_ops.iter(),
-                        );
-                    });
+                if !content.is_semantic() {
+                    let is_ambient = model.lock().is_shared_ambient_agent_session();
+                    let init_input_ops: Vec<CrdtOperation> = terminal_view
+                        .as_ref(ctx)
+                        .input()
+                        .as_ref(ctx)
+                        .latest_buffer_operations()
+                        .filter(|op| !should_skip_sharer_op(is_ambient, op))
+                        .cloned()
+                        .collect();
+                    if !init_input_ops.is_empty() {
+                        network.update(ctx, |network, _ctx| {
+                            network.send_input_update(
+                                model.lock().block_list().active_block_id(),
+                                init_input_ops.iter(),
+                            );
+                        });
+                    }
                 }
 
                 // Stream historical agent conversations so viewers have conversation and task context.
-                if FeatureFlag::AgentSharedSessions.is_enabled() {
+                if FeatureFlag::AgentSharedSessions.is_enabled() && !content.is_semantic() {
                     Self::stream_historical_agent_conversations(&terminal_view, &model, ctx);
                 }
 
@@ -1003,6 +1017,22 @@ impl TerminalManager<TerminalView> {
                 terminal_view.update(ctx, |view, ctx| {
                     let reason_string = session_terminated_reason_string(reason, max_session_size);
                     view.show_persistent_toast(reason_string, ToastFlavor::Error, ctx);
+                });
+            }
+            NetworkEvent::SemanticResyncRequired { reason } => {
+                log::warn!("Semantic shared session requires resync: {reason:?}");
+                Self::shared_session_terminated(
+                    &terminal_view,
+                    shared_session_model_clone.clone(),
+                    model.clone(),
+                    ctx,
+                );
+                terminal_view.update(ctx, |view, ctx| {
+                    view.show_persistent_toast(
+                        "The semantic session fell out of sync. Please share it again.".to_string(),
+                        ToastFlavor::Error,
+                        ctx,
+                    );
                 });
             }
             NetworkEvent::Reconnecting => {
@@ -1299,6 +1329,7 @@ impl TerminalManager<TerminalView> {
                 id,
                 participant_id,
                 request,
+                accepted_message_context,
             } => {
                 if !FeatureFlag::AgentSharedSessions.is_enabled() {
                     return;
@@ -1369,6 +1400,16 @@ impl TerminalManager<TerminalView> {
                     .session(terminal_view_id)
                     .is_some();
                 if has_active_cli_agent {
+                    if accepted_message_context.is_some() {
+                        network.update(ctx, |network, _ctx| {
+                            network.send_agent_prompt_rejection(
+                                id.clone(),
+                                participant_id.clone(),
+                                AgentPromptFailureReason::InvalidConversation,
+                            );
+                        });
+                        return;
+                    }
                     // Reuse the rich input submit pipeline so agent-specific
                     // strategies are applied. Bypasses the rich-input-UI side effects 
   					// (telemetry, draft clear, editor buffer clear, pending-image consumption).
@@ -1392,6 +1433,7 @@ impl TerminalManager<TerminalView> {
                             request.server_conversation_token,
                             request.attachments.clone(),
                             participant_id.clone(),
+                            accepted_message_context.as_deref().cloned(),
                             ctx,
                         );
                     });
@@ -1692,6 +1734,7 @@ impl TerminalManager<TerminalView> {
             TerminalViewEvent::StartSharingCurrentSession {
                 scrollback_type,
                 source,
+                content,
             } if FeatureFlag::CreatingSharedSessions.is_enabled() => {
                 Self::start_sharing_session(
                     view.clone(),
@@ -1700,6 +1743,7 @@ impl TerminalManager<TerminalView> {
                     *scrollback_type,
                     session_lifetime,
                     source.clone(),
+                    content.clone(),
                     model.clone(),
                     window_id,
                     sharer_remote_update_guard.clone(),

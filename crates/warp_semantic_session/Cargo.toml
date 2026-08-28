@@ -1,0 +1,18 @@
+[package]
+name = "warp_semantic_session"
+version = "0.1.0"
+edition = "2024"
+authors.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+prost.workspace = true
+prost-types.workspace = true
+session-sharing-protocol.workspace = true
+thiserror.workspace = true
+warp_conversation_mutation_api.workspace = true
+warp_multi_agent_api.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+uuid.workspace = true
