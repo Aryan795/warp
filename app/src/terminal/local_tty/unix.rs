@@ -18,7 +18,7 @@ use libc::{self, TIOCSCTTY, c_int, winsize};
 use mio::Interest;
 use mio::unix::SourceFd;
 use nix::pty::openpty;
-use nix::sys::termios::{self, InputFlags, LocalFlags, SetArg};
+use nix::sys::termios::{self, InputFlags, SetArg};
 use serde::{Deserialize, Serialize};
 use signal_hook_mio::v1_0::Signals;
 use warp_core::channel::ChannelState;
@@ -115,12 +115,28 @@ fn docker_sandbox_run_args(starter: &DockerSandboxShellStarter) -> Vec<std::ffi:
 /// *inside* the container rather than the more obvious `docker exec -it
 /// ... bash`; see [`prepare_dev_container`] for why.
 ///
-/// Without `-t`, the local `docker exec` process would otherwise be the
-/// sole member of the foreground process group on our host pty, so a Ctrl-C
-/// byte would hit the *kernel's* line discipline as a local SIGINT to
-/// `docker exec` itself rather than reach the remote shell — see
-/// [`spawn_command_in_pty`]'s `disable_signal_generation`, which clears
-/// `ISIG` on this session's pty to avoid that.
+/// Without `-t`, our host pty would otherwise be left in its default
+/// cooked mode (`ICANON`+`ISIG`), and the local `docker exec` process would
+/// be the sole member of the foreground process group on it. That breaks
+/// Ctrl-C two ways: `ICANON` buffers everything Warp writes to the pty
+/// (which is *input*, from the child's point of view — see
+/// [`spawn_command_in_pty`]) until a newline shows up, so a lone `ETX` byte
+/// (which is how Warp delivers Ctrl-C — not a host-level signal) can sit
+/// unread by `docker exec` indefinitely; and even if it weren't buffered,
+/// `ISIG` would have the *kernel's* line discipline convert it into a
+/// SIGINT for local `docker exec` directly, terminating the whole attach
+/// rather than interrupting whatever's running remotely, and leaving the
+/// remote `script`/`bash`/foreground-job tree running, orphaned, inside the
+/// container. `docker exec -it` doesn't have this problem because `-t`
+/// makes the local Docker CLI put our host pty in raw mode. `spawn_command_in_pty`
+/// restores that raw-mode behavior without `-t`, so the byte reaches
+/// `docker exec` immediately and is forwarded to the container's own
+/// `script`-owned pty, where `ISIG` (untouched, still enabled there)
+/// converts it into a SIGINT for the *remote* foreground process. Verified
+/// by hand against a real container: with only `ISIG` cleared locally (not
+/// `ICANON`), the byte never even left the host pty; clearing both is what
+/// actually gets Ctrl-C to the remote job while leaving the local attach
+/// (and the pane) alive.
 ///
 /// Passes `script -E never`: `script`'s default `--echo=auto` decides
 /// whether to echo on the pty it allocates by inspecting *its own* stdin,
@@ -620,16 +636,14 @@ fn build_host_shell_command(
 /// (signal mask handling, TIOCSCTTY cast, etc.); keeping a single copy
 /// ensures future fixes automatically apply to every session type.
 ///
-/// `disable_signal_generation` clears `ISIG` on the pty so the kernel's line
-/// discipline passes INTR/QUIT/SUSP bytes through as data instead of turning
-/// them into local signals for `command`'s foreground process group. Used
-/// for Dev Container sessions: see [`dev_container_exec_args`] for why
-/// `docker exec` itself, not the remote shell, would otherwise receive the
+/// `disable_signal_generation` puts the pty into raw mode (`cfmakeraw`: no
+/// `ICANON` line buffering, no `ISIG` signal generation, no local echo,
+/// ...) so a Ctrl-C byte reaches `docker exec` immediately as data instead
+/// of being buffered locally waiting for a newline or converted into a
+/// `SIGINT` that kills the local attach process. Used for Dev Container
+/// sessions: see [`dev_container_exec_args`] for why `docker exec` itself,
+/// not the remote shell, would otherwise receive (or never even see) the
 /// signal.
-#[cfg_attr(
-    not(any(target_os = "linux", target_os = "macos")),
-    allow(unused_variables)
-)]
 fn spawn_command_in_pty(
     mut command: Command,
     size: &SizeInfo,
@@ -642,12 +656,15 @@ fn spawn_command_in_pty(
     // We need to keep it alive long enough for fork().
     let _file = unsafe { File::from_raw_fd(follower) };
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Ok(mut termios) = termios::tcgetattr(leader) {
-        // Set character encoding to UTF-8.
-        termios.input_flags.set(InputFlags::IUTF8, true);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            // Set character encoding to UTF-8. Not touched by `cfmakeraw`
+            // below, so ordering relative to it doesn't matter.
+            termios.input_flags.set(InputFlags::IUTF8, true);
+        }
         if disable_signal_generation {
-            termios.local_flags.remove(LocalFlags::ISIG);
+            termios::cfmakeraw(&mut termios);
         }
         let _ = termios::tcsetattr(leader, SetArg::TCSANOW, &termios);
     }
@@ -1192,9 +1209,8 @@ fn spawn_dev_container(
         node_version_chip_enabled,
     );
 
-    // Cleared so a Ctrl-C byte reaches the remote shell instead of the
-    // kernel converting it into a local SIGINT for `docker exec` itself;
-    // see `dev_container_exec_args`.
+    // See the doc comment on `spawn_command_in_pty`'s `disable_signal_generation`
+    // parameter and on `dev_container_exec_args` for why this attach path needs it.
     spawn_command_in_pty(command, &size, close_fds, true)
 }
 
