@@ -246,3 +246,78 @@ fn octal_unescape_leaves_printable_bytes() {
     assert_eq!(octal_unescape(b"\\033"), &[0x1b]);
     assert_eq!(octal_unescape(b"\\134"), b"\\");
 }
+
+#[test]
+fn same_buffer_shell_then_dcs_then_output() {
+    use super::DecodeItem;
+    let mut parser = ControlModeParser::new();
+    let mut bytes = b"prompt$ ".to_vec();
+    bytes.extend_from_slice(CONTROL_MODE_DCS);
+    bytes.extend_from_slice(b"%output %0 hi\n");
+    assert_eq!(
+        parser.decode(&bytes),
+        vec![
+            DecodeItem::Shell(b"prompt$ ".to_vec()),
+            DecodeItem::Control(ControlEvent::EnteredControlMode),
+            DecodeItem::Control(ControlEvent::PaneOutput {
+                pane_id: PaneId::from("%0"),
+                bytes: b"hi".to_vec(),
+            }),
+        ]
+    );
+    assert!(parser.is_in_control_mode());
+}
+
+#[test]
+fn dcs_prefix_is_held_across_chunks_without_delaying_plain_bytes() {
+    use super::DecodeItem;
+    let mut parser = ControlModeParser::new();
+    assert_eq!(
+        parser.decode(b"abc"),
+        vec![DecodeItem::Shell(b"abc".to_vec())]
+    );
+    assert!(parser.decode(&CONTROL_MODE_DCS[..3]).is_empty());
+    assert_eq!(
+        parser.decode(&CONTROL_MODE_DCS[3..]),
+        vec![DecodeItem::Control(ControlEvent::EnteredControlMode)]
+    );
+}
+
+#[test]
+fn same_buffer_exit_then_shell_bytes() {
+    use super::DecodeItem;
+    let mut parser = ControlModeParser::new();
+    let mut bytes = CONTROL_MODE_DCS.to_vec();
+    bytes.extend_from_slice(b"%output %0 x\n%exit\n$ ");
+    assert_eq!(
+        parser.decode(&bytes),
+        vec![
+            DecodeItem::Control(ControlEvent::EnteredControlMode),
+            DecodeItem::Control(ControlEvent::PaneOutput {
+                pane_id: PaneId::from("%0"),
+                bytes: b"x".to_vec(),
+            }),
+            DecodeItem::Control(ControlEvent::Exit { reason: None }),
+            DecodeItem::Shell(b"$ ".to_vec()),
+        ]
+    );
+    assert!(!parser.is_in_control_mode());
+}
+
+#[test]
+fn protocol_lines_are_not_shell_bytes() {
+    use super::DecodeItem;
+    let mut parser = ControlModeParser::new();
+    let mut bytes = CONTROL_MODE_DCS.to_vec();
+    bytes.extend_from_slice(b"%begin 1 1\nsecret\n%end 1 1\n");
+    let items = parser.decode(&bytes);
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, DecodeItem::Shell(_)))
+    );
+    assert!(items.iter().any(|item| matches!(
+        item,
+        DecodeItem::Control(ControlEvent::CommandEnd { payload, .. }) if payload == &["secret".to_string()]
+    )));
+}

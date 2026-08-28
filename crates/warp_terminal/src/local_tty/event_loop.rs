@@ -14,12 +14,16 @@ use std::thread::{self, JoinHandle};
 use log::error;
 use mio::{self, Events, Interest};
 use parking_lot::{FairMutex, FairMutexGuard};
+use warp_core::features::FeatureFlag;
 
 use super::mio_channel::Receiver;
 use crate::event::ExitReason;
 use crate::event_listener::ChannelEventListener;
 use crate::local_tty;
 use crate::model::ansi;
+use crate::tmux::{
+    ControlEvent, ControlModeParser, DecodeItem, PaneId, refresh_client_command, send_keys_command,
+};
 use crate::writeable_pty::Message;
 
 /// The size of the buffer to read data into from the PTY.
@@ -69,6 +73,10 @@ pub struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     parser: ansi::Processor,
+    tmux: ControlModeParser,
+    in_tmux_control: bool,
+    tmux_pane: Option<PaneId>,
+    pending_tmux_writes: Vec<Cow<'static, [u8]>>,
 }
 
 impl Default for State {
@@ -77,6 +85,10 @@ impl Default for State {
             write_list: VecDeque::new(),
             parser: ansi::Processor::new(),
             writing: None,
+            tmux: ControlModeParser::new(),
+            in_tmux_control: false,
+            tmux_pane: None,
+            pending_tmux_writes: Vec::new(),
         }
     }
 }
@@ -107,6 +119,67 @@ impl State {
     #[inline]
     fn set_current(&mut self, new: Option<Writing>) {
         self.writing = new;
+    }
+}
+
+fn enqueue_input(state: &mut State, input: Cow<'static, [u8]>) {
+    if !state.in_tmux_control {
+        state.write_list.push_back(input);
+        return;
+    }
+    if let Some(pane) = &state.tmux_pane {
+        let encoded = send_keys_command(pane, &input);
+        if !encoded.is_empty() {
+            state.write_list.push_back(Cow::Owned(encoded));
+        }
+    } else {
+        state.pending_tmux_writes.push(input);
+    }
+}
+
+fn flush_pending_tmux_writes(state: &mut State) {
+    let Some(pane) = state.tmux_pane.clone() else {
+        return;
+    };
+    let pending = std::mem::take(&mut state.pending_tmux_writes);
+    for input in pending {
+        let encoded = send_keys_command(&pane, &input);
+        if !encoded.is_empty() {
+            state.write_list.push_back(Cow::Owned(encoded));
+        }
+    }
+}
+
+fn feed_decoded_pty_bytes<H: ansi::Handler, W: io::Write>(
+    state: &mut State,
+    handler: &mut H,
+    writer: &mut W,
+    bytes: &[u8],
+) {
+    for item in state.tmux.decode(bytes) {
+        match item {
+            DecodeItem::Shell(shell) => {
+                state.parser.parse_bytes(handler, &shell, writer);
+            }
+            DecodeItem::Control(ControlEvent::EnteredControlMode) => {
+                state.in_tmux_control = true;
+            }
+            DecodeItem::Control(ControlEvent::PaneOutput { pane_id, bytes }) => {
+                if state.tmux_pane.is_none() {
+                    state.tmux_pane = Some(pane_id.clone());
+                    flush_pending_tmux_writes(state);
+                }
+                if state.tmux_pane.as_ref() == Some(&pane_id) {
+                    state.parser.parse_bytes(handler, &bytes, writer);
+                }
+            }
+            DecodeItem::Control(ControlEvent::Exit { .. }) => {
+                state.in_tmux_control = false;
+                state.tmux_pane = None;
+                state.pending_tmux_writes.clear();
+            }
+            DecodeItem::Control(_) => {}
+        }
     }
 }
 
@@ -167,13 +240,20 @@ where
     fn drain_recv_channel(&mut self, state: &mut State) -> ChannelResult {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Message::Input(input) => state.write_list.push_back(input),
+                Message::Input(input) => enqueue_input(state, input),
                 Message::Shutdown => {
                     return ChannelResult::TerminateLoop {
                         child_exited: false,
                     };
                 }
-                Message::Resize(size) => self.pty.on_resize(&size),
+                Message::Resize(size) => {
+                    self.pty.on_resize(&size);
+                    if state.in_tmux_control {
+                        state.write_list.push_back(Cow::Owned(
+                            refresh_client_command(size.columns(), size.rows()).into_bytes(),
+                        ));
+                    }
+                }
                 Message::ChildExited => return ChannelResult::TerminateLoop { child_exited: true },
             }
         }
@@ -252,11 +332,21 @@ where
 
             // Process the bytes read into the buffer.
             let mut terminal_response_sequences = Vec::new();
-            state.parser.parse_bytes(
-                terminal.deref_mut(),
-                &buf[..bytes_in_buffer],
-                &mut terminal_response_sequences,
-            );
+            let chunk = &buf[..bytes_in_buffer];
+            if FeatureFlag::TmuxControlPrototype.is_enabled() {
+                feed_decoded_pty_bytes(
+                    state,
+                    terminal.deref_mut(),
+                    &mut terminal_response_sequences,
+                    chunk,
+                );
+            } else {
+                state.parser.parse_bytes(
+                    terminal.deref_mut(),
+                    chunk,
+                    &mut terminal_response_sequences,
+                );
+            }
             if !terminal_response_sequences.is_empty() {
                 state
                     .write_list
