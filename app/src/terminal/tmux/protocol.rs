@@ -1,5 +1,8 @@
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::process::{Child, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use warp_core::SessionId;
 use warp_core::paths::cache_dir;
@@ -16,6 +19,8 @@ use crate::terminal::available_shells::AvailableShell;
 use crate::terminal::shell::ShellLaunchData;
 
 const SEND_KEYS_CHUNK_BYTES: usize = 128;
+const KILL_SERVER_TIMEOUT: Duration = Duration::from_secs(2);
+const KILL_SERVER_WAIT_SLICE: Duration = Duration::from_millis(10);
 
 /// Bootstrap data for the Warp-managed pane process (not the control client).
 #[derive(Debug, Clone)]
@@ -145,15 +150,106 @@ pub fn kill_server_argv(tmux_path: &Path, socket: &Path) -> Vec<OsString> {
     ]
 }
 
-/// Best-effort out-of-band teardown if the control-client write never lands.
-pub fn kill_dedicated_server(socket: &Path) {
-    if let Some(tmux_path) = resolve_tmux_binary() {
-        let argv = kill_server_argv(&tmux_path, socket);
-        let mut command = std::process::Command::new(&argv[0]);
-        command.args(&argv[1..]);
-        let _ = command.status();
+#[derive(Debug)]
+enum KillDedicatedServerError {
+    TmuxNotFound,
+    Io(io::Error),
+    NonZeroExit(ExitStatus),
+    TimedOut,
+}
+
+impl std::fmt::Display for KillDedicatedServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TmuxNotFound => write!(f, "tmux binary not found"),
+            Self::Io(err) => write!(f, "{err}"),
+            Self::NonZeroExit(status) => write!(f, "tmux kill-server failed: {status}"),
+            Self::TimedOut => write!(f, "tmux kill-server timed out"),
+        }
     }
-    let _ = std::fs::remove_file(socket);
+}
+
+/// Out-of-band teardown if the control-client write never lands.
+/// Unlinks the socket only after `tmux kill-server` succeeds, so a failed kill
+/// cannot hide a still-running dedicated server.
+pub fn kill_dedicated_server(socket: &Path) {
+    kill_dedicated_server_with(
+        resolve_tmux_binary().as_deref(),
+        socket,
+        KILL_SERVER_TIMEOUT,
+    );
+}
+
+fn kill_dedicated_server_with(tmux_path: Option<&Path>, socket: &Path, timeout: Duration) {
+    match try_kill_dedicated_server(tmux_path, socket, timeout) {
+        Ok(()) => {
+            if let Err(err) = std::fs::remove_file(socket)
+                && err.kind() != io::ErrorKind::NotFound
+            {
+                log::warn!("failed to remove tmux socket {}: {err}", socket.display());
+            }
+        }
+        Err(err) => {
+            log::error!(
+                "leaving tmux socket {} in place after kill-server failure: {err}",
+                socket.display()
+            );
+        }
+    }
+}
+
+/// Run [`kill_dedicated_server`] off the UI thread so tab close cannot stall.
+pub fn schedule_kill_dedicated_server(socket: PathBuf) {
+    if let Err(err) = std::thread::Builder::new()
+        .name("tmux-control-prototype-kill-server".into())
+        .spawn(move || kill_dedicated_server(&socket))
+    {
+        log::error!("failed to spawn tmux kill-server worker: {err}");
+    }
+}
+
+fn try_kill_dedicated_server(
+    tmux_path: Option<&Path>,
+    socket: &Path,
+    timeout: Duration,
+) -> Result<(), KillDedicatedServerError> {
+    let Some(tmux_path) = tmux_path else {
+        return Err(KillDedicatedServerError::TmuxNotFound);
+    };
+    let argv = kill_server_argv(tmux_path, socket);
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    let child = command.spawn().map_err(KillDedicatedServerError::Io)?;
+    let status = wait_child_with_timeout(child, timeout)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(KillDedicatedServerError::NonZeroExit(status))
+    }
+}
+
+fn wait_child_with_timeout(
+    mut child: Child,
+    timeout: Duration,
+) -> Result<ExitStatus, KillDedicatedServerError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(KillDedicatedServerError::TimedOut);
+                }
+                std::thread::sleep(KILL_SERVER_WAIT_SLICE);
+            }
+            Err(err) => return Err(KillDedicatedServerError::Io(err)),
+        }
+    }
 }
 
 /// Encode pane input as `send-keys -H` so arbitrary bytes never pass through tmux key-name parsing.

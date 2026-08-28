@@ -24,8 +24,8 @@ use crate::terminal::terminal_manager::BlockSpacing;
 use crate::terminal::tmux::event_loop::{SharedControlState, TmuxControlSender};
 use crate::terminal::tmux::gateway::spawn_control_client;
 use crate::terminal::tmux::protocol::{
-    fallback_supported_shell, kill_dedicated_server, pane_bootstrap_for_available_shell,
-    pane_bootstrap_for_shell,
+    fallback_supported_shell, pane_bootstrap_for_available_shell, pane_bootstrap_for_shell,
+    schedule_kill_dedicated_server,
 };
 use crate::terminal::writeable_pty::pty_controller::EventLoopSender as _;
 use crate::terminal::writeable_pty::terminal_manager_util::{
@@ -203,11 +203,10 @@ impl TmuxTerminalManager {
 impl Drop for TmuxTerminalManager {
     fn drop(&mut self) {
         let _ = self.event_loop_tx.send(Message::Shutdown);
-        if let Some(handle) = self.event_loop_handle.take() {
-            let _ = handle.join();
-        }
+        // Do not join the reader or wait on kill-server: either can stall the UI thread.
+        let _ = self.event_loop_handle.take();
         if let Some(socket) = self.socket.take() {
-            kill_dedicated_server(&socket);
+            schedule_kill_dedicated_server(socket);
         }
     }
 }

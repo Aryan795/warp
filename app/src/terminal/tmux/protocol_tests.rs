@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use warp_core::SessionId;
 use warp_terminal::shell::ShellType;
@@ -31,13 +33,28 @@ fn kill_server_argv_targets_dedicated_socket() {
     );
 }
 
+static TEST_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn unique_temp_path(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        TEST_PATH_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+fn write_placeholder_socket() -> PathBuf {
+    let socket = unique_temp_path("warp-tmux-kill-test.sock");
+    std::fs::write(&socket, b"keep-me").expect("write placeholder socket");
+    socket
+}
+
 #[test]
 fn kill_dedicated_server_terminates_tmux_on_socket() {
     let Some(tmux_path) = super::resolve_tmux_binary() else {
         return;
     };
-    let socket =
-        std::env::temp_dir().join(format!("warp-tmux-kill-test-{}.sock", std::process::id()));
+    let socket = unique_temp_path("warp-tmux-kill-test.sock");
     let _ = std::fs::remove_file(&socket);
     let started = std::process::Command::new(&tmux_path)
         .args([
@@ -65,6 +82,58 @@ fn kill_dedicated_server_terminates_tmux_on_socket() {
         .expect("list dedicated tmux sessions after kill");
     assert!(!listed_after.success());
     assert!(!socket.exists());
+}
+
+#[test]
+fn kill_dedicated_server_preserves_socket_when_tmux_is_missing() {
+    let socket = write_placeholder_socket();
+    super::kill_dedicated_server_with(None, &socket, Duration::from_secs(1));
+    assert!(socket.exists());
+    let _ = std::fs::remove_file(&socket);
+}
+
+#[test]
+fn kill_dedicated_server_preserves_socket_when_kill_fails() {
+    let false_bin = Path::new("/bin/false");
+    if !false_bin.exists() {
+        return;
+    }
+    let socket = write_placeholder_socket();
+    super::kill_dedicated_server_with(Some(false_bin), &socket, Duration::from_secs(1));
+    assert!(socket.exists());
+    let _ = std::fs::remove_file(&socket);
+}
+
+#[test]
+fn kill_dedicated_server_preserves_socket_when_kill_times_out() {
+    let script = unique_temp_path("warp-tmux-hang-kill-server.sh");
+    std::fs::write(&script, b"#!/bin/sh\nexec sleep 30\n").expect("write hang script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(&script)
+            .expect("hang script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod hang script");
+    }
+    let socket = write_placeholder_socket();
+    let started = Instant::now();
+    super::kill_dedicated_server_with(Some(&script), &socket, Duration::from_millis(80));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(socket.exists());
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&script);
+}
+
+#[test]
+fn schedule_kill_dedicated_server_does_not_block_caller() {
+    let socket = write_placeholder_socket();
+    let started = Instant::now();
+    super::schedule_kill_dedicated_server(socket.clone());
+    assert!(started.elapsed() < Duration::from_millis(200));
+    std::thread::sleep(Duration::from_millis(50));
+    let _ = std::fs::remove_file(&socket);
 }
 
 #[test]
