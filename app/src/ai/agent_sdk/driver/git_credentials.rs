@@ -17,12 +17,9 @@ use anyhow::{Context, Result};
 // disallowed by clippy rules because it flashes a terminal window on Windows).
 use command::blocking::Command as BlockingCommand;
 use warp_core::safe_warn;
-use warp_graphql::error::{UserFacingError, UserFacingErrorInterface};
-use warp_graphql::platform_error::PlatformErrorInfo;
 use warp_isolation_platform::IsolationPlatformError;
 
-use crate::server::graphql::get_user_facing_error_message;
-use crate::server::server_api::ai::{AIClient, GitCredential};
+use crate::server::server_api::ai::{AIClient, GitCredential, TaskGitCredentialsError};
 
 /// How long to wait between credential refresh attempts (~50 minutes, staying
 /// well ahead of the shortest-lived one-hour token expiry).
@@ -45,61 +42,34 @@ const GH_HOSTS_FILENAME: &str = "hosts.yml";
 const GLAB_HOST: &str = "gitlab.com";
 const GLAB_CONFIG_FILENAME: &str = "config.yml";
 
-/// Error fetching git credentials for a task, either a structured platform error
-/// (potentially retryable) or a request-layer failure (workload-token issuance,
-/// network transport).
-#[derive(Debug, thiserror::Error)]
-pub enum TaskGitCredentialsError {
-    #[error("{message}")]
-    Platform {
-        message: String,
-        detail: Option<String>,
-        info: PlatformErrorInfo,
-    },
-    #[error("{message}")]
-    Unstructured { message: String },
-    #[error("Failed to fetch task git credentials")]
-    Request(#[source] anyhow::Error),
+/// Whether a `TaskGitCredentialsError` is worth retrying. Platform errors
+/// defer to the server's `retryable` flag; request-layer errors are retried
+/// unless they indicate the sandbox has no isolation platform at all, since
+/// retrying can never succeed in that case.
+fn is_retryable(error: &TaskGitCredentialsError) -> bool {
+    match error {
+        TaskGitCredentialsError::Platform { info, .. } => info.retryable,
+        TaskGitCredentialsError::Request(error) => !error
+            .downcast_ref::<IsolationPlatformError>()
+            .is_some_and(|error| {
+                matches!(error, IsolationPlatformError::NoIsolationPlatformDetected)
+            }),
+        TaskGitCredentialsError::Unstructured { .. } => false,
+    }
 }
 
-impl TaskGitCredentialsError {
-    pub(crate) fn from_user_facing(error: UserFacingError) -> Self {
-        let UserFacingError {
-            error,
-            response_context,
-        } = error;
-        match error {
-            UserFacingErrorInterface::PlatformError(error) => Self::Platform {
-                message: error.message,
-                detail: error.detail,
-                info: error.info.into(),
-            },
-            error => Self::Unstructured {
-                message: get_user_facing_error_message(UserFacingError {
-                    error,
-                    response_context,
-                }),
-            },
-        }
+/// Fails fast with `NoIsolationPlatformDetected` when no isolation platform is
+/// detected, instead of waiting for the workload-token request to fail
+/// asynchronously. `detect()` is a cheap, memoized, synchronous check, so this
+/// lets bootstrap/refresh skip the network attempt entirely when it can never
+/// succeed.
+pub(crate) fn ensure_isolation_platform_detected() -> Result<(), TaskGitCredentialsError> {
+    if warp_isolation_platform::detect().is_none() {
+        return Err(TaskGitCredentialsError::Request(
+            IsolationPlatformError::NoIsolationPlatformDetected.into(),
+        ));
     }
-
-    /// Whether this failure is worth retrying. Platform errors defer to the
-    /// server's `retryable` flag; request-layer errors are retried unless they
-    /// indicate the sandbox has no isolation platform at all, since retrying
-    /// can never succeed in that case.
-    pub fn retryable(&self) -> bool {
-        match self {
-            Self::Platform { info, .. } => info.retryable,
-            Self::Request(error) => {
-                !error
-                    .downcast_ref::<IsolationPlatformError>()
-                    .is_some_and(|error| {
-                        matches!(error, IsolationPlatformError::NoIsolationPlatformDetected)
-                    })
-            }
-            Self::Unstructured { .. } => false,
-        }
-    }
+    Ok(())
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -327,7 +297,7 @@ where
     loop {
         match fetch().await {
             Ok(value) => return Ok(value),
-            Err(error) if error.retryable() && attempt <= backoff_delays.len() => {
+            Err(error) if is_retryable(&error) && attempt <= backoff_delays.len() => {
                 let delay = backoff_delays[attempt - 1];
                 log_task_git_credentials_failure(operation, attempt, &error, Some(delay));
                 sleep(delay).await;
@@ -502,6 +472,8 @@ async fn try_refresh(
     task_id: &str,
     ai_client: &Arc<dyn AIClient>,
 ) -> Result<(), TaskGitCredentialsError> {
+    ensure_isolation_platform_detected()?;
+
     let workload_token =
         warp_isolation_platform::issue_workload_token(Some(Duration::from_secs(5 * 60)))
             .await

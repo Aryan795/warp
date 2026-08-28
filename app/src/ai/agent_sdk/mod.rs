@@ -49,7 +49,6 @@ use crate::ai::agent::api::convert_conversation::{
     RestorationMode, convert_conversation_data_to_ai_conversation,
 };
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::agent_sdk::driver::git_credentials::TaskGitCredentialsError;
 use crate::ai::agent_sdk::driver::harness::{HarnessKind, harness_kind};
 use crate::ai::agent_sdk::driver::{AgentDriverOptions, AgentRunPrompt, Task};
 use crate::ai::agent_sdk::mcp_config::build_mcp_servers_from_specs;
@@ -73,7 +72,9 @@ use crate::cloud_object::model::persistence::CloudModel;
 use crate::send_telemetry_sync_from_app_ctx;
 use crate::server::ids::{ServerId, SyncId};
 use crate::server::server_api::ServerApiProvider;
-use crate::server::server_api::ai::{AIClient, AgentConfigSnapshot, GitCredential};
+use crate::server::server_api::ai::{
+    AIClient, AgentConfigSnapshot, GitCredential, TaskGitCredentialsError,
+};
 use crate::terminal::view::ConversationRestorationInNewPaneType;
 use crate::workflows::workflow::Workflow;
 
@@ -858,6 +859,8 @@ impl AgentDriverRunner {
                 let task_id_str = task_id_str.clone();
                 let ai_client = Arc::clone(&ai_client);
                 async move {
+                    driver::git_credentials::ensure_isolation_platform_detected()?;
+
                     let workload_token = warp_isolation_platform::issue_workload_token(Some(
                         std::time::Duration::from_secs(5 * 60),
                     ))

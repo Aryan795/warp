@@ -68,18 +68,3 @@ fn optional_debug_is_preserved_when_absent() {
     assert_eq!(info.debug, None);
     assert_eq!(input.debug, None);
 }
-
-#[test]
-fn without_debug_preserves_structured_fields() {
-    let info = PlatformErrorInfo::from(response_with_metadata(
-        vec![("provider", "github")],
-        Some("request-id=example"),
-    ));
-
-    let redacted = info.without_debug();
-
-    assert_eq!(redacted.code, PlatformErrorCode::ResourceUnavailable);
-    assert!(redacted.retryable);
-    assert_eq!(redacted.metadata["provider"], "github");
-    assert_eq!(redacted.debug, None);
-}

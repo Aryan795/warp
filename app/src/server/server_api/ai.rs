@@ -22,6 +22,7 @@ use warp_core::features::FeatureFlag;
 use warp_errors::report_error;
 use warp_graphql::ai::{AgentTaskState, PlatformErrorCode};
 use warp_graphql::client::Operation;
+use warp_graphql::error::{UserFacingError, UserFacingErrorInterface};
 use warp_graphql::mutations::confirm_file_artifact_upload::{
     ConfirmFileArtifactUpload, ConfirmFileArtifactUploadInput, ConfirmFileArtifactUploadResult,
     ConfirmFileArtifactUploadVariables,
@@ -129,7 +130,6 @@ use crate::ai::agent::conversation::{
     AIAgentConversationFormat, AIAgentHarness, AIAgentSerializedBlockFormat,
     ServerAIConversationMetadata,
 };
-use crate::ai::agent_sdk::driver::git_credentials::TaskGitCredentialsError;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 // Re-export ambient agent types for backwards compatibility
 pub use crate::ai::ambient_agents::{
@@ -170,6 +170,45 @@ pub struct TaskStatusUpdate {
     pub message: String,
     pub error_code: Option<PlatformErrorCode>,
     pub platform_error: Option<PlatformErrorInfo>,
+}
+
+/// Error fetching git credentials for a task, either a structured platform error
+/// (potentially retryable) or a request-layer failure (workload-token issuance,
+/// network transport).
+#[derive(Debug, thiserror::Error)]
+pub enum TaskGitCredentialsError {
+    #[error("{message}")]
+    Platform {
+        message: String,
+        detail: Option<String>,
+        info: PlatformErrorInfo,
+    },
+    #[error("{message}")]
+    Unstructured { message: String },
+    #[error("Failed to fetch task git credentials")]
+    Request(#[source] anyhow::Error),
+}
+
+impl TaskGitCredentialsError {
+    pub(crate) fn from_user_facing(error: UserFacingError) -> Self {
+        let UserFacingError {
+            error,
+            response_context,
+        } = error;
+        match error {
+            UserFacingErrorInterface::PlatformError(error) => Self::Platform {
+                message: error.message,
+                detail: error.detail,
+                info: error.info.into(),
+            },
+            error => Self::Unstructured {
+                message: get_user_facing_error_message(UserFacingError {
+                    error,
+                    response_context,
+                }),
+            },
+        }
+    }
 }
 
 fn agent_task_status_message_input(update: TaskStatusUpdate) -> AgentTaskStatusMessageInput {

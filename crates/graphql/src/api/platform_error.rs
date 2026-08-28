@@ -24,13 +24,6 @@ impl PlatformErrorInfo {
             debug: None,
         }
     }
-
-    /// Remove dogfood-only debug details before forwarding an error to a
-    /// persisted or user-visible status.
-    pub fn without_debug(mut self) -> Self {
-        self.debug = None;
-        self
-    }
 }
 
 /// GraphQL output-side representation of [`PlatformErrorInfo`].
