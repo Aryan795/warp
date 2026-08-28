@@ -257,6 +257,13 @@ fn get_minimum_pane_size(app: &AppContext) -> f32 {
     }
 }
 
+struct TmuxPresentationBinding {
+    is_tmux: bool,
+    is_presentation: bool,
+    pane_id: Option<String>,
+    split_target_pane: Option<String>,
+}
+
 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
 fn tmux_runtime_for_window(
     window: WindowId,
@@ -4033,65 +4040,77 @@ impl PaneGroup {
         }
     }
 
+    fn terminal_model_for_pane(
+        &self,
+        pane_id: PaneId,
+        ctx: &AppContext,
+    ) -> Option<Arc<FairMutex<TerminalModel>>> {
+        Some(
+            self.terminal_session_by_id(pane_id)?
+                .terminal_manager(ctx)
+                .as_ref(ctx)
+                .model(),
+        )
+    }
+
+    fn tmux_presentation_binding(
+        &self,
+        pane_id: PaneId,
+        ctx: &AppContext,
+    ) -> Option<TmuxPresentationBinding> {
+        let model = self.terminal_model_for_pane(pane_id, ctx)?;
+        let model = model.lock();
+        Some(TmuxPresentationBinding {
+            is_tmux: model.is_tmux_control_mode() || model.is_tmux_presentation(),
+            is_presentation: model.is_tmux_presentation(),
+            pane_id: model.tmux_pane_id().map(str::to_owned),
+            split_target_pane: model.tmux_split_target_pane().map(str::to_owned),
+        })
+    }
+
     fn try_split_tmux_pane(&mut self, direction: Direction, ctx: &mut ViewContext<Self>) -> bool {
         if !FeatureFlag::TmuxControlPrototype.is_enabled() {
             return false;
         }
-        let Some(view) = self.focused_session_view(ctx) else {
+        let Some(binding) = self.tmux_presentation_binding(self.focused_pane_id(ctx), ctx) else {
             return false;
         };
-        let (is_tmux, focused, is_presentation) = view.read(ctx, |view, _| {
-            let model = view.model.lock();
-            (
-                model.is_tmux_control_mode() || model.is_tmux_presentation(),
-                model.tmux_split_target_pane().map(str::to_owned),
-                model.is_tmux_presentation(),
-            )
-        });
-        if !is_tmux {
+        if !binding.is_tmux {
             return false;
         }
-        let Some(pane_id) = focused else {
-            return is_presentation;
+        let Some(pane_id) = binding.split_target_pane else {
+            return binding.is_presentation;
         };
         let side_by_side = matches!(direction, Direction::Left | Direction::Right);
-        let command = crate::terminal::tmux::protocol::split_window_command(
-            &crate::terminal::tmux::parser::PaneId::from(pane_id.as_str()),
-            side_by_side,
+        self.write_tmux_command(
+            crate::terminal::tmux::protocol::split_window_command(
+                &crate::terminal::tmux::parser::PaneId::from(pane_id.as_str()),
+                side_by_side,
+            )
+            .into_bytes(),
+            ctx,
         );
-        view.update(ctx, |view, ctx| {
-            view.write_to_pty(command.into_bytes(), ctx);
-        });
         true
     }
 
     fn is_tmux_owned(&self, ctx: &AppContext) -> bool {
-        self.focused_session_view(ctx).is_some_and(|view| {
-            view.read(ctx, |view, _| {
-                let model = view.model.lock();
-                model.is_tmux_control_mode() || model.is_tmux_presentation()
-            })
-        })
+        self.tmux_presentation_binding(self.focused_pane_id(ctx), ctx)
+            .is_some_and(|binding| binding.is_tmux)
     }
 
     fn write_tmux_command(&self, bytes: Vec<u8>, ctx: &mut ViewContext<Self>) {
-        if let Some(view) = self.focused_session_view(ctx) {
-            view.update(ctx, |view, ctx| {
-                view.write_to_pty(bytes, ctx);
-            });
-        }
+        ctx.emit(Event::TmuxControlWrite {
+            bytes: bytes.into(),
+        });
     }
 
     fn try_tmux_close_pane(&mut self, pane_id: PaneId, ctx: &mut ViewContext<Self>) -> bool {
         if !FeatureFlag::TmuxControlPrototype.is_enabled() || !self.is_tmux_owned(ctx) {
             return false;
         }
-        let Some(view) = self.terminal_view_from_pane_id(pane_id, ctx) else {
+        let Some(binding) = self.tmux_presentation_binding(pane_id, ctx) else {
             return true;
         };
-        let tmux_pane = view.read(ctx, |view, _| {
-            view.model.lock().tmux_pane_id().map(str::to_owned)
-        });
         let visible = self.panes.visible_pane_count();
         if visible <= 1 {
             self.write_tmux_command(
@@ -4100,7 +4119,7 @@ impl PaneGroup {
                     .to_vec(),
                 ctx,
             );
-        } else if let Some(tmux_pane) = tmux_pane {
+        } else if let Some(tmux_pane) = binding.pane_id {
             self.write_tmux_command(
                 crate::terminal::tmux::protocol::kill_pane_command(
                     &crate::terminal::tmux::parser::PaneId::from(tmux_pane.as_str()),
@@ -4116,12 +4135,10 @@ impl PaneGroup {
         if !FeatureFlag::TmuxControlPrototype.is_enabled() || !self.is_tmux_owned(ctx) {
             return false;
         }
-        let Some(view) = self.terminal_view_from_pane_id(pane_id, ctx) else {
+        let Some(binding) = self.tmux_presentation_binding(pane_id, ctx) else {
             return false;
         };
-        let Some(tmux_pane) = view.read(ctx, |view, _| {
-            view.model.lock().tmux_pane_id().map(str::to_owned)
-        }) else {
+        let Some(tmux_pane) = binding.pane_id else {
             return true;
         };
         self.write_tmux_command(
@@ -4132,6 +4149,21 @@ impl PaneGroup {
             ctx,
         );
         true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tmux_focus_select_pane_command(
+        &self,
+        pane_id: PaneId,
+        ctx: &AppContext,
+    ) -> Option<String> {
+        if !FeatureFlag::TmuxControlPrototype.is_enabled() || !self.is_tmux_owned(ctx) {
+            return None;
+        }
+        let tmux_pane = self.tmux_presentation_binding(pane_id, ctx)?.pane_id?;
+        Some(crate::terminal::tmux::protocol::select_pane_command(
+            &crate::terminal::tmux::parser::PaneId::from(tmux_pane.as_str()),
+        ))
     }
 
     pub fn bind_tmux_pane(&self, pane_id: PaneId, tmux_pane_id: &str, ctx: &mut ViewContext<Self>) {
