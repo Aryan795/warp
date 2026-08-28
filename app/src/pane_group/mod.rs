@@ -3943,6 +3943,27 @@ impl PaneGroup {
         }
     }
 
+    fn try_split_tmux_pane(&mut self, direction: Direction, ctx: &mut ViewContext<Self>) -> bool {
+        if !FeatureFlag::TmuxControlPrototype.is_enabled() {
+            return false;
+        }
+        let Some(view) = self.focused_session_view(ctx) else {
+            return false;
+        };
+        if !view.as_ref(ctx).model.lock().is_tmux_control_mode() {
+            return false;
+        }
+        let side_by_side = matches!(direction, Direction::Left | Direction::Right);
+        let command = crate::terminal::tmux::protocol::split_window_command(
+            &crate::terminal::tmux::parser::PaneId::from("%0"),
+            side_by_side,
+        );
+        view.update(ctx, |view, ctx| {
+            view.write_to_pty(command.into_bytes(), ctx);
+        });
+        true
+    }
+
     /// Used to add a new pane but not splitting panes.
     pub fn add_terminal_pane(
         &mut self,
@@ -8227,6 +8248,9 @@ impl TypedActionView for PaneGroup {
         use PaneGroupAction::*;
         match action {
             Add(direction) => {
+                if self.try_split_tmux_pane(*direction, ctx) {
+                    return;
+                }
                 let chosen_shell = {
                     match self.active_session_terminal_model(ctx) {
                         Some(model) => {

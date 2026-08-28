@@ -472,6 +472,9 @@ pub struct TerminalModel {
     /// Whether or not the underlying shell process has terminated.
     handled_exit: bool,
 
+    /// True while the PTY event loop is in tmux control mode (`DCS 1000p` until `%exit`).
+    tmux_control_mode: bool,
+
     /// The shell type of the login shell for this session.
     shell_launch_state: ShellLaunchState,
 
@@ -1084,6 +1087,7 @@ impl TerminalModel {
             is_receiving_kitty_image_data: IsReceivingKittyActionData::No,
             did_receive_rc_file_dcs: None,
             handled_exit: false,
+            tmux_control_mode: false,
             env_var_collection_name: None,
             shell_launch_state: shell_state,
             obfuscate_secrets,
@@ -1499,6 +1503,15 @@ impl TerminalModel {
         self.handled_exit
             || self.is_conversation_transcript_viewer()
             || self.shared_session_status().is_finished_viewer()
+    }
+
+    pub fn is_tmux_control_mode(&self) -> bool {
+        self.tmux_control_mode
+    }
+
+    pub fn set_tmux_control_mode(&mut self, active: bool) {
+        self.tmux_control_mode = active;
+        self.event_proxy.send_wakeup_event();
     }
 
     pub fn is_conversation_transcript_viewer(&self) -> bool {

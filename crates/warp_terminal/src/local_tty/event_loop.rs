@@ -43,6 +43,8 @@ pub const SIGNALS_TOKEN: mio::Token = mio::Token(2);
 /// state.
 pub trait ActiveTerminal: ansi::Handler + Send {
     fn exit(&mut self, reason: ExitReason);
+
+    fn on_tmux_control_mode(&mut self, _active: bool) {}
 }
 
 pub struct EventLoop<P: local_tty::EventedPty, M: ActiveTerminal> {
@@ -150,19 +152,20 @@ fn flush_pending_tmux_writes(state: &mut State) {
     }
 }
 
-fn feed_decoded_pty_bytes<H: ansi::Handler, W: io::Write>(
+fn feed_decoded_pty_bytes<M: ActiveTerminal, W: io::Write>(
     state: &mut State,
-    handler: &mut H,
+    terminal: &mut M,
     writer: &mut W,
     bytes: &[u8],
 ) {
     for item in state.tmux.decode(bytes) {
         match item {
             DecodeItem::Shell(shell) => {
-                state.parser.parse_bytes(handler, &shell, writer);
+                state.parser.parse_bytes(terminal, &shell, writer);
             }
             DecodeItem::Control(ControlEvent::EnteredControlMode) => {
                 state.in_tmux_control = true;
+                terminal.on_tmux_control_mode(true);
             }
             DecodeItem::Control(ControlEvent::PaneOutput { pane_id, bytes }) => {
                 if state.tmux_pane.is_none() {
@@ -170,13 +173,14 @@ fn feed_decoded_pty_bytes<H: ansi::Handler, W: io::Write>(
                     flush_pending_tmux_writes(state);
                 }
                 if state.tmux_pane.as_ref() == Some(&pane_id) {
-                    state.parser.parse_bytes(handler, &bytes, writer);
+                    state.parser.parse_bytes(terminal, &bytes, writer);
                 }
             }
             DecodeItem::Control(ControlEvent::Exit { .. }) => {
                 state.in_tmux_control = false;
                 state.tmux_pane = None;
                 state.pending_tmux_writes.clear();
+                terminal.on_tmux_control_mode(false);
             }
             DecodeItem::Control(_) => {}
         }

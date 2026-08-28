@@ -26,4 +26,8 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
     fn exit(&mut self, reason: crate::terminal::model::terminal_model::ExitReason) {
         crate::terminal::TerminalModel::exit(self, reason);
     }
+
+    fn on_tmux_control_mode(&mut self, active: bool) {
+        self.set_tmux_control_mode(active);
+    }
 }
