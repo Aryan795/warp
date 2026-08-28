@@ -37,6 +37,11 @@ const SWITCH_TO_PS1_ESCAPE_SEQUENCE: &[u8] = &[escape_sequences::C0::ESC, b'p'];
 /// Used to let the shell know we are switching to the Warp prompt via a bindkey \ew. This will
 /// unset the PS1 to ensure we don't have a double prompt (PS1 and Warp prompt).
 const SWITCH_TO_WARP_PROMPT_ESCAPE_SEQUENCE: &[u8] = &[escape_sequences::C0::ESC, b'w'];
+/// Delay between sending a non-command `PtyWrite` (e.g. the input-reporting probe below, or a
+/// bindkey sequence) and sending whatever else is queued behind it, so the two don't land in the
+/// same read on a relay slow enough to separate the write() calls from the shell consuming the
+/// first one. See [`PtyController::execute_next_queued_write`].
+const PENDING_WRITE_SETTLE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Represents a single call to write bytes to the PTY asynchronously.
 enum PtyWrite {
@@ -353,8 +358,17 @@ impl<T: EventLoopSender> PtyController<T> {
         if let Some(write) = self.pending_writes.pop_front() {
             let is_command = matches!(write, PtyWrite::Command { .. });
             let did_write = self.send_write_to_event_loop(write, ctx);
-            if !is_command || !did_write {
+            if !did_write {
                 self.execute_next_queued_write(ctx);
+            } else if !is_command && !self.pending_writes.is_empty() {
+                // A bound escape sequence (like the input-reporting probe below) can be
+                // echoed instead of consumed if the shell sees more input arrive before
+                // it's done handling it. Let it settle before sending the rest of the
+                // queue rather than continuing in the same tick.
+                ctx.spawn(
+                    warpui::r#async::Timer::after(PENDING_WRITE_SETTLE_DELAY),
+                    |me, _, ctx| me.execute_next_queued_write(ctx),
+                );
             }
         }
     }

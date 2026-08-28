@@ -18,7 +18,7 @@ use libc::{self, TIOCSCTTY, c_int, winsize};
 use mio::Interest;
 use mio::unix::SourceFd;
 use nix::pty::openpty;
-use nix::sys::termios::{self, InputFlags, SetArg};
+use nix::sys::termios::{self, InputFlags, LocalFlags, SetArg};
 use serde::{Deserialize, Serialize};
 use signal_hook_mio::v1_0::Signals;
 use warp_core::channel::ChannelState;
@@ -115,21 +115,12 @@ fn docker_sandbox_run_args(starter: &DockerSandboxShellStarter) -> Vec<std::ffi:
 /// *inside* the container rather than the more obvious `docker exec -it
 /// ... bash`; see [`prepare_dev_container`] for why.
 ///
-/// TODO(prototype): This trades the old "pane hangs forever" bug for a new
-/// one. Without `-t`, the local `docker exec` process is the sole member of
-/// the foreground process group on our host pty, so sending Ctrl-C (which
-/// Warp delivers as a literal `ETX` byte, not a host-level signal) triggers
-/// the *kernel's* line discipline to SIGINT that local `docker exec`
-/// process directly, terminating the whole attach rather than interrupting
-/// whatever's running remotely. Confirmed by hand: `docker exec` exits
-/// immediately on Ctrl-C while the remote `script`/`bash`/foreground-job
-/// tree is left running, orphaned, inside the container, unreachable by any
-/// existing pane. `docker exec -it` doesn't have this problem because `-t`
-/// makes the local Docker CLI put our host pty in raw mode, which disables
-/// `ISIG` and forwards the byte instead of converting it to a local signal.
-/// Fixing this needs either restoring that raw-mode behavior without `-t`
-/// (manually clearing `ISIG` on the pty this `Command` inherits before exec)
-/// or an entirely different attach transport.
+/// Without `-t`, the local `docker exec` process would otherwise be the
+/// sole member of the foreground process group on our host pty, so a Ctrl-C
+/// byte would hit the *kernel's* line discipline as a local SIGINT to
+/// `docker exec` itself rather than reach the remote shell — see
+/// [`spawn_command_in_pty`]'s `disable_signal_generation`, which clears
+/// `ISIG` on this session's pty to avoid that.
 ///
 /// Passes `script -E never`: `script`'s default `--echo=auto` decides
 /// whether to echo on the pty it allocates by inspecting *its own* stdin,
@@ -431,7 +422,7 @@ pub(super) fn spawn(options: PtyOptions) -> Result<PtySpawnInfo> {
         node_version_chip_enabled,
     );
 
-    spawn_command_in_pty(command, &size, close_fds)
+    spawn_command_in_pty(command, &size, close_fds, false)
 }
 
 /// Builds the `Command` for a host-shell PTY session: executable, args,
@@ -628,10 +619,22 @@ fn build_host_shell_command(
 /// The `pre_exec` hook has accumulated years of subtle bug fixes
 /// (signal mask handling, TIOCSCTTY cast, etc.); keeping a single copy
 /// ensures future fixes automatically apply to every session type.
+///
+/// `disable_signal_generation` clears `ISIG` on the pty so the kernel's line
+/// discipline passes INTR/QUIT/SUSP bytes through as data instead of turning
+/// them into local signals for `command`'s foreground process group. Used
+/// for Dev Container sessions: see [`dev_container_exec_args`] for why
+/// `docker exec` itself, not the remote shell, would otherwise receive the
+/// signal.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(unused_variables)
+)]
 fn spawn_command_in_pty(
     mut command: Command,
     size: &SizeInfo,
     close_fds: bool,
+    disable_signal_generation: bool,
 ) -> Result<PtySpawnInfo> {
     let (leader, follower) = make_pty(size.to_winsize())?;
 
@@ -643,6 +646,9 @@ fn spawn_command_in_pty(
     if let Ok(mut termios) = termios::tcgetattr(leader) {
         // Set character encoding to UTF-8.
         termios.input_flags.set(InputFlags::IUTF8, true);
+        if disable_signal_generation {
+            termios.local_flags.remove(LocalFlags::ISIG);
+        }
         let _ = termios::tcsetattr(leader, SetArg::TCSANOW, &termios);
     }
 
@@ -974,7 +980,7 @@ fn spawn_docker_sandbox(
         node_version_chip_enabled,
     );
 
-    spawn_command_in_pty(command, &size, close_fds)
+    spawn_command_in_pty(command, &size, close_fds, false)
 }
 
 /// Builds the `Command` for a Docker-sandbox PTY session: `sbx run`
@@ -1186,7 +1192,10 @@ fn spawn_dev_container(
         node_version_chip_enabled,
     );
 
-    spawn_command_in_pty(command, &size, close_fds)
+    // Cleared so a Ctrl-C byte reaches the remote shell instead of the
+    // kernel converting it into a local SIGINT for `docker exec` itself;
+    // see `dev_container_exec_args`.
+    spawn_command_in_pty(command, &size, close_fds, true)
 }
 
 /// Builds the `Command` for a Dev Container PTY session: `docker exec`

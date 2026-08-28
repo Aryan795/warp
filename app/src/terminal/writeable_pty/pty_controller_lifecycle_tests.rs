@@ -274,3 +274,83 @@ fn rejected_queued_in_band_start_is_cancelled_without_writing_bytes() {
         drop(model_events_tx);
     });
 }
+
+/// Regression test for the input-reporting probe being echoed instead of consumed by the shell:
+/// a write queued behind the probe must not be sent in the same synchronous tick, since a relay
+/// slow enough to separate the probe's `write()` from the shell consuming it could otherwise let
+/// the two land in the same read.
+#[test]
+fn queued_write_behind_probe_is_deferred_to_a_separate_tick() {
+    App::test((), |mut app| async move {
+        let session_id = SessionId::from(7);
+        let session_info = SessionInfo {
+            shell: Shell::new(ShellType::Zsh, None, None, HashSet::new(), None),
+            session_id,
+            ..session_info_with_launch_data(None)
+        };
+
+        let model = terminal_model();
+        let (_model_events_tx, model_events_rx) = async_channel::unbounded();
+        let (_executor_command_tx, executor_command_rx) = async_channel::unbounded();
+        let sessions = app.add_model(|_| {
+            let mut sessions = Sessions::new_for_test();
+            sessions.register_session_for_test(session_info);
+            sessions
+        });
+        let model_events =
+            app.add_model(|ctx| ModelEventDispatcher::new(model_events_rx, sessions.clone(), ctx));
+        model_events.update(&mut app, |dispatcher, _| {
+            dispatcher.set_active_session_id(session_id);
+        });
+        let line_editor_status =
+            app.add_model(|ctx| LineEditorStatus::new(model_events.clone(), sessions.clone(), ctx));
+        let sender = TestEventLoopSender::default();
+        let controller = app.add_model(|ctx| {
+            PtyController::new(
+                sender.clone(),
+                model_events,
+                line_editor_status.clone(),
+                sessions,
+                executor_command_rx,
+                model,
+                ctx,
+            )
+        });
+
+        controller.update(&mut app, |controller, _| {
+            controller.pending_writes.push_back(PtyWrite::Bytes {
+                bytes: b"queued-write".to_vec().into(),
+            });
+        });
+
+        line_editor_status.update(&mut app, |line_editor_status, ctx| {
+            line_editor_status.set_active_for_test(ctx);
+        });
+
+        {
+            let messages = sender.messages.lock();
+            assert_eq!(
+                messages.len(),
+                1,
+                "only the input-reporting probe should be sent in the same tick as Active"
+            );
+            assert!(matches!(
+                &messages[0],
+                Message::Input(bytes) if bytes[..] == [escape_sequences::C0::ESC, b'i']
+            ));
+        }
+
+        warpui::r#async::Timer::after(PENDING_WRITE_SETTLE_DELAY * 4).await;
+
+        let messages = sender.messages.lock();
+        assert_eq!(
+            messages.len(),
+            2,
+            "the write queued behind the probe should be sent once it has settled"
+        );
+        assert!(matches!(
+            &messages[1],
+            Message::Input(bytes) if bytes[..] == *b"queued-write"
+        ));
+    });
+}
