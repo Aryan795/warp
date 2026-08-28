@@ -355,17 +355,77 @@ fn public_conversation_prints_normalized_json_for_native_conversations() {
 }
 
 #[test]
-fn unsupported_detection_requires_422_and_operation_not_supported() {
+fn unsupported_detection_accepts_exact_structured_payloads() {
     assert!(is_normalized_conversation_unsupported(&http_error(
         422,
         UNSUPPORTED_BODY
     )));
+    assert!(is_normalized_conversation_unsupported(&http_error(
+        422,
+        r#"{"type":"https://docs.warp.dev/errors/operation_not_supported"}"#
+    )));
+    assert!(is_normalized_conversation_unsupported(&http_error(
+        422,
+        r#"{"title":"normalized conversations are only supported for Warp-native transcripts"}"#
+    )));
+}
+
+#[test]
+fn unsupported_detection_rejects_422_that_only_contains_the_phrase() {
     assert!(!is_normalized_conversation_unsupported(&http_error(
         422,
-        r#"{"error":"some other validation failure"}"#
+        r#"{"error":"see also: normalized conversations are only supported for Warp-native transcripts / operation_not_supported"}"#
+    )));
+    assert!(!is_normalized_conversation_unsupported(&http_error(
+        422,
+        r#"{"title":"normalized conversations are only supported for Warp-native transcripts (see docs)"}"#
+    )));
+    assert!(!is_normalized_conversation_unsupported(&http_error(
+        422,
+        "normalized conversations are only supported for Warp-native transcripts"
     )));
     assert!(!is_normalized_conversation_unsupported(&http_error(
         401,
         UNSUPPORTED_BODY
     )));
+}
+
+#[test]
+fn run_conversation_does_not_fallback_on_phrase_containing_422() {
+    let mut client = MockAIClient::new();
+    client.expect_get_run_conversation().times(1).returning(|_| {
+        Err(http_error(
+            422,
+            r#"{"error":"see also: normalized conversations are only supported for Warp-native transcripts / operation_not_supported"}"#,
+        ))
+    });
+
+    let err = block_on(load_run_conversation_output(&client, RUN_ID)).unwrap_err();
+
+    assert!(err.to_string().contains("API request failed"));
+    assert_eq!(
+        err.chain()
+            .find_map(|cause| cause.downcast_ref::<HttpStatusError>())
+            .map(|status_error| status_error.status),
+        Some(422)
+    );
+}
+
+#[test]
+fn run_conversation_does_not_fallback_on_server_error() {
+    let mut client = MockAIClient::new();
+    client
+        .expect_get_run_conversation()
+        .times(1)
+        .returning(|_| Err(http_error(500, r#"{"error":"internal error"}"#)));
+
+    let err = block_on(load_run_conversation_output(&client, RUN_ID)).unwrap_err();
+
+    assert!(err.to_string().contains("API request failed"));
+    assert_eq!(
+        err.chain()
+            .find_map(|cause| cause.downcast_ref::<HttpStatusError>())
+            .map(|status_error| status_error.status),
+        Some(500)
+    );
 }

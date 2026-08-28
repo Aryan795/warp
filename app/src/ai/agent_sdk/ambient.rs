@@ -51,7 +51,7 @@ use crate::workspaces::user_workspaces::UserWorkspaces;
 
 const MAX_LINE_WIDTH: usize = 90;
 const STREAM_RETRY_BACKOFF_STEPS: &[u64] = &[1, 2, 5, 10];
-const OPERATION_NOT_SUPPORTED: &str = "operation_not_supported";
+const OPERATION_NOT_SUPPORTED_TYPE: &str = "https://docs.warp.dev/errors/operation_not_supported";
 const NORMALIZED_UNSUPPORTED_TITLE: &str =
     "normalized conversations are only supported for Warp-native transcripts";
 const THIRD_PARTY_CONVERSATION_ID_HINT: &str = concat!(
@@ -1438,14 +1438,29 @@ fn http_status_error(err: &anyhow::Error) -> Option<&HttpStatusError> {
         .find_map(|cause| cause.downcast_ref::<HttpStatusError>())
 }
 
+#[derive(serde::Deserialize)]
+struct NormalizedConversationError {
+    #[serde(rename = "type", default)]
+    type_uri: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
 /// HTTP 422 `operation_not_supported` means this conversation is a third-party harness
 /// transcript, which the normalized conversation API does not serve.
 pub(super) fn is_normalized_conversation_unsupported(err: &anyhow::Error) -> bool {
-    http_status_error(err).is_some_and(|status_error| {
-        status_error.status == 422
-            && (status_error.body.contains(OPERATION_NOT_SUPPORTED)
-                || status_error.body.contains(NORMALIZED_UNSUPPORTED_TITLE))
-    })
+    let Some(status_error) = http_status_error(err) else {
+        return false;
+    };
+    if status_error.status != 422 {
+        return false;
+    }
+    let Ok(payload) = serde_json::from_str::<NormalizedConversationError>(&status_error.body)
+    else {
+        return false;
+    };
+    payload.type_uri.as_deref() == Some(OPERATION_NOT_SUPPORTED_TYPE)
+        || payload.title.as_deref() == Some(NORMALIZED_UNSUPPORTED_TITLE)
 }
 
 pub(super) fn is_http_not_found(err: &anyhow::Error) -> bool {
