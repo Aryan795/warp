@@ -413,8 +413,8 @@ pub struct AgentRunClientSetupMetricPayload {
     pub is_error: bool,
 }
 
-/// Payload for the `mcp_attach_result` client event, reporting the outcome of
-/// attaching one managed/integration MCP server during run setup.
+/// Payload for the `mcp_attach_result` client event: outcome of one
+/// managed/integration MCP attach during run setup.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentRunClientMcpAttachResultPayload {
     /// Config-map name of the server.
@@ -427,6 +427,7 @@ pub struct AgentRunClientMcpAttachResultPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct AgentRunEnvironmentSnapshotRequest {
     pub captured_at: DateTime<Utc>,
