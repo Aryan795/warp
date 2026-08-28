@@ -2,8 +2,10 @@ use std::ffi::OsString;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use command::blocking::Command;
+use instant::Instant;
 use warp_core::SessionId;
 use warp_core::paths::cache_dir;
 use warp_terminal::bootstrap::{generate_session_id, init_shell_script_for_shell};
@@ -334,7 +336,7 @@ fn spawn_setsid_sh(
     args: &[&std::ffi::OsStr],
     fallback_socket: Option<&Path>,
 ) {
-    let mut command = std::process::Command::new("/bin/sh");
+    let mut command = Command::new("/bin/sh");
     command.arg("-c").arg(script).arg(arg0);
     for arg in args {
         command.arg(arg);
@@ -343,7 +345,6 @@ fn spawn_setsid_sh(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    use std::os::unix::process::CommandExt as _;
     // SAFETY: setsid(2) is async-signal-safe and only creates a new session. pre_exec
     // closures run between fork and exec in the child process.
     unsafe {
@@ -378,7 +379,7 @@ fn try_kill_dedicated_server(
         return Err(KillDedicatedServerError::TmuxNotFound);
     };
     let argv = kill_server_argv(tmux_path, socket);
-    let mut command = std::process::Command::new(&argv[0]);
+    let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());

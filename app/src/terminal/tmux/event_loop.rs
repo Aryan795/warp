@@ -40,6 +40,12 @@ impl SharedControlState {
     }
 }
 
+impl Default for SharedControlState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Converts pane-bound PTY writes into control-mode commands on the tmux client stream.
 #[derive(Clone)]
 pub struct TmuxControlSender {
@@ -276,12 +282,13 @@ where
                         }
                     }
                 }
-                if state.needs_write() && can_write {
-                    if let Err(err) = self.pty_write(&mut state, &mut can_write) {
-                        log::error!("Error writing tmux control client: {err}");
-                        self.notify_abnormal_exit();
-                        break 'event_loop;
-                    }
+                if state.needs_write()
+                    && can_write
+                    && let Err(err) = self.pty_write(&mut state, &mut can_write)
+                {
+                    log::error!("Error writing tmux control client: {err}");
+                    self.notify_abnormal_exit();
+                    break 'event_loop;
                 }
             }
         }
@@ -293,7 +300,7 @@ where
     }
 
     fn notify_abnormal_exit(&self) {
-        notify_exit(&mut *self.terminal.lock());
+        notify_exit(&mut self.terminal.lock());
         self.event_listener.send_wakeup_event();
     }
 

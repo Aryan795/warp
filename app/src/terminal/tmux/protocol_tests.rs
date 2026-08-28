@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use command::blocking::Command;
+use instant::Instant;
 use warp_core::SessionId;
 use warp_terminal::shell::ShellType;
 
@@ -56,7 +58,7 @@ fn kill_dedicated_server_terminates_tmux_on_socket() {
     };
     let socket = unique_temp_path("warp-tmux-kill-test.sock");
     let _ = std::fs::remove_file(&socket);
-    let started = std::process::Command::new(&tmux_path)
+    let started = Command::new(&tmux_path)
         .args([
             "-S",
             socket.to_str().expect("socket utf8"),
@@ -70,13 +72,13 @@ fn kill_dedicated_server_terminates_tmux_on_socket() {
         .status()
         .expect("spawn dedicated tmux server");
     assert!(started.success());
-    let listed = std::process::Command::new(&tmux_path)
+    let listed = Command::new(&tmux_path)
         .args(["-S", socket.to_str().expect("socket utf8"), "list-sessions"])
         .status()
         .expect("list dedicated tmux sessions");
     assert!(listed.success());
     super::kill_dedicated_server(&socket);
-    let listed_after = std::process::Command::new(&tmux_path)
+    let listed_after = Command::new(&tmux_path)
         .args(["-S", socket.to_str().expect("socket utf8"), "list-sessions"])
         .status()
         .expect("list dedicated tmux sessions after kill");
