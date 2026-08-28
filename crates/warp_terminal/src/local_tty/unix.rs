@@ -115,9 +115,8 @@ fn docker_sandbox_run_args(starter: &DockerSandboxShellStarter) -> Vec<std::ffi:
 /// Runs with `-it`, giving Docker its own pty allocation on the host-exec
 /// side: it forwards window-resize events (`SIGWINCH`) into the container
 /// automatically for the life of the session, and the container's own
-/// `ISIG` handles Ctrl-C without Warp needing to force raw mode on the host
-/// pty itself (see the `disable_signal_generation: false` passed to
-/// [`spawn_command_in_pty`] in [`spawn_dev_container`]).
+/// `ISIG` handles Ctrl-C without Warp having to force raw mode on the host
+/// pty.
 fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
     let mut args = vec![
         std::ffi::OsString::from("exec"),
@@ -408,7 +407,7 @@ pub(super) fn spawn(options: PtyOptions) -> Result<PtySpawnInfo> {
         node_version_chip_enabled,
     );
 
-    spawn_command_in_pty(command, &size, close_fds, false)
+    spawn_command_in_pty(command, &size, close_fds)
 }
 
 /// Builds the `Command` for a host-shell PTY session: executable, args,
@@ -605,15 +604,10 @@ fn build_host_shell_command(
 /// The `pre_exec` hook has accumulated years of subtle bug fixes
 /// (signal mask handling, TIOCSCTTY cast, etc.); keeping a single copy
 /// ensures future fixes automatically apply to every session type.
-///
-/// `disable_signal_generation` puts the pty in raw mode (`cfmakeraw`), so a
-/// literal `ETX` byte reaches the child as data immediately instead of
-/// being line-buffered or converted into a local `SIGINT`.
 fn spawn_command_in_pty(
     mut command: Command,
     size: &SizeInfo,
     close_fds: bool,
-    disable_signal_generation: bool,
 ) -> Result<PtySpawnInfo> {
     let (leader, follower) = make_pty(size.to_winsize())?;
 
@@ -624,12 +618,8 @@ fn spawn_command_in_pty(
     if let Ok(mut termios) = termios::tcgetattr(leader) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            // Set character encoding to UTF-8. Not touched by `cfmakeraw`
-            // below, so ordering relative to it doesn't matter.
+            // Set character encoding to UTF-8.
             termios.input_flags.set(InputFlags::IUTF8, true);
-        }
-        if disable_signal_generation {
-            termios::cfmakeraw(&mut termios);
         }
         let _ = termios::tcsetattr(leader, SetArg::TCSANOW, &termios);
     }
@@ -962,7 +952,7 @@ fn spawn_docker_sandbox(
         node_version_chip_enabled,
     );
 
-    spawn_command_in_pty(command, &size, close_fds, false)
+    spawn_command_in_pty(command, &size, close_fds)
 }
 
 /// Builds the `Command` for a Docker-sandbox PTY session: `sbx run`
@@ -1175,11 +1165,7 @@ fn spawn_dev_container(
         node_version_chip_enabled,
     );
 
-    // `false`, matching Docker sandbox and host-shell sessions: `-it` gives
-    // Docker its own host-side pty allocation, which already handles
-    // Ctrl-C via the container's own `ISIG`. Forcing raw mode here as well
-    // would fight that instead of helping it.
-    spawn_command_in_pty(command, &size, close_fds, false)
+    spawn_command_in_pty(command, &size, close_fds)
 }
 
 /// Builds the `Command` for a Dev Container PTY session: `docker exec`

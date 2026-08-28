@@ -156,28 +156,26 @@ fn dev_container_exec_args_includes_remote_user_when_present() {
 }
 
 #[test]
-fn spawn_command_in_pty_uses_raw_mode_only_when_requested() {
+fn spawn_command_in_pty_leaves_the_pty_in_cooked_mode() {
     let size = SizeInfo::new_without_font_metrics(24, 80);
 
-    for disable_signal_generation in [true, false] {
-        let mut command = Command::new("/bin/sleep");
-        command.arg("5");
-        let mut spawned = spawn_command_in_pty(command, &size, true, disable_signal_generation)
-            .expect("spawn_command_in_pty should succeed for a trivial command");
+    let mut command = Command::new("/bin/sleep");
+    command.arg("5");
+    let mut spawned = spawn_command_in_pty(command, &size, true)
+        .expect("spawn_command_in_pty should succeed for a trivial command");
 
-        let termios = termios::tcgetattr(spawned.result.leader_fd)
-            .expect("tcgetattr should succeed on the leader fd");
-        let is_raw = !termios.local_flags.contains(LocalFlags::ISIG)
-            && !termios.local_flags.contains(LocalFlags::ICANON)
-            && !termios.local_flags.contains(LocalFlags::ECHO);
-        assert_eq!(
-            is_raw, disable_signal_generation,
-            "ISIG/ICANON/ECHO should be disabled iff disable_signal_generation was requested"
-        );
+    let termios = termios::tcgetattr(spawned.result.leader_fd)
+        .expect("tcgetattr should succeed on the leader fd");
+    assert!(
+        termios.local_flags.contains(LocalFlags::ISIG)
+            && termios.local_flags.contains(LocalFlags::ICANON)
+            && termios.local_flags.contains(LocalFlags::ECHO),
+        "the pty should stay in cooked mode; raw-mode forcing was only ever needed by the \
+         retired `-i` Dev Container workaround"
+    );
 
-        let _ = spawned.child.kill();
-        let _ = spawned.child.wait();
-    }
+    let _ = spawned.child.kill();
+    let _ = spawned.child.wait();
 }
 
 #[test]
