@@ -3071,11 +3071,19 @@ fn replayed_stall_resolved_by_fresh_hydration_is_delivered_exactly_once() {
 }
 
 #[test]
-fn hydration_failure_retry_gives_up_after_max_attempts() {
+fn hydration_failure_retry_gives_up_after_deadline_exceeded() {
     // A message that keeps failing to hydrate must not stall the cursor
-    // forever: after the retry budget is exhausted, the entry is dropped so
-    // the cursor is free to advance again.
+    // forever: once its retry deadline passes, the entry is dropped and the
+    // cursor is freed — persisted, not just advanced in memory, since a
+    // restart must not replay the whole retry cycle for a message already
+    // proven unrecoverable.
     App::test((), |mut app| async move {
+        initialize_settings_for_tests(&mut app);
+        let (sender, _receiver) = std::sync::mpsc::sync_channel::<ModelEvent>(4);
+        let mut global_resource_handles = GlobalResourceHandles::mock(&mut app);
+        global_resource_handles.model_event_sender = Some(sender);
+        app.add_singleton_model(|_| GlobalResourceHandlesProvider::new(global_resource_handles));
+
         let history_model =
             app.add_singleton_model(|_| BlocklistAIHistoryModel::new(vec![], vec![], &[]));
 
@@ -3088,7 +3096,10 @@ fn hydration_failure_retry_gives_up_after_max_attempts() {
             model.restore_conversations(terminal_view_id, vec![conversation], ctx);
         });
 
-        let ai_client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
+        let mut mock = MockAIClient::new();
+        mock.expect_update_event_sequence_on_server()
+            .returning(|_, _| Ok(()));
+        let ai_client: Arc<dyn AIClient> = Arc::new(mock);
         let server_api = ServerApiProvider::new_for_test().get();
         let streamer = app.add_singleton_model(|ctx| {
             OrchestrationEventStreamer::new_with_clients_for_test(ai_client, server_api, ctx)
@@ -3102,7 +3113,9 @@ fn hydration_failure_retry_gives_up_after_max_attempts() {
                 .stalled_messages
                 .push(StalledMessageEvent {
                     event: stalled_event.clone(),
-                    attempts: MAX_STALLED_MESSAGE_RETRY_ATTEMPTS - 1,
+                    deadline: Instant::now(),
+                    next_attempt_at: None,
+                    attempts: 39,
                 });
         });
 
@@ -3115,13 +3128,17 @@ fn hydration_failure_retry_gives_up_after_max_attempts() {
                 me.streams
                     .get(&conversation_id)
                     .is_some_and(|s| s.stalled_messages.is_empty()),
-                "exhausting the retry budget must drop the entry instead of retrying forever"
+                "exhausting the retry deadline must drop the entry instead of retrying forever"
             );
+        });
+        history_model.read(&app, |model, _| {
             assert_eq!(
-                me.streams.get(&conversation_id).map(|s| s.event_cursor),
+                model
+                    .conversation(&conversation_id)
+                    .and_then(|c| c.last_event_sequence()),
                 Some(5),
-                "giving up must advance the cursor past the abandoned sequence, matching the \
-                 log message, instead of leaving it pinned indefinitely"
+                "giving up must persist the cursor past the abandoned sequence, not just \
+                 advance it in memory"
             );
         });
     });
@@ -3154,6 +3171,8 @@ fn retry_stalled_message_does_not_charge_an_attempt_when_self_run_id_is_unavaila
                 .stalled_messages
                 .push(StalledMessageEvent {
                     event: stalled_event,
+                    deadline: Instant::now() + STALLED_MESSAGE_RETRY_DEADLINE,
+                    next_attempt_at: None,
                     attempts: 0,
                 });
         });
@@ -3172,6 +3191,10 @@ fn retry_stalled_message_does_not_charge_an_attempt_when_self_run_id_is_unavaila
             assert_eq!(
                 stream.stalled_messages[0].attempts, 0,
                 "an unresolved self_run_id must not charge an attempt"
+            );
+            assert!(
+                stream.stalled_messages[0].next_attempt_at.is_none(),
+                "an unresolved self_run_id must not advance the next-attempt time either"
             );
             assert!(
                 !stream.stalled_retry_in_flight,
@@ -3220,6 +3243,8 @@ fn wait_time_parent_registration_does_not_skip_past_a_stalled_message() {
             stream.consumers.insert(consumer_id);
             stream.stalled_messages.push(StalledMessageEvent {
                 event: stalled_event,
+                deadline: Instant::now() + STALLED_MESSAGE_RETRY_DEADLINE,
+                next_attempt_at: None,
                 attempts: 0,
             });
         });

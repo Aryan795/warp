@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::channel::mpsc;
+use instant::Instant;
 use uuid::Uuid;
 use warp_cli::agent::Harness;
 use warp_core::features::FeatureFlag;
@@ -41,13 +42,13 @@ const RESTORE_FETCH_BACKOFF_STEPS: &[u64] = &[1, 2, 5, 10];
 const RESTORE_FETCH_PERMANENT_BACKOFF_STEPS: &[u64] = &[30];
 /// How often (milliseconds) the drain timer checks for SSE events.
 const SSE_DRAIN_INTERVAL_MS: u64 = 500;
-/// Cap on hydration retry attempts for a stalled `new_message` event (see
-/// [`StalledMessageEvent`]) before giving up and advancing the cursor past it.
-/// A bound on attempts rather than wall-clock time, since retries are
-/// serialized one at a time and each can itself take several seconds to time
-/// out — generous enough to ride out a transient failure without queuing an
-/// unrecoverable message forever.
-const MAX_STALLED_MESSAGE_RETRY_ATTEMPTS: u32 = 40;
+/// Backoff schedule (seconds) between stalled-message hydration retries;
+/// mirrors `RESTORE_FETCH_BACKOFF_STEPS`, the same failure class.
+const STALLED_MESSAGE_RETRY_BACKOFF_STEPS: &[u64] = RESTORE_FETCH_BACKOFF_STEPS;
+/// How long a stalled `new_message` event is retried before giving up on it
+/// permanently. Wall-clock, not attempts: once retries have varying backoff,
+/// an attempt count no longer describes a budget.
+const STALLED_MESSAGE_RETRY_DEADLINE: Duration = Duration::from_secs(10 * 60);
 /// Cap killed-run tombstones while keeping normal sessions well below the limit.
 const MAX_KILLED_RUN_IDS: usize = 1024;
 /// Max child runs fetched per cold-start `?ancestor_run_id=` REST seed in
@@ -86,6 +87,11 @@ struct SseStreamItem {
 #[derive(Clone)]
 struct StalledMessageEvent {
     event: AgentRunEvent,
+    /// When this entry is given up on and dropped.
+    deadline: Instant,
+    /// Earliest time the next retry may fire; `None` retries immediately.
+    next_attempt_at: Option<Instant>,
+    /// Number of hydration attempts so far; only picks the backoff step.
     attempts: u32,
 }
 
@@ -2739,31 +2745,34 @@ impl OrchestrationEventStreamer {
                  conversation_id={conversation_id:?} sequence={}",
                 event.sequence
             );
-            stream
-                .stalled_messages
-                .push(StalledMessageEvent { event, attempts: 0 });
+            stream.stalled_messages.push(StalledMessageEvent {
+                event,
+                deadline: Instant::now() + STALLED_MESSAGE_RETRY_DEADLINE,
+                next_attempt_at: None,
+                attempts: 0,
+            });
         }
     }
 
-    /// Retries hydration for the oldest (lowest-sequence) still-stalled
-    /// `new_message` event for `conversation_id`, one at a time, so a
-    /// transient body-fetch failure is retried instead of leaving the event
-    /// (and the cursor pinned behind it) unresolved forever.
+    /// Retries hydration for the oldest still-stalled `new_message` event
+    /// for `conversation_id` whose backoff has elapsed, one at a time.
     ///
     /// Resolving `self_run_id` happens before anything is committed: without
-    /// it, `hydrate_event_for_recipient` would reject the fetch outright on
-    /// its own `recipient_run_id` guard, and that rejection must not count as
-    /// a failed attempt against the stalled entry's retry budget — it isn't
-    /// evidence the message is unrecoverable, just that the conversation's
-    /// run_id isn't resolvable yet.
+    /// it, `hydrate_event_for_recipient` would reject the fetch outright, and
+    /// that rejection must not charge an attempt or advance `next_attempt_at`
+    /// — it isn't evidence the message is unrecoverable, just that the run_id
+    /// isn't resolvable yet.
     fn retry_stalled_message(
         &mut self,
         conversation_id: AIConversationId,
         ctx: &mut ModelContext<Self>,
     ) {
+        let now = Instant::now();
+        let is_ready =
+            |stalled: &StalledMessageEvent| stalled.next_attempt_at.is_none_or(|at| now >= at);
         let has_retryable_stalled_message =
             self.streams.get(&conversation_id).is_some_and(|stream| {
-                !stream.stalled_retry_in_flight && !stream.stalled_messages.is_empty()
+                !stream.stalled_retry_in_flight && stream.stalled_messages.iter().any(is_ready)
             });
         if !has_retryable_stalled_message {
             return;
@@ -2778,6 +2787,7 @@ impl OrchestrationEventStreamer {
         let Some(stalled) = stream
             .stalled_messages
             .iter()
+            .filter(|stalled| is_ready(stalled))
             .min_by_key(|stalled| stalled.event.sequence)
             .cloned()
         else {
@@ -2801,10 +2811,10 @@ impl OrchestrationEventStreamer {
     }
 
     /// Completion callback for [`Self::retry_stalled_message`]. On success,
-    /// delivers the message through the normal batch path. On repeated
-    /// failure, gives up once `MAX_STALLED_MESSAGE_RETRY_ATTEMPTS` is
-    /// exhausted and explicitly advances the cursor past the abandoned
-    /// sequence, so a permanently unrecoverable message cannot pin it forever.
+    /// delivers the message through the normal batch path. On failure,
+    /// schedules the next attempt via backoff, or, once
+    /// `STALLED_MESSAGE_RETRY_DEADLINE` has passed, gives up and persists the
+    /// cursor past the abandoned sequence so it cannot pin it forever.
     fn finish_stalled_message_retry(
         &mut self,
         conversation_id: AIConversationId,
@@ -2852,17 +2862,24 @@ impl OrchestrationEventStreamer {
 
         let stalled = &mut stream.stalled_messages[index];
         stalled.attempts += 1;
-        if stalled.attempts >= MAX_STALLED_MESSAGE_RETRY_ATTEMPTS {
+        if Instant::now() >= stalled.deadline {
             let attempts = stalled.attempts;
             stream.stalled_messages.remove(index);
             log::error!(
-                "Giving up on stalled message after {attempts} hydration retries; it will not \
-                 be delivered. Advancing the cursor past sequence {} so it does not stall \
-                 indefinitely: conversation_id={conversation_id:?}",
+                "Giving up on stalled message after {attempts} hydration retries \
+                 (retry deadline exceeded); it will not be delivered. Advancing the cursor \
+                 past sequence {} so it does not stall indefinitely: \
+                 conversation_id={conversation_id:?}",
                 event.sequence
             );
-            self.set_owner_event_cursor(conversation_id, event.sequence);
+            self.persist_event_cursor(conversation_id, event.sequence, ctx);
             self.advance_handled_sequence(conversation_id, event.sequence);
+        } else {
+            let step_index = (stalled.attempts as usize)
+                .saturating_sub(1)
+                .min(STALLED_MESSAGE_RETRY_BACKOFF_STEPS.len() - 1);
+            let backoff = Duration::from_secs(STALLED_MESSAGE_RETRY_BACKOFF_STEPS[step_index]);
+            stalled.next_attempt_at = Some(Instant::now() + backoff);
         }
     }
 
