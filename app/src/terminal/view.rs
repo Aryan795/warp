@@ -1743,6 +1743,7 @@ pub enum Event {
     },
     OpenTmuxPresentationWindow,
     CloseTmuxPresentationWindow,
+    TmuxClientEvents(Vec<crate::terminal::model::terminal_model::TmuxClientEvent>),
     WriteAgentInputToPty {
         bytes: Cow<'static, [u8]>,
         mode: AIAgentPtyWriteMode,
@@ -9751,11 +9752,15 @@ impl TerminalView {
             let mut model = self.model.lock();
             let open = model.take_tmux_open_presentation();
             let close = model.take_tmux_close_presentation();
+            let tmux_events = model.take_tmux_events();
             drop(model);
             if open {
                 ctx.emit(Event::OpenTmuxPresentationWindow);
             } else if close {
                 ctx.emit(Event::CloseTmuxPresentationWindow);
+            }
+            if !tmux_events.is_empty() {
+                ctx.emit(Event::TmuxClientEvents(tmux_events));
             }
         }
 

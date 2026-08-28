@@ -126,6 +126,38 @@ fn client_commands_stay_raw_in_control_mode() {
 }
 
 #[test]
+fn interleaved_output_and_focus_does_not_steal_pending_keys() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    io.enqueue_input(Cow::Borrowed(b"typed"));
+    let items = io.feed(b"%output %9 noise\n%window-pane-changed @2 %3\n");
+    assert_eq!(io.focused_pane().map(PaneId::as_str), Some("%3"));
+    assert!(items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::EncodedPending(encoded) if encoded.starts_with(b"send-keys -t %3")
+    )));
+}
+
+#[test]
+fn latest_resize_wins_when_interleaved_with_start() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.enqueue_resize(80, 24);
+    io.enqueue_resize(120, 40);
+    let items = io.feed(CONTROL_MODE_DCS);
+    match &items[0] {
+        TmuxFeedItem::EnteredControl { refresh_client } => {
+            assert_eq!(
+                refresh_client.as_deref(),
+                Some("refresh-client -C 120x40\n")
+            );
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
 fn window_events_are_forwarded() {
     let mut io = TmuxIoState::new();
     io.feed(CONTROL_MODE_DCS);

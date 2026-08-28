@@ -1464,6 +1464,46 @@ fn handle_terminal_view_event(
             Event::CloseTmuxPresentationWindow => {
                 ctx.emit(pane_group::Event::CloseTmuxPresentationWindow);
             }
+            Event::TmuxClientEvents(events) => {
+                ctx.emit(pane_group::Event::TmuxClientEvents(events.clone()));
+            }
+            #[cfg(all(unix, feature = "local_tty"))]
+            Event::WriteBytesToPty { bytes } => {
+                if group
+                    .terminal_view_from_pane_id(terminal_pane_id, ctx)
+                    .is_some_and(|view| view.as_ref(ctx).model.lock().is_tmux_presentation())
+                {
+                    ctx.emit(pane_group::Event::TmuxControlWrite {
+                        bytes: bytes.clone(),
+                    });
+                }
+            }
+            #[cfg(all(unix, feature = "local_tty"))]
+            Event::Resize { size_update } => {
+                if let Some(tmux_pane) = group
+                    .terminal_view_from_pane_id(terminal_pane_id, ctx)
+                    .and_then(|view| {
+                        view.read(ctx, |view, _| {
+                            view.model
+                                .lock()
+                                .is_tmux_presentation()
+                                .then(|| view.model.lock().tmux_pane_id().map(str::to_owned))
+                                .flatten()
+                        })
+                    })
+                {
+                    let size = size_update.new_size();
+                    ctx.emit(pane_group::Event::TmuxControlWrite {
+                        bytes: crate::terminal::tmux::protocol::resize_pane_command(
+                            &crate::terminal::tmux::parser::PaneId::from(tmux_pane.as_str()),
+                            size.columns(),
+                            size.rows(),
+                        )
+                        .into_bytes()
+                        .into(),
+                    });
+                }
+            }
             Event::OpenChildAgentInNewTab { conversation_id } => {
                 // Pane group can't add tabs; forward to the workspace.
                 if group.ensure_hidden_child_agent_pane_for_conversation(*conversation_id, ctx) {

@@ -24,6 +24,41 @@ fn protocol_chatter_is_not_returned_as_pane_bytes() {
 }
 
 #[test]
+fn output_is_not_bound_until_window_pane_changed() {
+    use crate::terminal::model::ansi;
+    use crate::terminal::tmux::pane_bytes::{feed_control_bytes, sink_writer};
+
+    let mut parser = ControlModeParser::new();
+    let mut ansi_parser = ansi::Processor::new();
+    let mut tracked = None;
+    let mut writer = sink_writer();
+    let mut model = crate::terminal::TerminalModel::mock(None, None);
+    let mut bytes = CONTROL_MODE_DCS.to_vec();
+    bytes.extend_from_slice(b"%output %7 hello\n");
+    let result = feed_control_bytes(
+        &mut parser,
+        &mut ansi_parser,
+        &mut model,
+        &mut writer,
+        &mut tracked,
+        &bytes,
+    );
+    assert_eq!(result.pane_bytes, 0);
+    assert!(tracked.is_none());
+
+    let result = feed_control_bytes(
+        &mut parser,
+        &mut ansi_parser,
+        &mut model,
+        &mut writer,
+        &mut tracked,
+        b"%window-pane-changed @0 %7\n%output %7 hello\n",
+    );
+    assert_eq!(tracked.as_ref().map(PaneId::as_str), Some("%7"));
+    assert!(result.pane_bytes > 0);
+}
+
+#[test]
 fn output_from_two_panes_is_not_collapsed() {
     let mut parser = ControlModeParser::new();
     let mut bytes = CONTROL_MODE_DCS.to_vec();

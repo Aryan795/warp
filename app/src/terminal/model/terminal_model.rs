@@ -101,6 +101,34 @@ pub enum ConversationTranscriptViewerStatus {
     ViewingAmbientConversation(AmbientAgentTaskId),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TmuxClientEvent {
+    LayoutChange {
+        window_id: String,
+        layout: String,
+        visible_layout: Option<String>,
+        flags: Option<String>,
+    },
+    WindowAdd {
+        window_id: String,
+    },
+    WindowClose {
+        window_id: String,
+    },
+    WindowRenamed {
+        window_id: String,
+        name: String,
+    },
+    SessionWindowChanged {
+        window_id: String,
+    },
+    CommandEnd {
+        number: u64,
+        error: bool,
+        payload: Vec<String>,
+    },
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FindOptions {
     pub query: Option<Arc<String>>,
@@ -475,9 +503,11 @@ pub struct TerminalModel {
     /// True while the PTY event loop is in tmux control mode (`DCS 1000p` until `%exit`).
     tmux_control_mode: bool,
     tmux_focused_pane: Option<String>,
+    tmux_pane_id: Option<String>,
     tmux_presentation: bool,
     tmux_open_presentation: bool,
     tmux_close_presentation: bool,
+    tmux_events: Vec<TmuxClientEvent>,
 
     /// The shell type of the login shell for this session.
     shell_launch_state: ShellLaunchState,
@@ -1093,9 +1123,11 @@ impl TerminalModel {
             handled_exit: false,
             tmux_control_mode: false,
             tmux_focused_pane: None,
+            tmux_pane_id: None,
             tmux_presentation: false,
             tmux_open_presentation: false,
             tmux_close_presentation: false,
+            tmux_events: Vec::new(),
             env_var_collection_name: None,
             shell_launch_state: shell_state,
             obfuscate_secrets,
@@ -1546,6 +1578,27 @@ impl TerminalModel {
 
     pub fn set_tmux_presentation(&mut self, presentation: bool) {
         self.tmux_presentation = presentation;
+    }
+
+    pub fn tmux_pane_id(&self) -> Option<&str> {
+        self.tmux_pane_id.as_deref()
+    }
+
+    pub fn set_tmux_pane_id(&mut self, pane_id: Option<String>) {
+        self.tmux_pane_id = pane_id;
+    }
+
+    pub fn push_tmux_event(&mut self, event: TmuxClientEvent) {
+        self.tmux_events.push(event);
+        self.event_proxy.send_wakeup_event();
+    }
+
+    pub fn take_tmux_events(&mut self) -> Vec<TmuxClientEvent> {
+        std::mem::take(&mut self.tmux_events)
+    }
+
+    pub fn wake_for_tmux_output(&mut self) {
+        self.event_proxy.send_wakeup_event();
     }
 
     pub fn take_tmux_open_presentation(&mut self) -> bool {

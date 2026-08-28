@@ -646,6 +646,10 @@ pub enum Event {
     },
     OpenTmuxPresentationWindow,
     CloseTmuxPresentationWindow,
+    TmuxControlWrite {
+        bytes: std::borrow::Cow<'static, [u8]>,
+    },
+    TmuxClientEvents(Vec<crate::terminal::model::terminal_model::TmuxClientEvent>),
     OpenSuggestedAgentModeWorkflowModal {
         workflow_and_id: SuggestedAgentModeWorkflowAndId,
     },
@@ -818,7 +822,7 @@ pub struct NewTerminalOptions {
     pub env_vars: HashMap<OsString, OsString>,
     /// If true, do not show the Code Mode homepage UX.
     pub hide_homepage: bool,
-    /// Create a Mock terminal view with no local PTY for a tmux-owned window.
+    /// Create a PTY-less presentation view for a tmux-owned window.
     pub tmux_presentation: bool,
     /// Whether or not to start sharing the terminal session as soon as it's ready.
     pub is_shared_session_creator: IsSharedSessionCreator,
@@ -4036,6 +4040,143 @@ impl PaneGroup {
         true
     }
 
+    fn is_tmux_owned(&self, ctx: &AppContext) -> bool {
+        self.focused_session_view(ctx).is_some_and(|view| {
+            view.read(ctx, |view, _| {
+                let model = view.model.lock();
+                model.is_tmux_control_mode() || model.is_tmux_presentation()
+            })
+        })
+    }
+
+    fn write_tmux_command(&self, bytes: Vec<u8>, ctx: &mut ViewContext<Self>) {
+        if let Some(view) = self.focused_session_view(ctx) {
+            view.update(ctx, |view, ctx| {
+                view.write_to_pty(bytes, ctx);
+            });
+        }
+    }
+
+    fn try_tmux_close_pane(&mut self, pane_id: PaneId, ctx: &mut ViewContext<Self>) -> bool {
+        if !FeatureFlag::TmuxControlPrototype.is_enabled() || !self.is_tmux_owned(ctx) {
+            return false;
+        }
+        let Some(view) = self.terminal_view_from_pane_id(pane_id, ctx) else {
+            return true;
+        };
+        let tmux_pane = view.read(ctx, |view, _| {
+            view.model.lock().tmux_pane_id().map(str::to_owned)
+        });
+        let visible = self.panes.visible_pane_count();
+        if visible <= 1 {
+            self.write_tmux_command(
+                crate::terminal::tmux::protocol::detach_client_command()
+                    .as_bytes()
+                    .to_vec(),
+                ctx,
+            );
+        } else if let Some(tmux_pane) = tmux_pane {
+            self.write_tmux_command(
+                crate::terminal::tmux::protocol::kill_pane_command(
+                    &crate::terminal::tmux::parser::PaneId::from(tmux_pane.as_str()),
+                )
+                .into_bytes(),
+                ctx,
+            );
+        }
+        true
+    }
+
+    fn try_tmux_focus_pane(&self, pane_id: PaneId, ctx: &mut ViewContext<Self>) -> bool {
+        if !FeatureFlag::TmuxControlPrototype.is_enabled() || !self.is_tmux_owned(ctx) {
+            return false;
+        }
+        let Some(view) = self.terminal_view_from_pane_id(pane_id, ctx) else {
+            return false;
+        };
+        let Some(tmux_pane) = view.read(ctx, |view, _| {
+            view.model.lock().tmux_pane_id().map(str::to_owned)
+        }) else {
+            return true;
+        };
+        self.write_tmux_command(
+            crate::terminal::tmux::protocol::select_pane_command(
+                &crate::terminal::tmux::parser::PaneId::from(tmux_pane.as_str()),
+            )
+            .into_bytes(),
+            ctx,
+        );
+        true
+    }
+
+    pub fn bind_tmux_pane(&self, pane_id: PaneId, tmux_pane_id: &str, ctx: &mut ViewContext<Self>) {
+        let Some(view) = self.terminal_view_from_pane_id(pane_id, ctx) else {
+            return;
+        };
+        let model = view.read(ctx, |view, _| view.model.clone());
+        model.lock().set_tmux_pane_id(Some(tmux_pane_id.to_owned()));
+        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+        crate::terminal::tmux::bridge::TmuxRuntime::global().register_pane(tmux_pane_id, model);
+        self.write_tmux_command(
+            crate::terminal::tmux::protocol::capture_pane_command(
+                &crate::terminal::tmux::parser::PaneId::from(tmux_pane_id),
+            )
+            .into_bytes(),
+            ctx,
+        );
+        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+        crate::terminal::tmux::bridge::TmuxRuntime::global().note_capture(tmux_pane_id);
+    }
+
+    pub fn add_tmux_presentation_pane(
+        &mut self,
+        direction: Direction,
+        base_pane_id: Option<PaneId>,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<PaneId> {
+        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+        {
+            let resources = TerminalViewResources {
+                tips_completed: self.tips_completed.clone(),
+                server_api: self.server_api.clone(),
+                model_event_sender: self.model_event_sender.clone(),
+            };
+            let view_bounds = Self::estimated_view_bounds(ctx);
+            let terminal_init =
+                crate::terminal::tmux::presentation_manager::TmuxPresentationManager::create_model(
+                    resources,
+                    view_bounds.size(),
+                    ctx.window_id(),
+                    ctx,
+                );
+            let uuid = Uuid::new_v4();
+            let pane_data = TerminalPane::new(
+                uuid.as_bytes().to_vec(),
+                terminal_init.manager,
+                terminal_init.view,
+                self.model_event_sender.clone(),
+                ctx,
+            );
+            self.add_pane(direction, base_pane_id, Box::new(pane_data), true, ctx)
+        }
+        #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+        {
+            let _ = (direction, base_pane_id, ctx);
+            None
+        }
+    }
+
+    pub fn pane_id_for_tmux_pane(&self, tmux_pane_id: &str, ctx: &AppContext) -> Option<PaneId> {
+        self.panes.visible_pane_ids().into_iter().find(|pane_id| {
+            self.terminal_view_from_pane_id(*pane_id, ctx)
+                .is_some_and(|view| {
+                    view.read(ctx, |view, _| {
+                        view.model.lock().tmux_pane_id() == Some(tmux_pane_id)
+                    })
+                })
+        })
+    }
+
     /// Used to add a new pane but not splitting panes.
     pub fn add_terminal_pane(
         &mut self,
@@ -4589,6 +4730,9 @@ impl PaneGroup {
     /// Emits an event for the workspace to show a confirmation dialog if necessary, or closes immediately if not.
     /// If a dialog is opened, the workspace may call back into pane group to close the pane after the user confirms.
     pub fn close_pane_with_confirmation(&mut self, pane_id: PaneId, ctx: &mut ViewContext<Self>) {
+        if self.try_tmux_close_pane(pane_id, ctx) {
+            return;
+        }
         // Child agent panes are just hidden when closed, so skip the
         // "process running" warning—it doesn't apply.
         if self.is_child_agent_pane(pane_id) {
@@ -6838,6 +6982,14 @@ impl PaneGroup {
         default_session_mode_behavior: DefaultSessionModeBehavior,
         ctx: &mut ViewContext<Self>,
     ) -> TerminalPaneId {
+        if self.try_split_tmux_pane(direction, ctx)
+            && let Some(id) = self
+                .focused_pane_id(ctx)
+                .as_terminal_pane_id()
+                .or(self.active_session_id(ctx))
+        {
+            return id;
+        }
         let should_immediately_enter_agent_view = matches!(
             default_session_mode_behavior,
             DefaultSessionModeBehavior::Apply
@@ -7821,6 +7973,7 @@ impl PaneGroup {
         if !self.pane_contents.contains_key(&id) {
             return false;
         }
+        let _ = self.try_tmux_focus_pane(id, ctx);
         // Saves the handle of a currently focused terminal pane before switching away from it.
         let maybe_origin_terminal_view =
             self.terminal_view_from_pane_id(self.focused_pane_id(ctx), ctx);

@@ -27,13 +27,13 @@ where
                 result.entered_control_mode = true;
             }
             ControlEvent::PaneOutput { pane_id, bytes } => {
-                if tracked_pane.is_none() {
-                    *tracked_pane = Some(pane_id.clone());
-                }
                 if tracked_pane.as_ref() == Some(&pane_id) {
                     ansi_parser.parse_bytes(model, &bytes, writer);
                     result.pane_bytes += bytes.len();
                 }
+            }
+            ControlEvent::WindowPaneChanged { pane_id, .. } => {
+                *tracked_pane = Some(pane_id);
             }
             ControlEvent::Exit { .. } => {
                 result.exited = true;
@@ -45,7 +45,6 @@ where
             | ControlEvent::WindowClose { .. }
             | ControlEvent::WindowRenamed { .. }
             | ControlEvent::SessionWindowChanged { .. }
-            | ControlEvent::WindowPaneChanged { .. }
             | ControlEvent::ProtocolOverflow => {}
         }
     }

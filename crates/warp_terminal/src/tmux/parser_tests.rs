@@ -325,6 +325,24 @@ fn oversized_control_line_aborts_to_shell_parsing() {
 }
 
 #[test]
+fn oversized_reply_payload_aborts_to_shell_parsing() {
+    use super::DecodeItem;
+    let mut parser = ControlModeParser::new();
+    parser.decode(CONTROL_MODE_DCS);
+    let mut bytes = b"%begin 1 1\n".to_vec();
+    for _ in 0..10_001 {
+        bytes.extend_from_slice(b"line\n");
+    }
+    let items = parser.decode(&bytes);
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, DecodeItem::Control(ControlEvent::ProtocolOverflow)))
+    );
+    assert!(!parser.is_in_control_mode());
+}
+
+#[test]
 fn protocol_lines_are_not_shell_bytes() {
     use super::DecodeItem;
     let mut parser = ControlModeParser::new();

@@ -5,6 +5,8 @@ pub mod session;
 pub mod transport;
 
 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+pub mod bridge;
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
 pub mod event_loop;
 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
 pub mod gateway;

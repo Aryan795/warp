@@ -52,6 +52,7 @@ impl TmuxPresentationManager {
         );
         model.set_tmux_presentation(true);
         model.set_tmux_control_mode(true);
+        crate::terminal::tmux::bridge::TmuxRuntime::global().set_presentation_window(window_id);
         let colors = model.colors();
         let model = Arc::new(FairMutex::new(model));
 

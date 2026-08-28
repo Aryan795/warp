@@ -125,6 +125,32 @@ fn default_new_terminal_options_are_not_tmux_owned() {
 }
 
 #[test]
+fn presentation_pane_id_is_explicit() {
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_presentation(true);
+    assert_eq!(model.tmux_pane_id(), None);
+    model.set_tmux_pane_id(Some("%7".to_owned()));
+    assert_eq!(model.tmux_pane_id(), Some("%7"));
+}
+
+#[test]
+fn layout_events_are_queued_until_taken() {
+    use crate::terminal::model::terminal_model::TmuxClientEvent;
+    let mut model = TerminalModel::mock(None, None);
+    model.push_tmux_event(TmuxClientEvent::WindowAdd {
+        window_id: "@3".to_owned(),
+    });
+    let events = model.take_tmux_events();
+    assert_eq!(
+        events,
+        vec![TmuxClientEvent::WindowAdd {
+            window_id: "@3".to_owned()
+        }]
+    );
+    assert!(model.take_tmux_events().is_empty());
+}
+
+#[test]
 fn feature_off_does_not_treat_panes_as_tmux_owned() {
     let _flag = FeatureFlag::TmuxControlPrototype.override_enabled(false);
     let model = TerminalModel::mock(None, None);
