@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -247,7 +248,7 @@ fn detached_kill_helper_times_out_hanging_tmux_and_keeps_files() {
 }
 
 #[test]
-fn register_then_kill_does_not_accumulate_tracked_sockets() {
+fn schedule_kill_keeps_unix_sockets_registered_for_retry() {
     let _guard = super::registry_test_lock();
     let before = super::registered_dedicated_server_count();
     let sockets: Vec<_> = (0..3).map(|_| write_placeholder_socket()).collect();
@@ -258,11 +259,10 @@ fn register_then_kill_does_not_accumulate_tracked_sockets() {
     for socket in &sockets {
         schedule_kill_dedicated_server(socket.clone());
     }
-    if super::resolve_tmux_binary().is_some() {
-        assert_eq!(super::registered_dedicated_server_count(), before);
-    } else {
-        assert_eq!(super::registered_dedicated_server_count(), before + 3);
-    }
+    #[cfg(unix)]
+    assert_eq!(super::registered_dedicated_server_count(), before + 3);
+    #[cfg(not(unix))]
+    assert_eq!(super::registered_dedicated_server_count(), before);
     for socket in sockets {
         let _ = std::fs::remove_file(socket);
     }
@@ -368,6 +368,132 @@ fn last_tab_exit_does_not_drop_sockets_before_cleanup_is_secured() {
     assert!(list.contains(&socket.to_string_lossy().into_owned()));
     schedule_kill_dedicated_server(socket.clone());
     let _ = std::fs::remove_file(&socket);
+}
+
+#[cfg(unix)]
+#[test]
+fn timed_out_helper_keeps_socket_registered_for_app_exit() {
+    let _guard = super::registry_test_lock();
+    let script = unique_temp_path("warp-tmux-hang-then-reaper.sh");
+    std::fs::write(&script, b"#!/bin/sh\nexec sleep 30\n").expect("write hang helper");
+    chmod_script(&script);
+    let (socket, config) = write_placeholder_socket_and_config();
+    let before = super::registered_dedicated_server_count();
+    register_dedicated_server(socket.clone());
+    let started = Instant::now();
+    assert!(super::spawn_detached_kill_helper(Some(&script), &socket));
+    assert!(started.elapsed() < Duration::from_millis(200));
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(socket.exists());
+    assert!(config.exists());
+    assert_eq!(super::registered_dedicated_server_count(), before + 1);
+    let list = std::fs::read_to_string(super::registry_list_path()).expect("read registry list");
+    assert!(list.contains(&socket.to_string_lossy().into_owned()));
+
+    let reaper_tmux = unique_temp_path("warp-tmux-reaper-after-timeout.sh");
+    std::fs::write(
+        &reaper_tmux,
+        b"#!/bin/sh\necho 'no server running on /tmp/missing' >&2\nexit 1\n",
+    )
+    .expect("write reaper tmux script");
+    chmod_script(&reaper_tmux);
+    let (parent_end, child_end) = std::os::unix::net::UnixStream::pair().expect("pipe");
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(super::APP_EXIT_REAPER_SCRIPT)
+        .arg("tmux-control-prototype-exit-reaper")
+        .arg(super::registry_list_path())
+        .arg(&reaper_tmux)
+        .stdin(unsafe {
+            use std::os::fd::{FromRawFd as _, IntoRawFd as _};
+            Stdio::from_raw_fd(child_end.into_raw_fd())
+        })
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn reaper script");
+    drop(parent_end);
+    let _ = child.wait();
+    assert!(wait_until(
+        || !socket.exists() && !config.exists(),
+        Duration::from_secs(3)
+    ));
+    let _ = std::fs::remove_file(&script);
+    let _ = std::fs::remove_file(&reaper_tmux);
+}
+
+#[test]
+fn registry_persist_failure_does_not_mark_reaper_ready() {
+    let _guard = super::registry_test_lock();
+    let blocker = unique_temp_path("warp-tmux-registry-blocker");
+    std::fs::write(&blocker, b"not-a-dir").expect("write blocker file");
+    let path = blocker.join("active.list");
+    let socket = write_placeholder_socket();
+    let sockets = HashSet::from([socket.clone()]);
+    assert!(super::persist_registry_list_at(&path, &sockets).is_err());
+    #[cfg(unix)]
+    {
+        if !super::app_exit_reaper_has_started() {
+            assert!(!super::ensure_app_exit_reaper_with(None));
+            assert!(!super::app_exit_reaper_has_started());
+        }
+    }
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&blocker);
+}
+
+#[test]
+fn registry_list_filename_isolates_pid_reuse_with_token() {
+    let name = super::registry_list_filename();
+    let pid = std::process::id().to_string();
+    assert!(name.starts_with(&format!("active-{pid}-")));
+    assert!(name.ends_with(".list"));
+    assert_ne!(name, format!("active-{pid}.list"));
+}
+
+#[cfg(unix)]
+#[test]
+fn app_exit_reaper_ignores_same_pid_list_without_instance_token() {
+    let script = unique_temp_path("warp-tmux-token-reaper.sh");
+    std::fs::write(
+        &script,
+        b"#!/bin/sh\necho 'no server running on /tmp/missing' >&2\nexit 1\n",
+    )
+    .expect("write token reaper tmux");
+    chmod_script(&script);
+    let (ours, ours_conf) = write_placeholder_socket_and_config();
+    let (theirs, theirs_conf) = write_placeholder_socket_and_config();
+    let tokenized = unique_temp_path("warp-tmux-tokenized.list");
+    let colliding = unique_temp_path(&format!("active-{}.list", std::process::id()));
+    std::fs::write(&tokenized, format!("{}\n", ours.display())).expect("write tokenized list");
+    std::fs::write(&colliding, format!("{}\n", theirs.display())).expect("write colliding list");
+    let (parent_end, child_end) = std::os::unix::net::UnixStream::pair().expect("pipe");
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(super::APP_EXIT_REAPER_SCRIPT)
+        .arg("tmux-control-prototype-exit-reaper")
+        .arg(&tokenized)
+        .arg(&script)
+        .stdin(unsafe {
+            use std::os::fd::{FromRawFd as _, IntoRawFd as _};
+            Stdio::from_raw_fd(child_end.into_raw_fd())
+        })
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn reaper script");
+    drop(parent_end);
+    let _ = child.wait();
+    assert!(wait_until(
+        || !ours.exists() && !ours_conf.exists(),
+        Duration::from_secs(3)
+    ));
+    assert!(theirs.exists());
+    assert!(theirs_conf.exists());
+    let _ = std::fs::remove_file(&theirs);
+    let _ = std::fs::remove_file(&theirs_conf);
+    let _ = std::fs::remove_file(&script);
+    let _ = std::fs::remove_file(&colliding);
 }
 
 #[test]

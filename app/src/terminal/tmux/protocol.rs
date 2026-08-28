@@ -293,25 +293,66 @@ fn dedicated_server_dir() -> PathBuf {
     cache_dir().join("tmux-control-prototype")
 }
 
-fn registry_list_path() -> PathBuf {
-    dedicated_server_dir().join(format!("active-{}.list", std::process::id()))
+fn registry_instance_token() -> u64 {
+    static TOKEN: OnceLock<u64> = OnceLock::new();
+    *TOKEN.get_or_init(rand::random)
 }
 
-fn rewrite_registry_list(sockets: &HashSet<PathBuf>) {
-    let path = registry_list_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+fn registry_list_filename() -> &'static str {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| {
+        format!(
+            "active-{}-{:016x}.list",
+            std::process::id(),
+            registry_instance_token()
+        )
+    })
+}
+
+fn registry_list_path() -> PathBuf {
+    dedicated_server_dir().join(registry_list_filename())
+}
+
+fn persist_registry_list(sockets: &HashSet<PathBuf>) -> io::Result<()> {
+    persist_registry_list_at(&registry_list_path(), sockets)
+}
+
+fn persist_registry_list_at(path: &Path, sockets: &HashSet<PathBuf>) -> io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "registry list path has no parent",
+        ));
+    };
+    std::fs::create_dir_all(parent)?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
     let contents: String = sockets
         .iter()
         .filter_map(|socket| socket.to_str())
         .map(|socket| format!("{socket}\n"))
         .collect();
-    if let Err(err) = std::fs::write(&path, contents) {
-        log::warn!(
-            "failed to write tmux registry list {}: {err}",
-            path.display()
-        );
+    std::fs::write(&tmp, contents)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(err)
+        }
+    }
+}
+
+fn persist_current_registry() -> bool {
+    match persist_registry_list(&lock_dedicated_sockets()) {
+        Ok(()) => true,
+        Err(err) => {
+            log::error!(
+                "failed to persist tmux registry list {}: {err}",
+                registry_list_path().display()
+            );
+            false
+        }
     }
 }
 
@@ -337,24 +378,23 @@ fn parent_death_pipe() -> &'static Mutex<Option<UnixStream>> {
 
 /// Track a dedicated socket so last-tab app exit can still tear it down.
 pub fn register_dedicated_server(socket: PathBuf) {
-    let mut sockets = lock_dedicated_sockets();
-    sockets.insert(socket);
-    rewrite_registry_list(&sockets);
-    drop(sockets);
-    ensure_app_exit_reaper();
+    lock_dedicated_sockets().insert(socket);
+    if persist_current_registry() {
+        ensure_app_exit_reaper();
+    }
 }
 
+#[cfg(not(unix))]
 fn unregister_dedicated_server(socket: &Path) {
-    let mut sockets = lock_dedicated_sockets();
-    sockets.remove(socket);
-    rewrite_registry_list(&sockets);
+    lock_dedicated_sockets().remove(socket);
+    let _ = persist_current_registry();
 }
 
 /// Last-tab close on Linux quits the app without dropping pane managers.
 pub fn schedule_kill_registered_dedicated_servers() {
     #[cfg(unix)]
     {
-        if ensure_app_exit_reaper() {
+        if persist_current_registry() && ensure_app_exit_reaper() {
             return;
         }
         let sockets: Vec<PathBuf> = lock_dedicated_sockets().iter().cloned().collect();
@@ -365,7 +405,7 @@ pub fn schedule_kill_registered_dedicated_servers() {
     #[cfg(not(unix))]
     {
         let sockets: Vec<PathBuf> = lock_dedicated_sockets().drain().collect();
-        rewrite_registry_list(&HashSet::new());
+        let _ = persist_current_registry();
         for socket in sockets {
             schedule_kill_dedicated_server(socket);
         }
@@ -389,6 +429,9 @@ fn ensure_app_exit_reaper_with(tmux_path: Option<&Path>) -> bool {
     if *started {
         return true;
     }
+    if !persist_current_registry() {
+        return false;
+    }
     let Some(tmux_path) = tmux_path else {
         return false;
     };
@@ -403,11 +446,7 @@ fn ensure_app_exit_reaper_with(tmux_path: Option<&Path>) -> bool {
 /// Kill the dedicated server without blocking the caller.
 pub fn schedule_kill_dedicated_server(socket: PathBuf) {
     #[cfg(unix)]
-    {
-        if spawn_detached_kill_helper(resolve_tmux_binary().as_deref(), &socket) {
-            unregister_dedicated_server(&socket);
-        }
-    }
+    spawn_detached_kill_helper(resolve_tmux_binary().as_deref(), &socket);
     #[cfg(not(unix))]
     {
         unregister_dedicated_server(&socket);
