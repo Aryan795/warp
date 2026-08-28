@@ -384,7 +384,6 @@ pub fn register_dedicated_server(socket: PathBuf) {
     }
 }
 
-#[cfg(not(unix))]
 fn unregister_dedicated_server(socket: &Path) {
     lock_dedicated_sockets().remove(socket);
     let _ = persist_current_registry();
@@ -517,7 +516,7 @@ fn spawn_detached_kill_helper(tmux_path: Option<&Path>, socket: &Path) -> bool {
         return false;
     };
     let config = socket.with_extension("conf");
-    let spawned = spawn_setsid_sh(
+    match spawn_setsid_sh(
         DETACHED_KILL_BODY,
         "tmux-control-prototype-kill-server",
         &[
@@ -525,18 +524,33 @@ fn spawn_detached_kill_helper(tmux_path: Option<&Path>, socket: &Path) -> bool {
             socket.as_os_str(),
             config.as_os_str(),
         ],
-    );
-    if !spawned {
-        log::error!(
-            "failed to spawn tmux kill-server helper for {}",
-            socket.display()
-        );
+    ) {
+        Ok(mut child) => {
+            let socket = socket.to_path_buf();
+            let _ = std::thread::Builder::new()
+                .name("tmux-control-prototype-kill-server-reap".into())
+                .spawn(move || {
+                    let confirmed = child.wait().is_ok_and(|status| status.success())
+                        && !socket.exists()
+                        && !socket.with_extension("conf").exists();
+                    if confirmed {
+                        unregister_dedicated_server(&socket);
+                    }
+                });
+            true
+        }
+        Err(err) => {
+            log::error!(
+                "failed to spawn tmux kill-server helper for {}: {err}",
+                socket.display()
+            );
+            false
+        }
     }
-    spawned
 }
 
 #[cfg(unix)]
-fn spawn_setsid_sh(script: &str, arg0: &str, args: &[&std::ffi::OsStr]) -> bool {
+fn spawn_setsid_sh(script: &str, arg0: &str, args: &[&std::ffi::OsStr]) -> io::Result<Child> {
     let mut command = Command::new("/bin/sh");
     command.arg("-c").arg(script).arg(arg0);
     for arg in args {
@@ -555,20 +569,7 @@ fn spawn_setsid_sh(script: &str, arg0: &str, args: &[&std::ffi::OsStr]) -> bool 
             Ok(())
         });
     }
-    match command.spawn() {
-        Ok(mut child) => {
-            let _ = std::thread::Builder::new()
-                .name("tmux-control-prototype-kill-server-reap".into())
-                .spawn(move || {
-                    let _ = child.wait();
-                });
-            true
-        }
-        Err(err) => {
-            log::error!("failed to spawn tmux kill-server helper: {err}");
-            false
-        }
-    }
+    command.spawn()
 }
 
 fn server_already_gone(stderr: &str) -> bool {

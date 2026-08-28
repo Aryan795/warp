@@ -230,6 +230,34 @@ fn detached_kill_helper_unlinks_socket_and_config_when_server_is_gone() {
 
 #[cfg(unix)]
 #[test]
+fn successful_kill_helper_prunes_registered_socket() {
+    let _guard = super::registry_test_lock();
+    let script = unique_temp_path("warp-tmux-prune-no-server.sh");
+    std::fs::write(
+        &script,
+        b"#!/bin/sh\necho 'no server running on /tmp/missing' >&2\nexit 1\n",
+    )
+    .expect("write prune no-server script");
+    chmod_script(&script);
+    let (socket, config) = write_placeholder_socket_and_config();
+    let before = super::registered_dedicated_server_count();
+    register_dedicated_server(socket.clone());
+    assert!(super::spawn_detached_kill_helper(Some(&script), &socket));
+    assert!(wait_until(
+        || {
+            !socket.exists()
+                && !config.exists()
+                && super::registered_dedicated_server_count() == before
+        },
+        Duration::from_secs(3)
+    ));
+    let list = std::fs::read_to_string(super::registry_list_path()).unwrap_or_default();
+    assert!(!list.contains(&socket.to_string_lossy().into_owned()));
+    let _ = std::fs::remove_file(&script);
+}
+
+#[cfg(unix)]
+#[test]
 fn detached_kill_helper_times_out_hanging_tmux_and_keeps_files() {
     let script = unique_temp_path("warp-tmux-hang-helper.sh");
     std::fs::write(&script, b"#!/bin/sh\nexec sleep 30\n").expect("write hang helper");
@@ -247,25 +275,38 @@ fn detached_kill_helper_times_out_hanging_tmux_and_keeps_files() {
     let _ = std::fs::remove_file(&script);
 }
 
+#[cfg(unix)]
 #[test]
-fn schedule_kill_keeps_unix_sockets_registered_for_retry() {
+fn failed_kill_helper_keeps_unix_sockets_registered_for_retry() {
     let _guard = super::registry_test_lock();
+    let script = unique_temp_path("warp-tmux-permission-retain.sh");
+    std::fs::write(
+        &script,
+        b"#!/bin/sh\necho 'error connecting to /tmp/x (Permission denied)' >&2\nexit 1\n",
+    )
+    .expect("write permission retain script");
+    chmod_script(&script);
+    let (socket, config) = write_placeholder_socket_and_config();
     let before = super::registered_dedicated_server_count();
-    let sockets: Vec<_> = (0..3).map(|_| write_placeholder_socket()).collect();
-    for socket in &sockets {
-        register_dedicated_server(socket.clone());
-    }
-    assert_eq!(super::registered_dedicated_server_count(), before + 3);
-    for socket in &sockets {
-        schedule_kill_dedicated_server(socket.clone());
-    }
-    #[cfg(unix)]
-    assert_eq!(super::registered_dedicated_server_count(), before + 3);
-    #[cfg(not(unix))]
-    assert_eq!(super::registered_dedicated_server_count(), before);
-    for socket in sockets {
-        let _ = std::fs::remove_file(socket);
-    }
+    register_dedicated_server(socket.clone());
+    assert!(super::spawn_detached_kill_helper(Some(&script), &socket));
+    assert!(wait_until(
+        || {
+            let list = std::fs::read_to_string(super::registry_list_path()).unwrap_or_default();
+            socket.exists()
+                && config.exists()
+                && super::registered_dedicated_server_count() == before + 1
+                && list.contains(&socket.to_string_lossy().into_owned())
+        },
+        Duration::from_secs(3)
+    ));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(super::registered_dedicated_server_count(), before + 1);
+    assert!(socket.exists());
+    assert!(config.exists());
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&config);
+    let _ = std::fs::remove_file(&script);
 }
 
 #[test]
