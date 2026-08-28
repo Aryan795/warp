@@ -271,6 +271,32 @@ pub(crate) fn mock_workspace(app: &mut App) -> ViewHandle<Workspace> {
 }
 
 #[test]
+fn empty_workspace_new_session_is_not_tmux_owned() {
+    let _tmux = FeatureFlag::TmuxControlPrototype.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.clear_tabs_for_tests();
+            assert!(
+                !workspace.is_tmux_owned_window_for_tests(ctx),
+                "an empty workspace must not be treated as tmux-owned"
+            );
+            workspace.add_new_session_tab_with_default_mode(
+                NewSessionSource::Window,
+                None,
+                None,
+                None,
+                false,
+                ctx,
+            );
+            assert!(workspace.tab_count() >= 1);
+            assert!(!workspace.is_tmux_owned_window_for_tests(ctx));
+        });
+    });
+}
+
+#[test]
 fn test_open_new_window_for_team_reuses_existing_team_window() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);

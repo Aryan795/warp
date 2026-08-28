@@ -41,6 +41,10 @@ fn user_socket_flags_are_rejected() {
         Err(TmuxCommandError::IsolatedSocketOverride)
     );
     assert_eq!(
+        tmux_cc_shell_command("-L-foo attach", None, 80, 24),
+        Err(TmuxCommandError::IsolatedSocketOverride)
+    );
+    assert_eq!(
         tmux_cc_shell_command("-S/tmp/foo new-session", None, 80, 24),
         Err(TmuxCommandError::IsolatedSocketOverride)
     );

@@ -106,20 +106,24 @@ fn collect_split_steps(node: &LayoutNode, steps: &mut Vec<SplitStep>) {
         return;
     }
     let first_ids = children[0].pane_ids();
-    let Some(parent) = first_ids.first().cloned() else {
+    let Some(mut insert_after) = first_ids.first().cloned() else {
         return;
     };
     collect_split_steps(&children[0], steps);
+    let mut previous_size = children[0].size_along(*horizontal);
     for child in children.iter().skip(1) {
         let child_ids = child.pane_ids();
         if let Some(new_pane) = child_ids.first().cloned() {
+            let new_size = child.size_along(*horizontal);
             steps.push(SplitStep {
-                parent: parent.clone(),
-                new_pane,
+                parent: insert_after.clone(),
+                new_pane: new_pane.clone(),
                 side_by_side: *horizontal,
-                parent_size: children[0].size_along(*horizontal),
-                new_size: child.size_along(*horizontal),
+                parent_size: previous_size,
+                new_size,
             });
+            insert_after = new_pane;
+            previous_size = new_size;
         }
         collect_split_steps(child, steps);
     }

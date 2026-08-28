@@ -120,6 +120,17 @@ fn gateway_exit_requests_presentation_window_close() {
 }
 
 #[test]
+fn control_mode_exit_keeps_instance_id_for_close() {
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_instance_id(Some(42));
+    model.set_tmux_control_mode(true);
+    let _ = model.take_tmux_open_presentation();
+    model.set_tmux_control_mode(false);
+    assert_eq!(model.tmux_instance_id(), Some(42));
+    assert!(model.take_tmux_close_presentation());
+}
+
+#[test]
 fn default_new_terminal_options_are_not_tmux_owned() {
     assert!(!NewTerminalOptions::default().tmux_presentation);
 }

@@ -290,6 +290,26 @@ mod tests {
     }
 
     #[test]
+    fn close_looks_up_runtime_by_instance_id_after_control_exit() {
+        let runtime = TmuxRuntime::new();
+        let id = runtime.id();
+        assert!(TmuxRuntime::for_id(id).is_some());
+        runtime.unregister();
+        assert!(TmuxRuntime::for_id(id).is_none());
+    }
+
+    #[test]
+    fn open_binds_the_emitting_instance_not_another_session() {
+        let emitting = TmuxRuntime::new();
+        let other = TmuxRuntime::new();
+        let chosen = TmuxRuntime::for_id(emitting.id()).expect("emitting runtime");
+        assert_eq!(chosen.id(), emitting.id());
+        assert_ne!(chosen.id(), other.id());
+        emitting.unregister();
+        other.unregister();
+    }
+
+    #[test]
     fn applying_on_one_instance_does_not_block_the_other() {
         let a = runtime();
         let b = runtime();

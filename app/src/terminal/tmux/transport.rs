@@ -174,8 +174,8 @@ fn is_socket_override(token: &str) -> bool {
     matches!(
         token,
         "-L" | "-S" | "--socket" | "--socket-name" | "--tmux-socket"
-    ) || token.starts_with("-L") && token != "-L" && !token.starts_with("-L-")
-        || token.starts_with("-S") && token != "-S"
+    ) || (token.starts_with("-L") && token != "-L")
+        || (token.starts_with("-S") && token != "-S")
         || token.starts_with("--socket=")
         || token.starts_with("--socket-name=")
 }

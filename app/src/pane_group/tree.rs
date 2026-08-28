@@ -466,6 +466,23 @@ impl PaneData {
         self.root.set_pane_flex(pane_id, flex)
     }
 
+    #[cfg(test)]
+    pub fn leaf_flexes(&self) -> Vec<(PaneId, f32)> {
+        fn walk(node: &PaneNode, inherited: f32, out: &mut Vec<(PaneId, f32)>) {
+            match node {
+                PaneNode::Leaf(id) => out.push((*id, inherited)),
+                PaneNode::Branch(branch) => {
+                    for (flex, child) in &branch.nodes {
+                        walk(child, flex.0, out);
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.root, DEFAULT_FLEX_VALUE, &mut out);
+        out
+    }
+
     /// Split the root of the pane tree, inserting `new_id` according to the given direction.
     pub fn split_root(&mut self, new_id: PaneId, direction: Direction) {
         self.root.insert(new_id, direction);

@@ -660,8 +660,12 @@ pub enum Event {
     OpenChildAgentInNewTab {
         conversation_id: AIConversationId,
     },
-    OpenTmuxPresentationWindow,
-    CloseTmuxPresentationWindow,
+    OpenTmuxPresentationWindow {
+        instance_id: Option<u64>,
+    },
+    CloseTmuxPresentationWindow {
+        instance_id: Option<u64>,
+    },
     TmuxControlWrite {
         bytes: std::borrow::Cow<'static, [u8]>,
     },

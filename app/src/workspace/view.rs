@@ -12746,10 +12746,20 @@ impl Workspace {
     }
 
     fn is_tmux_owned_window(&self, ctx: &AppContext) -> bool {
-        self.active_tab_pane_group()
-            .as_ref(ctx)
-            .active_session_view(ctx)
+        self.get_pane_group_view(self.active_tab_index)
+            .and_then(|pane_group| pane_group.as_ref(ctx).active_session_view(ctx))
             .is_some_and(|view| view.as_ref(ctx).model.lock().is_tmux_presentation())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_tmux_owned_window_for_tests(&self, ctx: &AppContext) -> bool {
+        self.is_tmux_owned_window(ctx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_tabs_for_tests(&mut self) {
+        self.tabs.clear();
+        self.active_tab_index = 0;
     }
 
     #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
@@ -12767,16 +12777,14 @@ impl Workspace {
             .is_some_and(|runtime| runtime.is_applying())
     }
 
-    fn open_tmux_presentation_window(&self, ctx: &mut ViewContext<Self>) {
+    fn open_tmux_presentation_window(&self, instance_id: Option<u64>, ctx: &mut ViewContext<Self>) {
         let gateway_window = ctx.window_id();
+        #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+        let _ = instance_id;
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         {
             use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
-            if let Some(view) = self
-                .active_tab_pane_group()
-                .as_ref(ctx)
-                .active_session_view(ctx)
-                && let Some(id) = view.as_ref(ctx).model.lock().tmux_instance_id()
+            if let Some(id) = instance_id
                 && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
             {
                 runtime.bind_gateway(gateway_window);
@@ -12796,11 +12804,21 @@ impl Workspace {
         ctx.windows().hide_window(gateway_window);
     }
 
-    fn close_tmux_presentation_windows(&self, ctx: &mut ViewContext<Self>) {
+    fn close_tmux_presentation_windows(
+        &self,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let current_window = ctx.window_id();
+        #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+        let _ = instance_id;
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         {
-            let Some(runtime) = self.tmux_runtime(ctx.window_id()) else {
+            use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+            let Some(runtime) = instance_id
+                .and_then(|id| TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)))
+                .or_else(|| self.tmux_runtime(ctx.window_id()))
+            else {
                 return;
             };
             let presentation = runtime.presentation_window();
@@ -17029,11 +17047,11 @@ impl Workspace {
             }
             #[cfg(not(feature = "local_fs"))]
             pane_group::Event::RemoteRepoNavigated { .. } => {}
-            pane_group::Event::OpenTmuxPresentationWindow => {
-                self.open_tmux_presentation_window(ctx);
+            pane_group::Event::OpenTmuxPresentationWindow { instance_id } => {
+                self.open_tmux_presentation_window(*instance_id, ctx);
             }
-            pane_group::Event::CloseTmuxPresentationWindow => {
-                self.close_tmux_presentation_windows(ctx);
+            pane_group::Event::CloseTmuxPresentationWindow { instance_id } => {
+                self.close_tmux_presentation_windows(*instance_id, ctx);
             }
             pane_group::Event::TmuxControlWrite { bytes } => {
                 Self::write_tmux_to_gateway(bytes.clone(), ctx);

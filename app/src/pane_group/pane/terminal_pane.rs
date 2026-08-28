@@ -1458,11 +1458,15 @@ fn handle_terminal_view_event(
                 // emits `EnsureUnifiedViewerChildPane` instead.
                 group.ensure_shared_session_viewer_child_pane(*conversation_id, *session_id, ctx);
             }
-            Event::OpenTmuxPresentationWindow => {
-                ctx.emit(pane_group::Event::OpenTmuxPresentationWindow);
+            Event::OpenTmuxPresentationWindow { instance_id } => {
+                ctx.emit(pane_group::Event::OpenTmuxPresentationWindow {
+                    instance_id: *instance_id,
+                });
             }
-            Event::CloseTmuxPresentationWindow => {
-                ctx.emit(pane_group::Event::CloseTmuxPresentationWindow);
+            Event::CloseTmuxPresentationWindow { instance_id } => {
+                ctx.emit(pane_group::Event::CloseTmuxPresentationWindow {
+                    instance_id: *instance_id,
+                });
             }
             Event::TmuxClientEvents(events) => {
                 ctx.emit(pane_group::Event::TmuxClientEvents(events.clone()));

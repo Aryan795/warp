@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn three_way_tmux_layout_preserves_visual_order_and_flex() {
+    use std::collections::HashMap;
+
+    use warp_terminal::tmux::{parse_window_layout, split_steps};
+
+    let layout = parse_window_layout("90x24,0,0{30x24,0,0,0,20x24,31,0,1,39x24,52,0,2}").unwrap();
+    let steps = split_steps(&layout);
+    let panes = [
+        PaneId::dummy_pane_id(),
+        PaneId::dummy_pane_id(),
+        PaneId::dummy_pane_id(),
+    ];
+    let mut tree = PaneData::new(panes[0]);
+    let mut warp_for_tmux = HashMap::from([("%0".to_owned(), panes[0])]);
+    for step in &steps {
+        let parent = warp_for_tmux[step.parent.as_str()];
+        let new_pane = match step.new_pane.as_str() {
+            "%1" => panes[1],
+            "%2" => panes[2],
+            other => panic!("unexpected pane {other}"),
+        };
+        warp_for_tmux.insert(step.new_pane.as_str().to_owned(), new_pane);
+        let direction = if step.side_by_side {
+            Direction::Right
+        } else {
+            Direction::Down
+        };
+        assert!(tree.split(parent, new_pane, direction));
+        tree.set_pane_flex(parent, step.parent_size as f32);
+        tree.set_pane_flex(new_pane, step.new_size as f32);
+    }
+    assert_eq!(tree.pane_ids(), vec![panes[0], panes[1], panes[2]]);
+    assert_eq!(
+        tree.leaf_flexes(),
+        vec![(panes[0], 30.0), (panes[1], 20.0), (panes[2], 39.0)]
+    );
+}
+
+#[test]
 fn test_split_pane_layout() {
     let panes = [
         PaneId::dummy_pane_id(),

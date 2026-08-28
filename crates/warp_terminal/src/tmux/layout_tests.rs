@@ -100,10 +100,10 @@ fn non_even_three_way_split_keeps_proportions() {
                 new_size: 20,
             },
             SplitStep {
-                parent: PaneId::from("%0"),
+                parent: PaneId::from("%1"),
                 new_pane: PaneId::from("%2"),
                 side_by_side: true,
-                parent_size: 30,
+                parent_size: 20,
                 new_size: 39,
             },
         ]
