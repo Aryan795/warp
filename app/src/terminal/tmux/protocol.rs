@@ -1,6 +1,10 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{self, Read as _};
+#[cfg(unix)]
+use std::os::fd::{FromRawFd as _, IntoRawFd as _};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::OnceLock;
@@ -61,14 +65,12 @@ exit 1
 
 #[cfg(unix)]
 const APP_EXIT_REAPER_SCRIPT: &str = r#"
-parent=$1
-dir=$2
-tmux_bin=$3
-while kill -0 "$parent" 2>/dev/null; do
-  sleep 0.1
-done
-for sock in "$dir"/warp-*.sock; do
-  [ -e "$sock" ] || continue
+list=$1
+tmux_bin=$2
+cat >/dev/null
+[ -f "$list" ] || exit 0
+while IFS= read -r sock || [ -n "$sock" ]; do
+  [ -n "$sock" ] || continue
   conf=${sock%.sock}.conf
   errfile=${sock}.kill-err
   "$tmux_bin" -S "$sock" kill-server >"$errfile" 2>&1 &
@@ -93,7 +95,8 @@ for sock in "$dir"/warp-*.sock; do
     wait "$pid" 2>/dev/null
     rm -f "$errfile"
   fi
-done
+done < "$list"
+rm -f "$list"
 "#;
 
 /// Bootstrap data for the Warp-managed pane process (not the control client).
@@ -290,6 +293,28 @@ fn dedicated_server_dir() -> PathBuf {
     cache_dir().join("tmux-control-prototype")
 }
 
+fn registry_list_path() -> PathBuf {
+    dedicated_server_dir().join(format!("active-{}.list", std::process::id()))
+}
+
+fn rewrite_registry_list(sockets: &HashSet<PathBuf>) {
+    let path = registry_list_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let contents: String = sockets
+        .iter()
+        .filter_map(|socket| socket.to_str())
+        .map(|socket| format!("{socket}\n"))
+        .collect();
+    if let Err(err) = std::fs::write(&path, contents) {
+        log::warn!(
+            "failed to write tmux registry list {}: {err}",
+            path.display()
+        );
+    }
+}
+
 fn dedicated_sockets() -> &'static Mutex<HashSet<PathBuf>> {
     static SOCKETS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     SOCKETS.get_or_init(|| Mutex::new(HashSet::new()))
@@ -304,19 +329,31 @@ fn app_exit_reaper_started() -> &'static Mutex<bool> {
     STARTED.get_or_init(|| Mutex::new(false))
 }
 
+#[cfg(unix)]
+fn parent_death_pipe() -> &'static Mutex<Option<UnixStream>> {
+    static PIPE: OnceLock<Mutex<Option<UnixStream>>> = OnceLock::new();
+    PIPE.get_or_init(|| Mutex::new(None))
+}
+
 /// Track a dedicated socket so last-tab app exit can still tear it down.
 pub fn register_dedicated_server(socket: PathBuf) {
-    lock_dedicated_sockets().insert(socket);
+    let mut sockets = lock_dedicated_sockets();
+    sockets.insert(socket);
+    rewrite_registry_list(&sockets);
+    drop(sockets);
     ensure_app_exit_reaper();
 }
 
 fn unregister_dedicated_server(socket: &Path) {
-    lock_dedicated_sockets().remove(socket);
+    let mut sockets = lock_dedicated_sockets();
+    sockets.remove(socket);
+    rewrite_registry_list(&sockets);
 }
 
 /// Last-tab close on Linux quits the app without dropping pane managers.
 pub fn schedule_kill_registered_dedicated_servers() {
     let sockets: Vec<PathBuf> = lock_dedicated_sockets().drain().collect();
+    rewrite_registry_list(&HashSet::new());
     for socket in sockets {
         schedule_kill_dedicated_server(socket);
     }
@@ -332,18 +369,10 @@ fn ensure_app_exit_reaper() {
         let Some(tmux_path) = resolve_tmux_binary() else {
             return;
         };
-        let dir = dedicated_server_dir();
-        let parent = std::process::id().to_string();
-        spawn_setsid_sh(
-            APP_EXIT_REAPER_SCRIPT,
-            "tmux-control-prototype-exit-reaper",
-            &[
-                std::ffi::OsStr::new(&parent),
-                dir.as_os_str(),
-                tmux_path.as_os_str(),
-            ],
-        );
-        *started = true;
+        let list = registry_list_path();
+        if spawn_app_exit_reaper(&list, &tmux_path) {
+            *started = true;
+        }
     }
 }
 
@@ -367,6 +396,49 @@ fn spawn_kill_dedicated_server_thread(socket: PathBuf) {
 }
 
 #[cfg(unix)]
+fn spawn_app_exit_reaper(list: &Path, tmux_path: &Path) -> bool {
+    let Ok((parent_end, child_end)) = UnixStream::pair() else {
+        log::error!("failed to create tmux parent-death pipe");
+        return false;
+    };
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(APP_EXIT_REAPER_SCRIPT)
+        .arg("tmux-control-prototype-exit-reaper")
+        .arg(list)
+        .arg(tmux_path)
+        // SAFETY: child_end is the unique owner of this socket.
+        .stdin(unsafe { Stdio::from_raw_fd(child_end.into_raw_fd()) })
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Last-tab Warp exit otherwise kills this reaper with the UI process group.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    match command.spawn() {
+        Ok(mut child) => {
+            *parent_death_pipe().lock() = Some(parent_end);
+            let _ = std::thread::Builder::new()
+                .name("tmux-control-prototype-exit-reaper-wait".into())
+                .spawn(move || {
+                    let _ = child.wait();
+                });
+            true
+        }
+        Err(err) => {
+            log::error!("failed to spawn tmux parent-exit reaper: {err}");
+            false
+        }
+    }
+}
+
+#[cfg(unix)]
 fn spawn_detached_kill_helper(tmux_path: Option<&Path>, socket: &Path) {
     let Some(tmux_path) = tmux_path else {
         log::error!(
@@ -376,7 +448,7 @@ fn spawn_detached_kill_helper(tmux_path: Option<&Path>, socket: &Path) {
         return;
     };
     let config = socket.with_extension("conf");
-    spawn_setsid_sh(
+    if !spawn_setsid_sh(
         DETACHED_KILL_BODY,
         "tmux-control-prototype-kill-server",
         &[
@@ -384,11 +456,16 @@ fn spawn_detached_kill_helper(tmux_path: Option<&Path>, socket: &Path) {
             socket.as_os_str(),
             config.as_os_str(),
         ],
-    );
+    ) {
+        log::error!(
+            "failed to spawn tmux kill-server helper for {}",
+            socket.display()
+        );
+    }
 }
 
 #[cfg(unix)]
-fn spawn_setsid_sh(script: &str, arg0: &str, args: &[&std::ffi::OsStr]) {
+fn spawn_setsid_sh(script: &str, arg0: &str, args: &[&std::ffi::OsStr]) -> bool {
     let mut command = Command::new("/bin/sh");
     command.arg("-c").arg(script).arg(arg0);
     for arg in args {
@@ -414,9 +491,11 @@ fn spawn_setsid_sh(script: &str, arg0: &str, args: &[&std::ffi::OsStr]) {
                 .spawn(move || {
                     let _ = child.wait();
                 });
+            true
         }
         Err(err) => {
             log::error!("failed to spawn tmux kill-server helper: {err}");
+            false
         }
     }
 }
@@ -434,6 +513,16 @@ fn registry_test_lock() -> parking_lot::MutexGuard<'static, ()> {
 #[cfg(test)]
 fn registered_dedicated_server_count() -> usize {
     lock_dedicated_sockets().len()
+}
+
+#[cfg(test)]
+fn app_exit_reaper_has_started() -> bool {
+    *app_exit_reaper_started().lock()
+}
+
+#[cfg(test)]
+fn reset_app_exit_reaper_started() {
+    *app_exit_reaper_started().lock() = false;
 }
 
 fn try_kill_dedicated_server(
