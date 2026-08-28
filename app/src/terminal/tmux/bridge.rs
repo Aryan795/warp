@@ -17,6 +17,7 @@ const MAX_BUFFERED_PANE_BYTES: usize = 64 * 1024;
 pub struct TmuxInstanceId(u64);
 
 impl TmuxInstanceId {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))

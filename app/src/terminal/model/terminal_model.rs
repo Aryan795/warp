@@ -126,6 +126,7 @@ pub enum TmuxClientEvent {
         number: u64,
         error: bool,
         payload: Vec<String>,
+        capture_pane: Option<String>,
     },
 }
 
@@ -1596,6 +1597,10 @@ impl TerminalModel {
 
     pub fn set_tmux_instance_id(&mut self, id: Option<u64>) {
         self.tmux_instance_id = id;
+    }
+
+    pub fn tmux_split_target_pane(&self) -> Option<&str> {
+        self.tmux_pane_id().or(self.tmux_focused_pane())
     }
 
     pub fn push_tmux_event(&mut self, event: TmuxClientEvent) {

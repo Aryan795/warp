@@ -36,6 +36,24 @@ fn user_socket_flags_are_rejected() {
         tmux_cc_shell_command("-S /tmp/tmux.sock new-session", None, 80, 24),
         Err(TmuxCommandError::IsolatedSocketOverride)
     );
+    assert_eq!(
+        tmux_cc_shell_command("-Lother attach", None, 80, 24),
+        Err(TmuxCommandError::IsolatedSocketOverride)
+    );
+    assert_eq!(
+        tmux_cc_shell_command("-S/tmp/foo new-session", None, 80, 24),
+        Err(TmuxCommandError::IsolatedSocketOverride)
+    );
+    assert_eq!(
+        tmux_cc_shell_command("--socket-name default attach", None, 80, 24),
+        Err(TmuxCommandError::IsolatedSocketOverride)
+    );
+    assert_eq!(
+        tmux_cc_shell_command("--socket=/tmp/foo attach", None, 80, 24),
+        Err(TmuxCommandError::IsolatedSocketOverride)
+    );
+    let command = tmux_cc_shell_command("attach -t api", None, 80, 24).unwrap();
+    assert!(command.contains("-L warp-control-v1"));
 }
 
 #[test]

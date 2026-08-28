@@ -462,6 +462,10 @@ impl PaneData {
         successful_split
     }
 
+    pub fn set_pane_flex(&mut self, pane_id: PaneId, flex: f32) -> bool {
+        self.root.set_pane_flex(pane_id, flex)
+    }
+
     /// Split the root of the pane tree, inserting `new_id` according to the given direction.
     pub fn split_root(&mut self, new_id: PaneId, direction: Direction) {
         self.root.insert(new_id, direction);
@@ -861,6 +865,13 @@ impl PaneNode {
         match self {
             PaneNode::Leaf(id) => *id == pane_id,
             PaneNode::Branch(branch) => branch.contains_pane(pane_id),
+        }
+    }
+
+    fn set_pane_flex(&mut self, pane_id: PaneId, flex: f32) -> bool {
+        match self {
+            PaneNode::Leaf(_) => false,
+            PaneNode::Branch(branch) => branch.set_pane_flex(pane_id, flex),
         }
     }
 
@@ -1295,6 +1306,21 @@ impl PaneBranch {
         self.nodes
             .iter()
             .any(|(_, node)| node.contains_pane(pane_id))
+    }
+
+    fn set_pane_flex(&mut self, pane_id: PaneId, flex: f32) -> bool {
+        for (pane_flex, node) in &mut self.nodes {
+            if let PaneNode::Leaf(id) = node
+                && *id == pane_id
+            {
+                *pane_flex = PaneFlex(flex);
+                return true;
+            }
+            if node.set_pane_flex(pane_id, flex) {
+                return true;
+            }
+        }
+        false
     }
 
     fn replace_pane(&mut self, old_pane_id: PaneId, new_pane_id: PaneId) -> bool {

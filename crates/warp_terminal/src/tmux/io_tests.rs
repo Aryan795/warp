@@ -85,7 +85,7 @@ fn start_pending_timeout_replays_queued_input() {
     let mut io = TmuxIoState::new();
     io.enqueue_input(start_command());
     io.enqueue_input(Cow::Borrowed(b"typed-while-waiting"));
-    let later = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let later = instant::Instant::now() + std::time::Duration::from_secs(30);
     let items = io.check_start_timeout(later);
     let replay = items.iter().find_map(|item| match item {
         TmuxFeedItem::Exited { replay } => Some(replay.clone()),
@@ -259,6 +259,35 @@ fn latest_resize_wins_when_interleaved_with_start() {
         }
         other => panic!("unexpected {other:?}"),
     }
+}
+
+#[test]
+fn interleaved_split_does_not_consume_capture_reply() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    io.feed(b"%window-pane-changed @0 %4\n");
+    io.enqueue_input(Cow::Borrowed(b"capture-pane -p -t %4\n"));
+    io.enqueue_input(Cow::Borrowed(b"split-window -h -t %4 -P -F '#{pane_id}'\n"));
+    io.enqueue_input(Cow::Borrowed(b"select-pane -t %4\n"));
+    let capture_end = io.feed(b"%begin 1 1\nsnapshot-line\n%end 1 1\n");
+    assert!(capture_end.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::CommandEnd {
+            capture_pane: Some(pane),
+            payload,
+            ..
+        } if pane.as_str() == "%4" && payload == &["snapshot-line".to_string()]
+    )));
+    let split_end = io.feed(b"%begin 1 2\n%5\n%end 1 2\n");
+    assert!(split_end.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::CommandEnd {
+            capture_pane: None,
+            payload,
+            ..
+        } if payload == &["%5".to_string()]
+    )));
 }
 
 #[test]

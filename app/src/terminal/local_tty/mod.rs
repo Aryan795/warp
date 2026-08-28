@@ -129,12 +129,19 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
         );
     }
 
-    fn on_tmux_command_end(&mut self, number: u64, error: bool, payload: &[String]) {
+    fn on_tmux_command_end(
+        &mut self,
+        number: u64,
+        error: bool,
+        payload: &[String],
+        capture_pane: Option<&crate::terminal::tmux::parser::PaneId>,
+    ) {
         self.push_tmux_event(
             crate::terminal::model::terminal_model::TmuxClientEvent::CommandEnd {
                 number,
                 error,
                 payload: payload.to_vec(),
+                capture_pane: capture_pane.map(|pane| pane.as_str().to_owned()),
             },
         );
     }

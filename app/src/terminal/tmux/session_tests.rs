@@ -151,6 +151,35 @@ fn layout_events_are_queued_until_taken() {
 }
 
 #[test]
+fn presentation_split_uses_bound_pane_id_not_unset_focus() {
+    use crate::terminal::tmux::parser::PaneId;
+    use crate::terminal::tmux::protocol::split_window_command;
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_presentation(true);
+    model.set_tmux_control_mode(true);
+    assert!(model.tmux_split_target_pane().is_none());
+    model.set_tmux_pane_id(Some("%5".to_owned()));
+    assert_eq!(model.tmux_split_target_pane(), Some("%5"));
+    let target = PaneId::from(model.tmux_split_target_pane().unwrap());
+    assert_eq!(
+        split_window_command(&target, true),
+        "split-window -h -t %5 -P -F '#{pane_id}'\n"
+    );
+    assert_eq!(
+        split_window_command(&target, false),
+        "split-window -v -t %5 -P -F '#{pane_id}'\n"
+    );
+}
+
+#[test]
+fn gateway_split_falls_back_to_focused_pane() {
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_control_mode(true);
+    model.set_tmux_focused_pane(Some("%3".to_owned()));
+    assert_eq!(model.tmux_split_target_pane(), Some("%3"));
+}
+
+#[test]
 fn two_models_keep_independent_instance_ids() {
     let mut a = TerminalModel::mock(None, None);
     let mut b = TerminalModel::mock(None, None);

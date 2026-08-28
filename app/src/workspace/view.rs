@@ -12821,7 +12821,6 @@ impl Workspace {
                 ctx.windows().show_window_and_focus_app(gateway);
             }
             runtime.unregister();
-            return;
         }
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
         {
@@ -12962,9 +12961,14 @@ impl Workspace {
                     } => {
                         self.apply_tmux_layout(window_id, layout, ctx);
                     }
-                    TmuxClientEvent::CommandEnd { error, payload, .. } => {
+                    TmuxClientEvent::CommandEnd {
+                        error,
+                        payload,
+                        capture_pane,
+                        ..
+                    } => {
                         if !*error {
-                            self.apply_tmux_command_end(payload, ctx);
+                            self.apply_tmux_command_end(payload, capture_pane.as_deref(), ctx);
                         }
                     }
                 }
@@ -13041,7 +13045,7 @@ impl Workspace {
                     pane_group.bind_tmux_pane(focused, first.as_str(), ctx);
                 }
             }
-            for step in steps {
+            for step in &steps {
                 if pane_group
                     .pane_id_for_tmux_pane(step.new_pane.as_str(), ctx)
                     .is_some()
@@ -13058,27 +13062,41 @@ impl Workspace {
                     pane_group.add_tmux_presentation_pane(direction, parent, ctx)
                 {
                     pane_group.bind_tmux_pane(new_pane, step.new_pane.as_str(), ctx);
+                    if let Some(parent) = parent {
+                        pane_group.set_tmux_split_flex(
+                            parent,
+                            new_pane,
+                            step.parent_size as f32,
+                            step.new_size as f32,
+                        );
+                    }
                 }
             }
+            pane_group.reconcile_tmux_panes(&leaves, ctx);
         });
     }
 
-    fn apply_tmux_command_end(&mut self, payload: &[String], ctx: &mut ViewContext<Self>) {
+    fn apply_tmux_command_end(
+        &mut self,
+        payload: &[String],
+        capture_pane: Option<&str>,
+        ctx: &mut ViewContext<Self>,
+    ) {
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         {
-            if let Some(runtime) = self.tmux_runtime(ctx.window_id())
-                && let Some(pane_id) = runtime.take_capture()
+            if let Some(pane_id) = capture_pane
+                && let Some(runtime) = self.tmux_runtime(ctx.window_id())
             {
                 let bytes = payload.join("\n").into_bytes();
                 runtime.deliver_output(
-                    &crate::terminal::tmux::parser::PaneId::from(pane_id.as_str()),
+                    &crate::terminal::tmux::parser::PaneId::from(pane_id),
                     &bytes,
                 );
             }
         }
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
         {
-            let _ = (payload, ctx);
+            let _ = (payload, capture_pane, ctx);
         }
     }
 

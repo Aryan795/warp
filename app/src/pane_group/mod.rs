@@ -4040,7 +4040,7 @@ impl PaneGroup {
             let model = view.model.lock();
             (
                 model.is_tmux_control_mode() || model.is_tmux_presentation(),
-                model.tmux_focused_pane().map(str::to_owned),
+                model.tmux_split_target_pane().map(str::to_owned),
                 model.is_tmux_presentation(),
             )
         });
@@ -4139,7 +4139,6 @@ impl PaneGroup {
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         if let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), &model) {
             runtime.register_pane(tmux_pane_id, model);
-            runtime.note_capture(tmux_pane_id);
         }
         self.write_tmux_command(
             crate::terminal::tmux::protocol::capture_pane_command(
@@ -4186,6 +4185,56 @@ impl PaneGroup {
         {
             let _ = (direction, base_pane_id, ctx);
             None
+        }
+    }
+
+    pub fn set_tmux_split_flex(
+        &mut self,
+        parent: PaneId,
+        new_pane: PaneId,
+        parent_flex: f32,
+        new_flex: f32,
+    ) {
+        let parent_flex = parent_flex.max(1.0);
+        let new_flex = new_flex.max(1.0);
+        self.panes.set_pane_flex(parent, parent_flex);
+        self.panes.set_pane_flex(new_pane, new_flex);
+    }
+
+    pub fn reconcile_tmux_panes(
+        &mut self,
+        live: &[crate::terminal::tmux::parser::PaneId],
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let bound: Vec<(PaneId, String)> = self
+            .panes
+            .visible_pane_ids()
+            .into_iter()
+            .filter_map(|pane_id| {
+                let tmux_id = self
+                    .terminal_view_from_pane_id(pane_id, ctx)?
+                    .read(ctx, |view, _| {
+                        view.model.lock().tmux_pane_id().map(str::to_owned)
+                    })?;
+                Some((pane_id, tmux_id))
+            })
+            .collect();
+        let stale: Vec<(PaneId, String)> = bound
+            .into_iter()
+            .filter(|(_, tmux_id)| !live.iter().any(|id| id.as_str() == tmux_id))
+            .collect();
+        for (warp_pane, tmux_id) in stale {
+            #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+            if let Some(view) = self.terminal_view_from_pane_id(warp_pane, ctx) {
+                let model = view.read(ctx, |view, _| view.model.clone());
+                if let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), &model) {
+                    runtime.unregister_pane(&tmux_id);
+                }
+                model.lock().set_tmux_pane_id(None);
+            }
+            if self.panes.visible_pane_count() > 1 {
+                self.close_pane(warp_pane, ctx);
+            }
         }
     }
 

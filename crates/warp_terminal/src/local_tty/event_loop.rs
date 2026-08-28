@@ -10,8 +10,8 @@ use std::marker::Send;
 use std::ops::DerefMut;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
 
+use instant::Instant;
 use log::error;
 use mio::{self, Events, Interest};
 use parking_lot::{FairMutex, FairMutexGuard};
@@ -58,7 +58,14 @@ pub trait ActiveTerminal: ansi::Handler + Send {
     fn on_tmux_window_close(&mut self, _window_id: &crate::tmux::WindowId) {}
     fn on_tmux_window_renamed(&mut self, _window_id: &crate::tmux::WindowId, _name: &str) {}
     fn on_tmux_session_window_changed(&mut self, _window_id: &crate::tmux::WindowId) {}
-    fn on_tmux_command_end(&mut self, _number: u64, _error: bool, _payload: &[String]) {}
+    fn on_tmux_command_end(
+        &mut self,
+        _number: u64,
+        _error: bool,
+        _payload: &[String],
+        _capture_pane: Option<&crate::tmux::PaneId>,
+    ) {
+    }
 }
 
 pub struct EventLoop<P: local_tty::EventedPty, M: ActiveTerminal> {
@@ -207,8 +214,9 @@ fn apply_tmux_feed_items<M: ActiveTerminal, W: io::Write>(
                 number,
                 error,
                 payload,
+                capture_pane,
             } => {
-                terminal.on_tmux_command_end(number, error, &payload);
+                terminal.on_tmux_command_end(number, error, &payload, capture_pane.as_ref());
             }
             TmuxFeedItem::Exited { replay } => {
                 terminal.on_tmux_control_mode(false);

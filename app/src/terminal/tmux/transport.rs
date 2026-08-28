@@ -84,10 +84,7 @@ pub fn tmux_cc_argv(
     columns: usize,
     rows: usize,
 ) -> Result<Vec<String>, TmuxCommandError> {
-    if user_tokens
-        .iter()
-        .any(|token| token == "-L" || token == "-S")
-    {
+    if user_tokens.iter().any(|token| is_socket_override(token)) {
         return Err(TmuxCommandError::IsolatedSocketOverride);
     }
     let (globals, command) = split_tmux_globals(user_tokens)?;
@@ -138,7 +135,7 @@ fn split_tmux_globals(tokens: &[String]) -> Result<(Vec<String>, Vec<String>), T
         if token == "--" {
             return Ok((globals, tokens[i + 1..].to_vec()));
         }
-        if matches!(token.as_str(), "-L" | "-S") {
+        if is_socket_override(token) {
             return Err(TmuxCommandError::IsolatedSocketOverride);
         }
         if matches!(
@@ -171,6 +168,16 @@ fn maybe_insert_size(command: &mut Vec<String>, columns: usize, rows: usize) {
     if !command.iter().any(|token| token == "-y") {
         command.extend(["-y".to_owned(), rows.to_string()]);
     }
+}
+
+fn is_socket_override(token: &str) -> bool {
+    matches!(
+        token,
+        "-L" | "-S" | "--socket" | "--socket-name" | "--tmux-socket"
+    ) || token.starts_with("-L") && token != "-L" && !token.starts_with("-L-")
+        || token.starts_with("-S") && token != "-S"
+        || token.starts_with("--socket=")
+        || token.starts_with("--socket-name=")
 }
 
 fn tokenize_args(input: &str) -> Vec<String> {

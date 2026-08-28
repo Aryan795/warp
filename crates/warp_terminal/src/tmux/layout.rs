@@ -41,6 +41,25 @@ impl LayoutNode {
             .map(|leaf| leaf.pane_id.clone())
             .collect()
     }
+
+    fn size_along(&self, horizontal: bool) -> u32 {
+        match self {
+            Self::Leaf(leaf) => {
+                if horizontal {
+                    leaf.width
+                } else {
+                    leaf.height
+                }
+            }
+            Self::Split { width, height, .. } => {
+                if horizontal {
+                    *width
+                } else {
+                    *height
+                }
+            }
+        }
+    }
 }
 
 /// Split steps that recreate `layout` as Warp pane splits, starting from the first leaf.
@@ -49,6 +68,8 @@ pub struct SplitStep {
     pub parent: PaneId,
     pub new_pane: PaneId,
     pub side_by_side: bool,
+    pub parent_size: u32,
+    pub new_size: u32,
 }
 
 pub fn parse_window_layout(input: &str) -> Option<LayoutNode> {
@@ -61,6 +82,15 @@ pub fn split_steps(layout: &LayoutNode) -> Vec<SplitStep> {
     let mut steps = Vec::new();
     collect_split_steps(layout, &mut steps);
     steps
+}
+
+pub fn missing_from_layout(bound: &[PaneId], layout: &LayoutNode) -> Vec<PaneId> {
+    let live = layout.pane_ids();
+    bound
+        .iter()
+        .filter(|id| !live.contains(id))
+        .cloned()
+        .collect()
 }
 
 fn collect_split_steps(node: &LayoutNode, steps: &mut Vec<SplitStep>) {
@@ -87,6 +117,8 @@ fn collect_split_steps(node: &LayoutNode, steps: &mut Vec<SplitStep>) {
                 parent: parent.clone(),
                 new_pane,
                 side_by_side: *horizontal,
+                parent_size: children[0].size_along(*horizontal),
+                new_size: child.size_along(*horizontal),
             });
         }
         collect_split_steps(child, steps);
