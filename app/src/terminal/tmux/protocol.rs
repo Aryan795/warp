@@ -271,6 +271,11 @@ pub fn pipe_pane_journal_command(target: &PaneId, journal_path: &str) -> String 
     )
 }
 
+/// Seed a fresh model with the pane's current visible screen after attach.
+pub fn capture_pane_command(target: &PaneId) -> String {
+    format!("capture-pane -p -t {}\n", target.as_str())
+}
+
 /// Tear down the dedicated Warp tmux server. `kill-session` can leave that
 /// server process alive on this socket after the control client detaches.
 pub fn kill_server_command() -> &'static str {

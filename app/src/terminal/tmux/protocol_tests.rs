@@ -10,9 +10,9 @@ use warp_core::SessionId;
 use warp_terminal::shell::ShellType;
 
 use super::{
-    PaneBootstrap, cleanup_unspawned_dedicated_files, control_client_argv, detach_client_command,
-    kill_pane_command, kill_server_argv, kill_server_command, kill_window_command,
-    new_window_command, pane_bootstrap_for_shell, pipe_pane_journal_command,
+    PaneBootstrap, capture_pane_command, cleanup_unspawned_dedicated_files, control_client_argv,
+    detach_client_command, kill_pane_command, kill_server_argv, kill_server_command,
+    kill_window_command, new_window_command, pane_bootstrap_for_shell, pipe_pane_journal_command,
     refresh_client_command, register_dedicated_server, resize_pane_command,
     schedule_kill_dedicated_server, select_pane_command, select_window_command, send_keys_commands,
     split_window_command, zsh_init_bytes,
@@ -56,6 +56,7 @@ fn pane_and_window_commands_target_tmux_ids() {
         pipe_pane_journal_command(&pane, "/tmp/warp-%1.journal"),
         "pipe-pane -t %1 -O 'cat >> /tmp/warp-%1.journal'\n"
     );
+    assert_eq!(capture_pane_command(&pane), "capture-pane -p -t %1\n");
 }
 
 #[test]

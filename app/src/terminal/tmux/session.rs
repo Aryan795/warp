@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::parser::PaneId;
 
@@ -29,9 +29,33 @@ impl ControlClientLoss {
     pub fn close_plan(self, last_pane: bool) -> ClosePlan {
         match self {
             Self::TransportEof => ClosePlan::DetachClient,
-            Self::ExplicitClose if last_pane => ClosePlan::TearDownSession,
+            // Product same-PTY sessions must leave tmux alive; harness teardown is separate.
+            Self::ExplicitClose if last_pane => ClosePlan::DetachClient,
             Self::ExplicitClose => ClosePlan::KillPane,
         }
+    }
+}
+
+/// Independent output slots for tmux panes that share one PTY owner.
+#[derive(Debug, Default, Clone)]
+pub struct TmuxViewSlots {
+    outputs: HashMap<PaneId, Vec<u8>>,
+}
+
+impl TmuxViewSlots {
+    pub fn deliver(&mut self, pane_id: PaneId, bytes: &[u8]) {
+        self.outputs
+            .entry(pane_id)
+            .or_default()
+            .extend_from_slice(bytes);
+    }
+
+    pub fn view_count(&self) -> usize {
+        self.outputs.len()
+    }
+
+    pub fn output(&self, pane_id: &PaneId) -> Option<&[u8]> {
+        self.outputs.get(pane_id).map(Vec::as_slice)
     }
 }
 

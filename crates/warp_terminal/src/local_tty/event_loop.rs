@@ -124,8 +124,26 @@ impl State {
     }
 }
 
+fn is_tmux_client_command(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"split-window")
+        || bytes.starts_with(b"select-pane")
+        || bytes.starts_with(b"kill-pane")
+        || bytes.starts_with(b"resize-pane")
+        || bytes.starts_with(b"refresh-client")
+        || bytes.starts_with(b"new-window")
+        || bytes.starts_with(b"select-window")
+        || bytes.starts_with(b"kill-window")
+        || bytes.starts_with(b"detach-client")
+        || bytes.starts_with(b"pipe-pane")
+        || bytes.starts_with(b"capture-pane")
+}
+
 fn enqueue_input(state: &mut State, input: Cow<'static, [u8]>) {
     if !state.in_tmux_control {
+        state.write_list.push_back(input);
+        return;
+    }
+    if is_tmux_client_command(&input) {
         state.write_list.push_back(input);
         return;
     }
