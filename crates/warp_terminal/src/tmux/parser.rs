@@ -6,6 +6,10 @@
 /// DCS sequence tmux emits when a client enters control mode (`tmux -CC`).
 pub const CONTROL_MODE_DCS: &[u8] = b"\x1bP1000p";
 
+const MAX_CONTROL_LINE_BYTES: usize = 1_048_576;
+const MAX_REPLY_PAYLOAD_LINES: usize = 10_000;
+const MAX_REPLY_PAYLOAD_BYTES: usize = 1_048_576;
+
 /// Identity of a tmux pane as reported by control mode (`%0`, `%1`, ...).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PaneId(String);
@@ -91,6 +95,9 @@ pub enum ControlEvent {
     Exit {
         reason: Option<String>,
     },
+    /// Incomplete control line or command-reply payload exceeded the bound.
+    /// The parser has reset to shell bytes so a spoofed stream cannot stall VT.
+    ProtocolOverflow,
 }
 
 enum State {
@@ -204,6 +211,16 @@ impl ControlModeParser {
 
         let mut items = Vec::new();
         loop {
+            if line.len() > MAX_CONTROL_LINE_BYTES
+                || reply_payload.len() > MAX_REPLY_PAYLOAD_LINES
+                || reply_payload.iter().map(String::len).sum::<usize>() > MAX_REPLY_PAYLOAD_BYTES
+            {
+                self.state = State::SeekingDcs {
+                    pending: Vec::new(),
+                };
+                items.push(DecodeItem::Control(ControlEvent::ProtocolOverflow));
+                return (items, Some(()));
+            }
             let Some(newline_at) = line.iter().position(|&b| b == b'\n') else {
                 return (items, None);
             };

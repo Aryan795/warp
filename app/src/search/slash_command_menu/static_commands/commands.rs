@@ -228,7 +228,7 @@ pub const CREATE_DOCKER_SANDBOX: StaticCommand = StaticCommand {
     argument: None,
 };
 
-pub const CREATE_TMUX_WORKSPACE: StaticCommand = StaticCommand {
+pub static CREATE_TMUX_WORKSPACE: LazyLock<StaticCommand> = LazyLock::new(|| StaticCommand {
     name: "/tmux",
     description: "Open a Warp-managed tmux control-mode workspace (prototype)",
     kind: SlashCommandKind::CreateTmuxWorkspace,
@@ -237,8 +237,12 @@ pub const CREATE_TMUX_WORKSPACE: StaticCommand = StaticCommand {
     },
     availability: Availability::LOCAL,
     auto_enter_ai_mode: false,
-    argument: None,
-};
+    argument: Some(
+        Argument::optional()
+            .with_hint_text("<tmux args, e.g. attach -t api>")
+            .with_execute_on_selection(),
+    ),
+});
 
 pub static CREATE_NEW_PROJECT: LazyLock<StaticCommand> = LazyLock::new(|| StaticCommand {
     name: "/create-new-project",
@@ -1030,7 +1034,7 @@ fn all_commands_for_all_surfaces() -> Vec<StaticCommand> {
     }
 
     if FeatureFlag::TmuxControlPrototype.is_enabled() {
-        commands.push(CREATE_TMUX_WORKSPACE);
+        commands.push(CREATE_TMUX_WORKSPACE.clone());
     }
 
     if FeatureFlag::CreatingSharedSessions.is_enabled()

@@ -644,6 +644,8 @@ pub enum Event {
     OpenChildAgentInNewTab {
         conversation_id: AIConversationId,
     },
+    OpenTmuxPresentationWindow,
+    CloseTmuxPresentationWindow,
     OpenSuggestedAgentModeWorkflowModal {
         workflow_and_id: SuggestedAgentModeWorkflowAndId,
     },
@@ -816,6 +818,8 @@ pub struct NewTerminalOptions {
     pub env_vars: HashMap<OsString, OsString>,
     /// If true, do not show the Code Mode homepage UX.
     pub hide_homepage: bool,
+    /// Create a Mock terminal view with no local PTY for a tmux-owned window.
+    pub tmux_presentation: bool,
     /// Whether or not to start sharing the terminal session as soon as it's ready.
     pub is_shared_session_creator: IsSharedSessionCreator,
     /// The AI conversation to restore when the terminal is created.
@@ -3448,6 +3452,34 @@ impl PaneGroup {
         (PaneData::new(pane_id), focus)
     }
 
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn initial_tmux_presentation_pane(
+        resources: TerminalViewResources,
+        view_bounds: RectF,
+        model_event_sender: Option<SyncSender<ModelEvent>>,
+        pane_contents: &mut HashMap<PaneId, Box<dyn AnyPaneContent>>,
+        pane_history: &mut Vec<PaneId>,
+        ctx: &mut ViewContext<Self>,
+    ) -> (PaneData, InitialFocus) {
+        let uuid = Uuid::new_v4();
+        let terminal_init =
+            crate::terminal::tmux::presentation_manager::TmuxPresentationManager::create_model(
+                resources,
+                view_bounds.size(),
+                ctx.window_id(),
+                ctx,
+            );
+        Self::terminal_pane_data(
+            uuid.as_bytes().to_vec(),
+            terminal_init.view,
+            terminal_init.manager,
+            model_event_sender,
+            pane_contents,
+            pane_history,
+            ctx,
+        )
+    }
+
     /// Constructs a new [`PaneGroup`] with a layout that adheres
     /// to the specification of the provided [`PanesLayout`].
     #[allow(clippy::too_many_arguments)]
@@ -3518,16 +3550,45 @@ impl PaneGroup {
 
                     Self::process_deferred_panes(deferred_panes, result, pane_contents, ctx)
                 }
-                PanesLayout::SingleTerminal(options) => Self::initial_single_terminal_pane(
-                    *options,
-                    resources,
-                    unsupported_banner_model_handle,
-                    view_bounds,
-                    model_event_sender_clone,
-                    pane_contents,
-                    pane_history,
-                    ctx,
-                ),
+                PanesLayout::SingleTerminal(options) => {
+                    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+                    {
+                        if options.tmux_presentation {
+                            Self::initial_tmux_presentation_pane(
+                                resources,
+                                view_bounds,
+                                model_event_sender_clone,
+                                pane_contents,
+                                pane_history,
+                                ctx,
+                            )
+                        } else {
+                            Self::initial_single_terminal_pane(
+                                *options,
+                                resources,
+                                unsupported_banner_model_handle,
+                                view_bounds,
+                                model_event_sender_clone,
+                                pane_contents,
+                                pane_history,
+                                ctx,
+                            )
+                        }
+                    }
+                    #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+                    {
+                        Self::initial_single_terminal_pane(
+                            *options,
+                            resources,
+                            unsupported_banner_model_handle,
+                            view_bounds,
+                            model_event_sender_clone,
+                            pane_contents,
+                            pane_history,
+                            ctx,
+                        )
+                    }
+                }
                 PanesLayout::AmbientAgent => Self::initial_ambient_agent_pane(
                     resources,
                     view_bounds,
@@ -3950,12 +4011,23 @@ impl PaneGroup {
         let Some(view) = self.focused_session_view(ctx) else {
             return false;
         };
-        if !view.as_ref(ctx).model.lock().is_tmux_control_mode() {
+        let (is_tmux, focused, is_presentation) = view.read(ctx, |view, _| {
+            let model = view.model.lock();
+            (
+                model.is_tmux_control_mode() || model.is_tmux_presentation(),
+                model.tmux_focused_pane().map(str::to_owned),
+                model.is_tmux_presentation(),
+            )
+        });
+        if !is_tmux {
             return false;
         }
+        let Some(pane_id) = focused else {
+            return is_presentation;
+        };
         let side_by_side = matches!(direction, Direction::Left | Direction::Right);
         let command = crate::terminal::tmux::protocol::split_window_command(
-            &crate::terminal::tmux::parser::PaneId::from("%0"),
+            &crate::terminal::tmux::parser::PaneId::from(pane_id.as_str()),
             side_by_side,
         );
         view.update(ctx, |view, ctx| {

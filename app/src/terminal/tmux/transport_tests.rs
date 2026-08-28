@@ -2,15 +2,70 @@ use std::path::PathBuf;
 
 use warp_terminal::shell::ShellType;
 
-use super::{ControlTransportSpec, in_place_tmux_cc_command};
+use super::{
+    ControlTransportSpec, TmuxCommandError, in_place_tmux_cc_command, tmux_cc_argv,
+    tmux_cc_shell_command,
+};
 use crate::terminal::tmux::protocol::pane_bootstrap_for_shell;
 
 #[test]
-fn in_place_command_attaches_existing_session() {
+fn in_place_command_attaches_existing_session_on_warp_socket() {
     let command = in_place_tmux_cc_command("warp-host-1", 80, 24);
-    assert!(command.starts_with("tmux -CC new-session -A -s warp-host-1"));
+    assert!(command.starts_with("tmux -CC -L warp-control-v1 new-session -A -s warp-host-1"));
     assert!(command.contains("-x 80"));
     assert!(command.contains("-y 24"));
+    assert!(!command.contains(" -S "));
+}
+
+#[test]
+fn attach_uses_dedicated_socket_not_the_default_server() {
+    let command = tmux_cc_shell_command("attach -t api", None, 80, 24).unwrap();
+    assert_eq!(
+        command,
+        "tmux -CC -L warp-control-v1 attach-session -t api\n"
+    );
+}
+
+#[test]
+fn user_socket_flags_are_rejected() {
+    assert_eq!(
+        tmux_cc_shell_command("-L default attach", None, 80, 24),
+        Err(TmuxCommandError::IsolatedSocketOverride)
+    );
+    assert_eq!(
+        tmux_cc_shell_command("-S /tmp/tmux.sock new-session", None, 80, 24),
+        Err(TmuxCommandError::IsolatedSocketOverride)
+    );
+}
+
+#[test]
+fn new_session_gets_size_and_quotes_unsafe_names() {
+    let argv = tmux_cc_argv(
+        &["new-session".into(), "-s".into(), "api prod".into()],
+        "warp",
+        120,
+        40,
+    )
+    .unwrap();
+    assert_eq!(
+        argv,
+        vec![
+            "tmux",
+            "-CC",
+            "-L",
+            "warp-control-v1",
+            "new-session",
+            "-s",
+            "api prod",
+            "-x",
+            "120",
+            "-y",
+            "40",
+        ]
+    );
+    let command = tmux_cc_shell_command("new-session -s 'api prod'", None, 120, 40).unwrap();
+    assert!(command.contains("-L warp-control-v1"));
+    assert!(command.contains("'api prod'"));
 }
 
 #[test]

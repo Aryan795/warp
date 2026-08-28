@@ -30,4 +30,8 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
     fn on_tmux_control_mode(&mut self, active: bool) {
         self.set_tmux_control_mode(active);
     }
+
+    fn on_tmux_focus(&mut self, pane_id: &crate::terminal::tmux::parser::PaneId) {
+        self.set_tmux_focused_pane(Some(pane_id.as_str().to_owned()));
+    }
 }

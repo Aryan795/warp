@@ -104,7 +104,7 @@ impl PaneRegistry {
             return ClosePlan::UnknownPane;
         }
         if self.panes.len() <= 1 {
-            ClosePlan::TearDownSession
+            ClosePlan::DetachClient
         } else {
             ClosePlan::KillPane
         }

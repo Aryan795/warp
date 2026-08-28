@@ -1458,6 +1458,12 @@ fn handle_terminal_view_event(
                 // emits `EnsureUnifiedViewerChildPane` instead.
                 group.ensure_shared_session_viewer_child_pane(*conversation_id, *session_id, ctx);
             }
+            Event::OpenTmuxPresentationWindow => {
+                ctx.emit(pane_group::Event::OpenTmuxPresentationWindow);
+            }
+            Event::CloseTmuxPresentationWindow => {
+                ctx.emit(pane_group::Event::CloseTmuxPresentationWindow);
+            }
             Event::OpenChildAgentInNewTab { conversation_id } => {
                 // Pane group can't add tabs; forward to the workspace.
                 if group.ensure_hidden_child_agent_pane_for_conversation(*conversation_id, ctx) {

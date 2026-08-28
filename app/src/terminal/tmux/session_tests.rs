@@ -1,4 +1,7 @@
 use super::{ClosePlan, ControlClientLoss, PaneRegistry, TmuxViewSlots};
+use crate::features::FeatureFlag;
+use crate::pane_group::NewTerminalOptions;
+use crate::terminal::TerminalModel;
 use crate::terminal::tmux::parser::PaneId;
 
 #[test]
@@ -38,17 +41,17 @@ fn closing_a_sibling_keeps_the_session() {
     assert!(registry.contains(&PaneId::from("%0")));
     assert_eq!(
         registry.close_plan(&PaneId::from("%0")),
-        ClosePlan::TearDownSession
+        ClosePlan::DetachClient
     );
 }
 
 #[test]
-fn closing_the_last_pane_tears_down_the_session() {
+fn closing_the_last_pane_detaches_the_client() {
     let mut registry = PaneRegistry::new();
     registry.register(PaneId::from("%0"));
     assert_eq!(
         registry.unregister(&PaneId::from("%0")),
-        ClosePlan::TearDownSession
+        ClosePlan::DetachClient
     );
     assert!(registry.is_empty());
 }
@@ -87,4 +90,45 @@ fn unknown_pane_close_is_a_no_op() {
         registry.close_plan(&PaneId::from("%0")),
         ClosePlan::UnknownPane
     );
+}
+
+#[test]
+fn gateway_requests_a_presentation_window_once() {
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_control_mode(true);
+    assert!(model.take_tmux_open_presentation());
+    assert!(!model.take_tmux_open_presentation());
+}
+
+#[test]
+fn presentation_models_do_not_open_another_window() {
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_presentation(true);
+    model.set_tmux_control_mode(true);
+    assert!(model.is_tmux_presentation());
+    assert!(!model.take_tmux_open_presentation());
+}
+
+#[test]
+fn gateway_exit_requests_presentation_window_close() {
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_control_mode(true);
+    let _ = model.take_tmux_open_presentation();
+    model.set_tmux_control_mode(false);
+    assert!(model.take_tmux_close_presentation());
+    assert!(!model.take_tmux_close_presentation());
+}
+
+#[test]
+fn default_new_terminal_options_are_not_tmux_owned() {
+    assert!(!NewTerminalOptions::default().tmux_presentation);
+}
+
+#[test]
+fn feature_off_does_not_treat_panes_as_tmux_owned() {
+    let _flag = FeatureFlag::TmuxControlPrototype.override_enabled(false);
+    let model = TerminalModel::mock(None, None);
+    assert!(!model.is_tmux_control_mode());
+    assert!(!model.is_tmux_presentation());
+    assert!(!NewTerminalOptions::default().tmux_presentation);
 }

@@ -45,7 +45,8 @@ where
             | ControlEvent::WindowClose { .. }
             | ControlEvent::WindowRenamed { .. }
             | ControlEvent::SessionWindowChanged { .. }
-            | ControlEvent::WindowPaneChanged { .. } => {}
+            | ControlEvent::WindowPaneChanged { .. }
+            | ControlEvent::ProtocolOverflow => {}
         }
     }
     result

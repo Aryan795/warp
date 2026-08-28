@@ -21,9 +21,7 @@ use crate::event::ExitReason;
 use crate::event_listener::ChannelEventListener;
 use crate::local_tty;
 use crate::model::ansi;
-use crate::tmux::{
-    ControlEvent, ControlModeParser, DecodeItem, PaneId, refresh_client_command, send_keys_command,
-};
+use crate::tmux::{PaneId, TmuxFeedItem, TmuxIoState};
 use crate::writeable_pty::Message;
 
 /// The size of the buffer to read data into from the PTY.
@@ -45,6 +43,18 @@ pub trait ActiveTerminal: ansi::Handler + Send {
     fn exit(&mut self, reason: ExitReason);
 
     fn on_tmux_control_mode(&mut self, _active: bool) {}
+    fn on_tmux_pane_output(&mut self, _pane_id: &PaneId, _bytes: &[u8]) {}
+    fn on_tmux_focus(&mut self, _pane_id: &PaneId) {}
+    fn on_tmux_layout(
+        &mut self,
+        _window_id: &crate::tmux::WindowId,
+        _layout: &str,
+        _visible_layout: Option<&str>,
+        _flags: Option<&str>,
+    ) {
+    }
+    fn on_tmux_window_add(&mut self, _window_id: &crate::tmux::WindowId) {}
+    fn on_tmux_window_close(&mut self, _window_id: &crate::tmux::WindowId) {}
 }
 
 pub struct EventLoop<P: local_tty::EventedPty, M: ActiveTerminal> {
@@ -75,10 +85,7 @@ pub struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     parser: ansi::Processor,
-    tmux: ControlModeParser,
-    in_tmux_control: bool,
-    tmux_pane: Option<PaneId>,
-    pending_tmux_writes: Vec<Cow<'static, [u8]>>,
+    tmux: TmuxIoState,
 }
 
 impl Default for State {
@@ -87,10 +94,7 @@ impl Default for State {
             write_list: VecDeque::new(),
             parser: ansi::Processor::new(),
             writing: None,
-            tmux: ControlModeParser::new(),
-            in_tmux_control: false,
-            tmux_pane: None,
-            pending_tmux_writes: Vec::new(),
+            tmux: TmuxIoState::new(),
         }
     }
 }
@@ -124,49 +128,13 @@ impl State {
     }
 }
 
-fn is_tmux_client_command(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"split-window")
-        || bytes.starts_with(b"select-pane")
-        || bytes.starts_with(b"kill-pane")
-        || bytes.starts_with(b"resize-pane")
-        || bytes.starts_with(b"refresh-client")
-        || bytes.starts_with(b"new-window")
-        || bytes.starts_with(b"select-window")
-        || bytes.starts_with(b"kill-window")
-        || bytes.starts_with(b"detach-client")
-        || bytes.starts_with(b"pipe-pane")
-        || bytes.starts_with(b"capture-pane")
-}
-
 fn enqueue_input(state: &mut State, input: Cow<'static, [u8]>) {
-    if !state.in_tmux_control {
+    if !FeatureFlag::TmuxControlPrototype.is_enabled() {
         state.write_list.push_back(input);
         return;
     }
-    if is_tmux_client_command(&input) {
-        state.write_list.push_back(input);
-        return;
-    }
-    if let Some(pane) = &state.tmux_pane {
-        let encoded = send_keys_command(pane, &input);
-        if !encoded.is_empty() {
-            state.write_list.push_back(Cow::Owned(encoded));
-        }
-    } else {
-        state.pending_tmux_writes.push(input);
-    }
-}
-
-fn flush_pending_tmux_writes(state: &mut State) {
-    let Some(pane) = state.tmux_pane.clone() else {
-        return;
-    };
-    let pending = std::mem::take(&mut state.pending_tmux_writes);
-    for input in pending {
-        let encoded = send_keys_command(&pane, &input);
-        if !encoded.is_empty() {
-            state.write_list.push_back(Cow::Owned(encoded));
-        }
+    for item in state.tmux.enqueue_input(input) {
+        state.write_list.push_back(item);
     }
 }
 
@@ -176,31 +144,54 @@ fn feed_decoded_pty_bytes<M: ActiveTerminal, W: io::Write>(
     writer: &mut W,
     bytes: &[u8],
 ) {
-    for item in state.tmux.decode(bytes) {
+    for item in state.tmux.feed(bytes) {
         match item {
-            DecodeItem::Shell(shell) => {
+            TmuxFeedItem::Shell(shell) => {
                 state.parser.parse_bytes(terminal, &shell, writer);
             }
-            DecodeItem::Control(ControlEvent::EnteredControlMode) => {
-                state.in_tmux_control = true;
+            TmuxFeedItem::EnteredControl { refresh_client } => {
                 terminal.on_tmux_control_mode(true);
-            }
-            DecodeItem::Control(ControlEvent::PaneOutput { pane_id, bytes }) => {
-                if state.tmux_pane.is_none() {
-                    state.tmux_pane = Some(pane_id.clone());
-                    flush_pending_tmux_writes(state);
-                }
-                if state.tmux_pane.as_ref() == Some(&pane_id) {
-                    state.parser.parse_bytes(terminal, &bytes, writer);
+                if let Some(command) = refresh_client {
+                    state.write_list.push_back(Cow::Owned(command.into_bytes()));
                 }
             }
-            DecodeItem::Control(ControlEvent::Exit { .. }) => {
-                state.in_tmux_control = false;
-                state.tmux_pane = None;
-                state.pending_tmux_writes.clear();
+            TmuxFeedItem::PaneOutput { pane_id, bytes } => {
+                terminal.on_tmux_pane_output(&pane_id, &bytes);
+            }
+            TmuxFeedItem::Focused(pane_id) => {
+                terminal.on_tmux_focus(&pane_id);
+            }
+            TmuxFeedItem::LayoutChange {
+                window_id,
+                layout,
+                visible_layout,
+                flags,
+            } => {
+                terminal.on_tmux_layout(
+                    &window_id,
+                    &layout,
+                    visible_layout.as_deref(),
+                    flags.as_deref(),
+                );
+            }
+            TmuxFeedItem::EncodedPending(encoded) => {
+                state.write_list.push_back(Cow::Owned(encoded));
+            }
+            TmuxFeedItem::WindowAdd { window_id } => {
+                terminal.on_tmux_window_add(&window_id);
+            }
+            TmuxFeedItem::WindowClose { window_id } => {
+                terminal.on_tmux_window_close(&window_id);
+            }
+            TmuxFeedItem::WindowRenamed { .. }
+            | TmuxFeedItem::SessionWindowChanged { .. }
+            | TmuxFeedItem::CommandEnd { .. } => {}
+            TmuxFeedItem::Exited { replay } => {
                 terminal.on_tmux_control_mode(false);
+                for pending in replay {
+                    state.write_list.push_back(pending);
+                }
             }
-            DecodeItem::Control(_) => {}
         }
     }
 }
@@ -270,10 +261,11 @@ where
                 }
                 Message::Resize(size) => {
                     self.pty.on_resize(&size);
-                    if state.in_tmux_control {
-                        state.write_list.push_back(Cow::Owned(
-                            refresh_client_command(size.columns(), size.rows()).into_bytes(),
-                        ));
+                    if FeatureFlag::TmuxControlPrototype.is_enabled()
+                        && let Some(command) =
+                            state.tmux.enqueue_resize(size.columns(), size.rows())
+                    {
+                        state.write_list.push_back(command);
                     }
                 }
                 Message::ChildExited => return ChannelResult::TerminateLoop { child_exited: true },

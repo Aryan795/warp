@@ -305,6 +305,26 @@ fn same_buffer_exit_then_shell_bytes() {
 }
 
 #[test]
+fn oversized_control_line_aborts_to_shell_parsing() {
+    use super::DecodeItem;
+    let mut parser = ControlModeParser::new();
+    parser.decode(CONTROL_MODE_DCS);
+    assert!(parser.is_in_control_mode());
+    let overflow = vec![b'x'; 1_048_577];
+    let items = parser.decode(&overflow);
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, DecodeItem::Control(ControlEvent::ProtocolOverflow)))
+    );
+    assert!(!parser.is_in_control_mode());
+    assert_eq!(
+        parser.decode(b"prompt$ "),
+        vec![DecodeItem::Shell(b"prompt$ ".to_vec())]
+    );
+}
+
+#[test]
 fn protocol_lines_are_not_shell_bytes() {
     use super::DecodeItem;
     let mut parser = ControlModeParser::new();

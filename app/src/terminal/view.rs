@@ -1741,6 +1741,8 @@ pub enum Event {
     WriteBytesToPty {
         bytes: Cow<'static, [u8]>,
     },
+    OpenTmuxPresentationWindow,
+    CloseTmuxPresentationWindow,
     WriteAgentInputToPty {
         bytes: Cow<'static, [u8]>,
         mode: AIAgentPtyWriteMode,
@@ -9744,6 +9746,18 @@ impl TerminalView {
         self.use_agent_footer.update(ctx, |footer, ctx| {
             footer.notify_and_notify_children(ctx);
         });
+
+        {
+            let mut model = self.model.lock();
+            let open = model.take_tmux_open_presentation();
+            let close = model.take_tmux_close_presentation();
+            drop(model);
+            if open {
+                ctx.emit(Event::OpenTmuxPresentationWindow);
+            } else if close {
+                ctx.emit(Event::CloseTmuxPresentationWindow);
+            }
+        }
 
         // Need to re-render both the alt screen and the blocklist on keypresses.
         ctx.notify();
@@ -21876,13 +21890,13 @@ impl TerminalView {
                 }
                 self.create_and_push_docker_sandbox(ctx);
             }
-            InputEvent::CreateTmuxWorkspace => {
+            InputEvent::CreateTmuxWorkspace { args } => {
                 if !FeatureFlag::TmuxControlPrototype.is_enabled() {
                     log::warn!("tmux control prototype feature flag is disabled");
                     return;
                 }
                 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-                self.create_and_push_tmux_workspace(ctx);
+                self.create_and_push_tmux_workspace(args, ctx);
                 #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
                 log::warn!("tmux control prototype requires a local Unix tty");
             }

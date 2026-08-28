@@ -12684,6 +12684,43 @@ impl Workspace {
         );
     }
 
+    fn is_tmux_owned_window(&self, ctx: &AppContext) -> bool {
+        self.active_tab_pane_group()
+            .as_ref(ctx)
+            .active_session_view(ctx)
+            .is_some_and(|view| view.as_ref(ctx).model.lock().is_tmux_presentation())
+    }
+
+    fn open_tmux_presentation_window(&self, ctx: &mut ViewContext<Self>) {
+        crate::root_view::open_new_with_workspace_source(
+            crate::root_view::NewWorkspaceSource::Session {
+                options: Box::new(NewTerminalOptions {
+                    tmux_presentation: true,
+                    hide_homepage: true,
+                    ..Default::default()
+                }),
+            },
+            ctx,
+        );
+    }
+
+    fn close_tmux_presentation_windows(&self, ctx: &mut ViewContext<Self>) {
+        let current_window = ctx.window_id();
+        let windows: Vec<_> = crate::workspace::WorkspaceRegistry::as_ref(ctx)
+            .all_workspaces(ctx)
+            .into_iter()
+            .filter(|(window_id, workspace)| {
+                *window_id != current_window
+                    && workspace.read(ctx, |workspace, ctx| workspace.is_tmux_owned_window(ctx))
+            })
+            .collect();
+        for (_, workspace) in windows {
+            workspace.update(ctx, |_workspace, ctx| {
+                ctx.close_window();
+            });
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn add_new_session_tab_internal_with_default_session_mode_behavior(
         &mut self,
@@ -12695,6 +12732,21 @@ impl Workspace {
         default_session_mode_behavior: DefaultSessionModeBehavior,
         ctx: &mut ViewContext<Self>,
     ) {
+        if self.is_tmux_owned_window(ctx) {
+            if let Some(view) = self
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+            {
+                view.update(ctx, |view, ctx| {
+                    view.write_to_pty(
+                        crate::terminal::tmux::protocol::new_window_command().into_bytes(),
+                        ctx,
+                    );
+                });
+            }
+            return;
+        }
         // Check if we should default to agent mode (only for new sessions, not restorations)
         let should_enter_agent_view = matches!(
             default_session_mode_behavior,
@@ -16576,6 +16628,12 @@ impl Workspace {
             }
             #[cfg(not(feature = "local_fs"))]
             pane_group::Event::RemoteRepoNavigated { .. } => {}
+            pane_group::Event::OpenTmuxPresentationWindow => {
+                self.open_tmux_presentation_window(ctx);
+            }
+            pane_group::Event::CloseTmuxPresentationWindow => {
+                self.close_tmux_presentation_windows(ctx);
+            }
             pane_group::Event::OpenChildAgentInNewTab { conversation_id } => {
                 // Move the existing child pane into a new tab so the live
                 // session stays intact.

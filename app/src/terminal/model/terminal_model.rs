@@ -474,6 +474,10 @@ pub struct TerminalModel {
 
     /// True while the PTY event loop is in tmux control mode (`DCS 1000p` until `%exit`).
     tmux_control_mode: bool,
+    tmux_focused_pane: Option<String>,
+    tmux_presentation: bool,
+    tmux_open_presentation: bool,
+    tmux_close_presentation: bool,
 
     /// The shell type of the login shell for this session.
     shell_launch_state: ShellLaunchState,
@@ -1088,6 +1092,10 @@ impl TerminalModel {
             did_receive_rc_file_dcs: None,
             handled_exit: false,
             tmux_control_mode: false,
+            tmux_focused_pane: None,
+            tmux_presentation: false,
+            tmux_open_presentation: false,
+            tmux_close_presentation: false,
             env_var_collection_name: None,
             shell_launch_state: shell_state,
             obfuscate_secrets,
@@ -1511,7 +1519,45 @@ impl TerminalModel {
 
     pub fn set_tmux_control_mode(&mut self, active: bool) {
         self.tmux_control_mode = active;
+        if active && !self.tmux_presentation {
+            self.tmux_open_presentation = true;
+        } else if !active {
+            self.tmux_focused_pane = None;
+            self.tmux_open_presentation = false;
+            if !self.tmux_presentation {
+                self.tmux_close_presentation = true;
+            }
+        }
         self.event_proxy.send_wakeup_event();
+    }
+
+    pub fn tmux_focused_pane(&self) -> Option<&str> {
+        self.tmux_focused_pane.as_deref()
+    }
+
+    pub fn set_tmux_focused_pane(&mut self, pane_id: Option<String>) {
+        self.tmux_focused_pane = pane_id;
+        self.event_proxy.send_wakeup_event();
+    }
+
+    pub fn is_tmux_presentation(&self) -> bool {
+        self.tmux_presentation
+    }
+
+    pub fn set_tmux_presentation(&mut self, presentation: bool) {
+        self.tmux_presentation = presentation;
+    }
+
+    pub fn take_tmux_open_presentation(&mut self) -> bool {
+        let open = self.tmux_open_presentation;
+        self.tmux_open_presentation = false;
+        open
+    }
+
+    pub fn take_tmux_close_presentation(&mut self) -> bool {
+        let close = self.tmux_close_presentation;
+        self.tmux_close_presentation = false;
+        close
     }
 
     pub fn is_conversation_transcript_viewer(&self) -> bool {

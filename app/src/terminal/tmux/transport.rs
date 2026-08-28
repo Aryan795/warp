@@ -41,12 +41,178 @@ impl ControlTransportSpec {
     }
 }
 
+const DEFAULT_SESSION: &str = "warp";
+const WARP_TMUX_SOCKET_NAME: &str = "warp-control-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TmuxCommandError {
+    IsolatedSocketOverride,
+}
+
 /// Shell command written to the **active** PTY to enter or resume control mode.
 ///
 /// `-A` attaches if `session_name` already exists so SSH reconnect can rediscover
-/// the Warp-managed session instead of creating a second one.
+/// the Warp-managed session instead of creating a second one. Managed sessions
+/// always use the dedicated `-L warp-control-v1` server.
 pub fn in_place_tmux_cc_command(session_name: &str, columns: usize, rows: usize) -> String {
-    format!("tmux -CC new-session -A -s {session_name} -n warp -x {columns} -y {rows}\n")
+    tmux_cc_shell_command("", Some(session_name), columns, rows)
+        .expect("bare /tmux never overrides the Warp socket")
+}
+
+/// Build a `tmux -CC -L warp-control-v1 …` command from `/tmux` arguments.
+pub fn tmux_cc_shell_command(
+    user_args: &str,
+    default_session: Option<&str>,
+    columns: usize,
+    rows: usize,
+) -> Result<String, TmuxCommandError> {
+    let tokens = tokenize_args(user_args);
+    let argv = tmux_cc_argv(
+        &tokens,
+        default_session.unwrap_or(DEFAULT_SESSION),
+        columns,
+        rows,
+    )?;
+    let mut command = shell_join(&argv);
+    command.push('\n');
+    Ok(command)
+}
+
+pub fn tmux_cc_argv(
+    user_tokens: &[String],
+    default_session: &str,
+    columns: usize,
+    rows: usize,
+) -> Result<Vec<String>, TmuxCommandError> {
+    if user_tokens
+        .iter()
+        .any(|token| token == "-L" || token == "-S")
+    {
+        return Err(TmuxCommandError::IsolatedSocketOverride);
+    }
+    let (globals, command) = split_tmux_globals(user_tokens)?;
+    let mut argv = vec![
+        "tmux".to_owned(),
+        "-CC".to_owned(),
+        "-L".to_owned(),
+        WARP_TMUX_SOCKET_NAME.to_owned(),
+    ];
+    argv.extend(
+        globals
+            .into_iter()
+            .filter(|token| token != "-CC" && token != "-C"),
+    );
+    if command.is_empty() {
+        argv.extend([
+            "new-session".to_owned(),
+            "-A".to_owned(),
+            "-s".to_owned(),
+            default_session.to_owned(),
+            "-n".to_owned(),
+            "warp".to_owned(),
+            "-x".to_owned(),
+            columns.to_string(),
+            "-y".to_owned(),
+            rows.to_string(),
+        ]);
+        return Ok(argv);
+    }
+    let mut command = command;
+    if command[0] == "attach" {
+        command[0] = "attach-session".to_owned();
+    } else if command[0] == "new" {
+        command[0] = "new-session".to_owned();
+    }
+    if command[0] == "new-session" {
+        maybe_insert_size(&mut command, columns, rows);
+    }
+    argv.extend(command);
+    Ok(argv)
+}
+
+fn split_tmux_globals(tokens: &[String]) -> Result<(Vec<String>, Vec<String>), TmuxCommandError> {
+    let mut globals = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = &tokens[i];
+        if token == "--" {
+            return Ok((globals, tokens[i + 1..].to_vec()));
+        }
+        if matches!(token.as_str(), "-L" | "-S") {
+            return Err(TmuxCommandError::IsolatedSocketOverride);
+        }
+        if matches!(
+            token.as_str(),
+            "-2" | "-C" | "-CC" | "-D" | "-l" | "-N" | "-u" | "-v" | "-V"
+        ) {
+            globals.push(token.clone());
+            i += 1;
+            continue;
+        }
+        if matches!(token.as_str(), "-c" | "-f" | "-T") {
+            globals.push(token.clone());
+            if let Some(value) = tokens.get(i + 1) {
+                globals.push(value.clone());
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    Ok((globals, tokens[i..].to_vec()))
+}
+
+fn maybe_insert_size(command: &mut Vec<String>, columns: usize, rows: usize) {
+    if !command.iter().any(|token| token == "-x") {
+        command.extend(["-x".to_owned(), columns.to_string()]);
+    }
+    if !command.iter().any(|token| token == "-y") {
+        command.extend(["-y".to_owned(), rows.to_string()]);
+    }
+}
+
+fn tokenize_args(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for ch in input.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => current.push(ch),
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn shell_join(argv: &[String]) -> String {
+    argv.iter()
+        .map(|token| shell_quote(token))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(token: &str) -> String {
+    if token.is_empty() {
+        return "''".to_owned();
+    }
+    if token.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/' | b'%' | b'@' | b':')
+    }) {
+        return token.to_owned();
+    }
+    format!("'{}'", token.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]

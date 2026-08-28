@@ -9,4 +9,6 @@ pub mod event_loop;
 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
 pub mod gateway;
 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+pub mod presentation_manager;
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
 pub mod terminal_manager;
