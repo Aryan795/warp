@@ -217,8 +217,14 @@ impl TerminalManagerTrait for TmuxTerminalManager {
     }
 
     fn on_view_detached(&self, detach_type: DetachType, _app: &mut AppContext) {
-        if matches!(detach_type, DetachType::Closed) {
-            let _ = self.event_loop_tx.send(Message::Shutdown);
+        match detach_type {
+            DetachType::Closed | DetachType::HiddenForClose => {
+                let _ = self.event_loop_tx.send(Message::Shutdown);
+                if let Some(socket) = self.socket.clone() {
+                    schedule_kill_dedicated_server(socket);
+                }
+            }
+            DetachType::Moved => {}
         }
     }
 

@@ -105,6 +105,32 @@ fn kill_dedicated_server_preserves_socket_when_kill_fails() {
 }
 
 #[test]
+fn kill_dedicated_server_removes_socket_when_no_server_is_running() {
+    let script = unique_temp_path("warp-tmux-no-server.sh");
+    std::fs::write(
+        &script,
+        b"#!/bin/sh\necho 'error connecting to /tmp/missing (No such file or directory)' >&2\nexit 1\n",
+    )
+    .expect("write no-server script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(&script)
+            .expect("no-server script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod no-server script");
+    }
+    let socket = write_placeholder_socket();
+    let config = socket.with_extension("conf");
+    std::fs::write(&config, b"keep-me").expect("write placeholder config");
+    super::kill_dedicated_server_with(Some(&script), &socket, Duration::from_secs(1));
+    assert!(!socket.exists());
+    assert!(!config.exists());
+    let _ = std::fs::remove_file(&script);
+}
+
+#[test]
 fn kill_dedicated_server_preserves_socket_when_kill_times_out() {
     let script = unique_temp_path("warp-tmux-hang-kill-server.sh");
     std::fs::write(&script, b"#!/bin/sh\nexec sleep 30\n").expect("write hang script");
@@ -136,6 +162,36 @@ fn schedule_kill_dedicated_server_does_not_block_caller() {
     let _ = std::fs::remove_file(&socket);
 }
 
+#[cfg(unix)]
+#[test]
+fn detached_kill_helper_unlinks_socket_and_config_when_server_is_gone() {
+    let script = unique_temp_path("warp-tmux-detached-no-server.sh");
+    std::fs::write(
+        &script,
+        b"#!/bin/sh\necho 'no server running on /tmp/missing' >&2\nexit 1\n",
+    )
+    .expect("write detached no-server script");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(&script)
+            .expect("detached no-server script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod detached no-server script");
+    }
+    let socket = write_placeholder_socket();
+    let config = socket.with_extension("conf");
+    std::fs::write(&config, b"keep-me").expect("write placeholder config");
+    super::spawn_detached_kill_helper(Some(&script), &socket);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && (socket.exists() || config.exists()) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!socket.exists());
+    assert!(!config.exists());
+    let _ = std::fs::remove_file(&script);
+}
+
 #[test]
 fn send_keys_hex_encodes_control_and_printable_bytes() {
     let commands = send_keys_commands(&PaneId::from("%0"), b"a\x03\n");
@@ -165,6 +221,7 @@ fn control_client_argv_starts_detached_control_mode_session() {
     let argv = control_client_argv(
         PathBuf::from("/usr/bin/tmux").as_path(),
         PathBuf::from("/tmp/warp.sock").as_path(),
+        PathBuf::from("/tmp/warp.conf").as_path(),
         &bootstrap,
         80,
         24,
@@ -180,7 +237,7 @@ fn control_client_argv_starts_detached_control_mode_session() {
             "-S",
             "/tmp/warp.sock",
             "-f",
-            "/dev/null",
+            "/tmp/warp.conf",
             "-CC",
             "new-session",
             "-s",

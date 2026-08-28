@@ -18,8 +18,8 @@ use crate::terminal::local_tty::{Pty, PtyOptions, mio_channel};
 use crate::terminal::session_settings::SessionSettings;
 use crate::terminal::tmux::event_loop::{ControlClientEventLoop, SharedControlState};
 use crate::terminal::tmux::protocol::{
-    PaneBootstrap, control_client_argv, dedicated_socket_path, resolve_tmux_binary,
-    tmux_shell_starter,
+    DEDICATED_TMUX_CONFIG, PaneBootstrap, control_client_argv, dedicated_config_path,
+    dedicated_socket_path, resolve_tmux_binary, spawn_parent_exit_reaper, tmux_shell_starter,
 };
 use crate::terminal::writeable_pty::Message;
 
@@ -65,12 +65,21 @@ pub fn spawn_control_client(
 ) -> Result<SpawnedControlClient> {
     let tmux_path = resolve_tmux_binary().context("tmux binary not found on PATH")?;
     let socket = dedicated_socket_path(bootstrap.session_id);
+    let config = dedicated_config_path(bootstrap.session_id);
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent).context("failed to create tmux socket directory")?;
     }
+    std::fs::write(&config, DEDICATED_TMUX_CONFIG).context("failed to write tmux config")?;
 
     let size = model.lock().block_list().size().to_owned();
-    let argv = control_client_argv(&tmux_path, &socket, bootstrap, size.columns(), size.rows());
+    let argv = control_client_argv(
+        &tmux_path,
+        &socket,
+        &config,
+        bootstrap,
+        size.columns(),
+        size.rows(),
+    );
     let starter = tmux_shell_starter(argv, bootstrap.session_id)
         .context("failed to construct tmux shell starter")?;
 
@@ -110,6 +119,7 @@ pub fn spawn_control_client(
         shared,
         zsh_init,
     );
+    spawn_parent_exit_reaper(socket.clone());
     Ok(SpawnedControlClient {
         event_loop_handle: event_loop.spawn(),
         socket,

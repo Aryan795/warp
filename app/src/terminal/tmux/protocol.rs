@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -21,6 +21,49 @@ use crate::terminal::shell::ShellLaunchData;
 const SEND_KEYS_CHUNK_BYTES: usize = 128;
 const KILL_SERVER_TIMEOUT: Duration = Duration::from_secs(2);
 const KILL_SERVER_WAIT_SLICE: Duration = Duration::from_millis(10);
+
+/// Stop the dedicated server when Warp's control client is the last to detach.
+pub const DEDICATED_TMUX_CONFIG: &str = "set -s exit-unattached on\n";
+
+#[cfg(unix)]
+const DETACHED_KILL_BODY: &str = r#"
+tmux_bin=$1
+sock=$2
+conf=$3
+err=$("$tmux_bin" -S "$sock" kill-server 2>&1)
+status=$?
+if [ "$status" -eq 0 ] || printf '%s' "$err" | grep -E -q "no server running|error connecting to"
+then
+  rm -f "$sock" "$conf"
+  exit 0
+fi
+if ! "$tmux_bin" -S "$sock" list-sessions >/dev/null 2>&1
+then
+  rm -f "$sock" "$conf"
+fi
+"#;
+
+#[cfg(unix)]
+const PARENT_EXIT_REAPER_SCRIPT: &str = r#"
+parent=$1
+tmux_bin=$2
+sock=$3
+conf=$4
+while kill -0 "$parent" 2>/dev/null; do
+  sleep 0.1
+done
+err=$("$tmux_bin" -S "$sock" kill-server 2>&1)
+status=$?
+if [ "$status" -eq 0 ] || printf '%s' "$err" | grep -E -q "no server running|error connecting to"
+then
+  rm -f "$sock" "$conf"
+  exit 0
+fi
+if ! "$tmux_bin" -S "$sock" list-sessions >/dev/null 2>&1
+then
+  rm -f "$sock" "$conf"
+fi
+"#;
 
 /// Bootstrap data for the Warp-managed pane process (not the control client).
 #[derive(Debug, Clone)]
@@ -83,6 +126,12 @@ pub fn dedicated_socket_path(session_id: SessionId) -> PathBuf {
         .join(format!("warp-{}.sock", session_id.as_u64()))
 }
 
+pub fn dedicated_config_path(session_id: SessionId) -> PathBuf {
+    cache_dir()
+        .join("tmux-control-prototype")
+        .join(format!("warp-{}.conf", session_id.as_u64()))
+}
+
 pub fn resolve_tmux_binary() -> Option<PathBuf> {
     resolve_executable("tmux").map(|path| path.into_owned())
 }
@@ -91,6 +140,7 @@ pub fn resolve_tmux_binary() -> Option<PathBuf> {
 pub fn control_client_argv(
     tmux_path: &Path,
     socket: &Path,
+    config: &Path,
     bootstrap: &PaneBootstrap,
     columns: usize,
     rows: usize,
@@ -100,7 +150,7 @@ pub fn control_client_argv(
         "-S".into(),
         socket.as_os_str().to_owned(),
         "-f".into(),
-        "/dev/null".into(),
+        config.as_os_str().to_owned(),
         "-CC".into(),
         "new-session".into(),
         "-s".into(),
@@ -182,13 +232,7 @@ pub fn kill_dedicated_server(socket: &Path) {
 
 fn kill_dedicated_server_with(tmux_path: Option<&Path>, socket: &Path, timeout: Duration) {
     match try_kill_dedicated_server(tmux_path, socket, timeout) {
-        Ok(()) => {
-            if let Err(err) = std::fs::remove_file(socket)
-                && err.kind() != io::ErrorKind::NotFound
-            {
-                log::warn!("failed to remove tmux socket {}: {err}", socket.display());
-            }
-        }
+        Ok(()) => remove_dedicated_server_files(socket),
         Err(err) => {
             log::error!(
                 "leaving tmux socket {} in place after kill-server failure: {err}",
@@ -198,13 +242,130 @@ fn kill_dedicated_server_with(tmux_path: Option<&Path>, socket: &Path, timeout: 
     }
 }
 
-/// Run [`kill_dedicated_server`] off the UI thread so tab close cannot stall.
+fn remove_dedicated_server_files(socket: &Path) {
+    for path in [socket, &socket.with_extension("conf")] {
+        if let Err(err) = std::fs::remove_file(path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            log::warn!("failed to remove {}: {err}", path.display());
+        }
+    }
+}
+
+fn server_already_gone(stderr: &str) -> bool {
+    stderr.contains("no server running") || stderr.contains("error connecting to")
+}
+
 pub fn schedule_kill_dedicated_server(socket: PathBuf) {
+    #[cfg(unix)]
+    spawn_detached_kill_helper(resolve_tmux_binary().as_deref(), &socket);
+    #[cfg(not(unix))]
+    spawn_kill_dedicated_server_thread(socket);
+}
+
+#[cfg(not(unix))]
+fn spawn_kill_dedicated_server_thread(socket: PathBuf) {
     if let Err(err) = std::thread::Builder::new()
         .name("tmux-control-prototype-kill-server".into())
         .spawn(move || kill_dedicated_server(&socket))
     {
         log::error!("failed to spawn tmux kill-server worker: {err}");
+    }
+}
+
+#[cfg(unix)]
+fn spawn_detached_kill_helper(tmux_path: Option<&Path>, socket: &Path) {
+    let Some(tmux_path) = tmux_path else {
+        log::error!(
+            "leaving tmux socket {} in place: tmux binary not found",
+            socket.display()
+        );
+        return;
+    };
+    let config = socket.with_extension("conf");
+    spawn_setsid_sh(
+        DETACHED_KILL_BODY,
+        "tmux-control-prototype-kill-server",
+        &[
+            tmux_path.as_os_str(),
+            socket.as_os_str(),
+            config.as_os_str(),
+        ],
+        Some(socket),
+    );
+}
+
+/// Last-tab close calls `close_window` without detaching panes, so Drop may never run.
+pub fn spawn_parent_exit_reaper(socket: PathBuf) {
+    #[cfg(unix)]
+    spawn_parent_exit_reaper_unix(resolve_tmux_binary().as_deref(), &socket);
+    #[cfg(not(unix))]
+    let _ = socket;
+}
+
+#[cfg(unix)]
+fn spawn_parent_exit_reaper_unix(tmux_path: Option<&Path>, socket: &Path) {
+    let Some(tmux_path) = tmux_path else {
+        log::error!(
+            "leaving tmux socket {} in place: tmux binary not found",
+            socket.display()
+        );
+        return;
+    };
+    let config = socket.with_extension("conf");
+    let parent = std::process::id().to_string();
+    spawn_setsid_sh(
+        PARENT_EXIT_REAPER_SCRIPT,
+        "tmux-control-prototype-exit-reaper",
+        &[
+            std::ffi::OsStr::new(&parent),
+            tmux_path.as_os_str(),
+            socket.as_os_str(),
+            config.as_os_str(),
+        ],
+        None,
+    );
+}
+
+#[cfg(unix)]
+fn spawn_setsid_sh(
+    script: &str,
+    arg0: &str,
+    args: &[&std::ffi::OsStr],
+    fallback_socket: Option<&Path>,
+) {
+    let mut command = std::process::Command::new("/bin/sh");
+    command.arg("-c").arg(script).arg(arg0);
+    for arg in args {
+        command.arg(arg);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: setsid(2) is async-signal-safe and only creates a new session. pre_exec
+    // closures run between fork and exec in the child process.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    match command.spawn() {
+        Ok(mut child) => {
+            let _ = std::thread::Builder::new()
+                .name("tmux-control-prototype-kill-server-reap".into())
+                .spawn(move || {
+                    let _ = child.wait();
+                });
+        }
+        Err(err) => {
+            log::error!("failed to spawn tmux kill-server helper: {err}");
+            if let Some(socket) = fallback_socket {
+                kill_dedicated_server(socket);
+            }
+        }
     }
 }
 
@@ -221,10 +382,17 @@ fn try_kill_dedicated_server(
     command.args(&argv[1..]);
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
-    command.stderr(Stdio::null());
-    let child = command.spawn().map_err(KillDedicatedServerError::Io)?;
-    let status = wait_child_with_timeout(child, timeout)?;
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(KillDedicatedServerError::Io)?;
+    let status = wait_child_with_timeout(&mut child, timeout)?;
     if status.success() {
+        return Ok(());
+    }
+    let mut stderr = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut stderr);
+    }
+    if server_already_gone(&stderr) {
         Ok(())
     } else {
         Err(KillDedicatedServerError::NonZeroExit(status))
@@ -232,7 +400,7 @@ fn try_kill_dedicated_server(
 }
 
 fn wait_child_with_timeout(
-    mut child: Child,
+    child: &mut Child,
     timeout: Duration,
 ) -> Result<ExitStatus, KillDedicatedServerError> {
     let deadline = Instant::now() + timeout;
