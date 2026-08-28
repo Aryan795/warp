@@ -151,6 +151,21 @@ fn layout_events_are_queued_until_taken() {
 }
 
 #[test]
+fn two_models_keep_independent_instance_ids() {
+    let mut a = TerminalModel::mock(None, None);
+    let mut b = TerminalModel::mock(None, None);
+    a.set_tmux_instance_id(Some(1));
+    b.set_tmux_instance_id(Some(2));
+    a.set_tmux_pane_id(Some("%0".to_owned()));
+    b.set_tmux_pane_id(Some("%0".to_owned()));
+    assert_eq!(a.tmux_instance_id(), Some(1));
+    assert_eq!(b.tmux_instance_id(), Some(2));
+    a.set_tmux_instance_id(None);
+    assert_eq!(b.tmux_instance_id(), Some(2));
+    assert_eq!(b.tmux_pane_id(), Some("%0"));
+}
+
+#[test]
 fn feature_off_does_not_treat_panes_as_tmux_owned() {
     let _flag = FeatureFlag::TmuxControlPrototype.override_enabled(false);
     let model = TerminalModel::mock(None, None);

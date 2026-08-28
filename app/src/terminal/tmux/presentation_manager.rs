@@ -29,6 +29,7 @@ impl TmuxPresentationManager {
         resources: TerminalViewResources,
         initial_size: Vector2F,
         window_id: WindowId,
+        gateway_window: Option<WindowId>,
         ctx: &mut AppContext,
     ) -> TmuxPresentationManagerInit {
         let (wakeups_tx, wakeups_rx) = async_channel::unbounded();
@@ -52,7 +53,13 @@ impl TmuxPresentationManager {
         );
         model.set_tmux_presentation(true);
         model.set_tmux_control_mode(true);
-        crate::terminal::tmux::bridge::TmuxRuntime::global().set_presentation_window(window_id);
+        if let Some(runtime) = gateway_window
+            .and_then(crate::terminal::tmux::bridge::TmuxRuntime::for_gateway)
+            .or_else(|| crate::terminal::tmux::bridge::TmuxRuntime::for_presentation(window_id))
+        {
+            runtime.bind_presentation(window_id);
+            model.set_tmux_instance_id(Some(runtime.id().as_u64()));
+        }
         let colors = model.colors();
         let model = Arc::new(FairMutex::new(model));
 

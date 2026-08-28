@@ -305,7 +305,7 @@ fn same_buffer_exit_then_shell_bytes() {
 }
 
 #[test]
-fn oversized_control_line_aborts_to_shell_parsing() {
+fn oversized_control_line_discards_until_exit() {
     use super::DecodeItem;
     let mut parser = ControlModeParser::new();
     parser.decode(CONTROL_MODE_DCS);
@@ -318,9 +318,46 @@ fn oversized_control_line_aborts_to_shell_parsing() {
             .any(|item| matches!(item, DecodeItem::Control(ControlEvent::ProtocolOverflow)))
     );
     assert!(!parser.is_in_control_mode());
+    assert!(
+        parser
+            .decode(b"prompt$ ")
+            .iter()
+            .all(|item| !matches!(item, DecodeItem::Shell(_)))
+    );
+}
+
+#[test]
+fn valid_notification_after_overflow_does_not_reach_shell() {
+    use super::DecodeItem;
+    let mut parser = ControlModeParser::new();
+    parser.decode(CONTROL_MODE_DCS);
+    let overflow = vec![b'x'; 1_048_577];
+    parser.decode(&overflow);
+    let items = parser.decode(b"%output %0 leaked\n%layout-change @0 80x24,0,0,0\n%exit\n$ ");
+    assert!(!items.iter().any(|item| matches!(
+        item,
+        DecodeItem::Shell(bytes) if bytes.windows(b"%output".len()).any(|w| w == b"%output")
+            || bytes.windows(b"%layout".len()).any(|w| w == b"%layout")
+    )));
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, DecodeItem::Control(ControlEvent::PaneOutput { .. })))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, DecodeItem::Control(ControlEvent::Exit { .. })))
+    );
     assert_eq!(
-        parser.decode(b"prompt$ "),
-        vec![DecodeItem::Shell(b"prompt$ ".to_vec())]
+        items
+            .iter()
+            .filter_map(|item| match item {
+                DecodeItem::Shell(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![&b"$ "[..]]
     );
 }
 
@@ -340,6 +377,15 @@ fn oversized_reply_payload_aborts_to_shell_parsing() {
             .any(|item| matches!(item, DecodeItem::Control(ControlEvent::ProtocolOverflow)))
     );
     assert!(!parser.is_in_control_mode());
+    assert!(
+        parser
+            .decode(b"%output %0 leaked\n")
+            .iter()
+            .all(|item| !matches!(
+                item,
+                DecodeItem::Shell(_) | DecodeItem::Control(ControlEvent::PaneOutput { .. })
+            ))
+    );
 }
 
 #[test]

@@ -1,8 +1,12 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use super::encode::{refresh_client_command, send_keys_command};
 use super::parser::{ControlEvent, ControlModeParser, DecodeItem, PaneId, WindowId};
+
+const START_PENDING_TIMEOUT: Duration = Duration::from_secs(8);
+const DETACH_CLIENT: &[u8] = b"detach-client\n";
 
 pub fn is_tmux_client_command(bytes: &[u8]) -> bool {
     bytes.starts_with(b"split-window")
@@ -28,6 +32,7 @@ pub enum TmuxPhaseKind {
     Inactive,
     StartPending,
     InControl,
+    OverflowRecovering,
 }
 
 enum TmuxPhase {
@@ -35,12 +40,16 @@ enum TmuxPhase {
     StartPending {
         pending_writes: Vec<Cow<'static, [u8]>>,
         pending_resize: Option<(usize, usize)>,
+        started_at: Instant,
     },
     InControl {
         focused: Option<PaneId>,
         known_panes: HashSet<PaneId>,
         pending_writes: Vec<Cow<'static, [u8]>>,
         pending_resize: Option<(usize, usize)>,
+    },
+    OverflowRecovering {
+        pending_writes: Vec<Cow<'static, [u8]>>,
     },
 }
 
@@ -68,6 +77,7 @@ impl TmuxIoState {
             TmuxPhase::Inactive => TmuxPhaseKind::Inactive,
             TmuxPhase::StartPending { .. } => TmuxPhaseKind::StartPending,
             TmuxPhase::InControl { .. } => TmuxPhaseKind::InControl,
+            TmuxPhase::OverflowRecovering { .. } => TmuxPhaseKind::OverflowRecovering,
         }
     }
 
@@ -90,11 +100,13 @@ impl TmuxIoState {
                     self.phase = TmuxPhase::StartPending {
                         pending_writes: Vec::new(),
                         pending_resize: None,
+                        started_at: Instant::now(),
                     };
                 }
                 vec![input]
             }
-            TmuxPhase::StartPending { pending_writes, .. } => {
+            TmuxPhase::StartPending { pending_writes, .. }
+            | TmuxPhase::OverflowRecovering { pending_writes } => {
                 pending_writes.push(input);
                 Vec::new()
             }
@@ -124,7 +136,7 @@ impl TmuxIoState {
     pub fn enqueue_resize(&mut self, columns: usize, rows: usize) -> Option<Cow<'static, [u8]>> {
         let in_control = matches!(self.phase, TmuxPhase::InControl { .. });
         match &mut self.phase {
-            TmuxPhase::Inactive => None,
+            TmuxPhase::Inactive | TmuxPhase::OverflowRecovering { .. } => None,
             TmuxPhase::StartPending { pending_resize, .. }
             | TmuxPhase::InControl { pending_resize, .. } => {
                 *pending_resize = Some((columns, rows));
@@ -133,11 +145,42 @@ impl TmuxIoState {
         }
     }
 
+    pub fn start_pending_remaining(&self) -> Option<Duration> {
+        match &self.phase {
+            TmuxPhase::StartPending { started_at, .. } => {
+                Some(START_PENDING_TIMEOUT.saturating_sub(started_at.elapsed()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn check_start_timeout(&mut self, now: Instant) -> Vec<TmuxFeedItem> {
+        let TmuxPhase::StartPending { started_at, .. } = &self.phase else {
+            return Vec::new();
+        };
+        if now.saturating_duration_since(*started_at) < START_PENDING_TIMEOUT {
+            return Vec::new();
+        }
+        self.fail_start_pending()
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<TmuxFeedItem> {
         let mut items = Vec::new();
+        let mut start_failed = false;
         for decoded in self.parser.decode(bytes) {
+            if start_failed {
+                continue;
+            }
             match decoded {
-                DecodeItem::Shell(shell) => items.push(TmuxFeedItem::Shell(shell)),
+                DecodeItem::Shell(shell) => {
+                    let failed = matches!(self.phase, TmuxPhase::StartPending { .. })
+                        && looks_like_start_failure(&shell);
+                    items.push(TmuxFeedItem::Shell(shell));
+                    if failed {
+                        items.extend(self.fail_start_pending());
+                        start_failed = true;
+                    }
+                }
                 DecodeItem::Control(event) => items.extend(self.apply_control(event)),
             }
         }
@@ -184,19 +227,28 @@ pub enum TmuxFeedItem {
     Exited {
         replay: Vec<Cow<'static, [u8]>>,
     },
+    OverflowRecovering {
+        detach: Cow<'static, [u8]>,
+    },
 }
 
 impl TmuxIoState {
     fn apply_control(&mut self, event: ControlEvent) -> Vec<TmuxFeedItem> {
         match event {
             ControlEvent::EnteredControlMode => {
+                if matches!(self.phase, TmuxPhase::OverflowRecovering { .. }) {
+                    return Vec::new();
+                }
                 let (pending_writes, pending_resize) = match &mut self.phase {
                     TmuxPhase::StartPending {
                         pending_writes,
                         pending_resize,
+                        ..
                     } => (std::mem::take(pending_writes), pending_resize.take()),
                     TmuxPhase::Inactive => (Vec::new(), None),
-                    TmuxPhase::InControl { .. } => (Vec::new(), None),
+                    TmuxPhase::InControl { .. } | TmuxPhase::OverflowRecovering { .. } => {
+                        (Vec::new(), None)
+                    }
                 };
                 self.phase = TmuxPhase::InControl {
                     focused: None,
@@ -278,7 +330,14 @@ impl TmuxIoState {
                 }]
             }
             ControlEvent::CommandBegin { .. } => Vec::new(),
-            ControlEvent::Exit { .. } | ControlEvent::ProtocolOverflow => {
+            ControlEvent::ProtocolOverflow => {
+                let pending_writes = self.take_pending_writes();
+                self.phase = TmuxPhase::OverflowRecovering { pending_writes };
+                vec![TmuxFeedItem::OverflowRecovering {
+                    detach: Cow::Borrowed(DETACH_CLIENT),
+                }]
+            }
+            ControlEvent::Exit { .. } => {
                 let replay = self.take_pending_writes();
                 self.phase = TmuxPhase::Inactive;
                 vec![TmuxFeedItem::Exited { replay }]
@@ -329,10 +388,30 @@ impl TmuxIoState {
     fn take_pending_writes(&mut self) -> Vec<Cow<'static, [u8]>> {
         match &mut self.phase {
             TmuxPhase::StartPending { pending_writes, .. }
-            | TmuxPhase::InControl { pending_writes, .. } => std::mem::take(pending_writes),
+            | TmuxPhase::InControl { pending_writes, .. }
+            | TmuxPhase::OverflowRecovering { pending_writes } => std::mem::take(pending_writes),
             TmuxPhase::Inactive => Vec::new(),
         }
     }
+
+    fn fail_start_pending(&mut self) -> Vec<TmuxFeedItem> {
+        let replay = self.take_pending_writes();
+        self.phase = TmuxPhase::Inactive;
+        self.parser = ControlModeParser::new();
+        vec![TmuxFeedItem::Exited { replay }]
+    }
+}
+
+fn looks_like_start_failure(shell: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(shell);
+    let lower = text.to_ascii_lowercase();
+    lower.contains("command not found")
+        || lower.contains("tmux: unknown option")
+        || lower.contains("tmux: invalid option")
+        || lower.contains("not installed")
+        || lower.contains("error connecting to")
+        || lower.contains("no server running")
+        || lower.contains("no such file or directory")
 }
 
 fn parse_pane_id_line(line: &str) -> Option<PaneId> {

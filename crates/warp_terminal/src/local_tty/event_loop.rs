@@ -10,6 +10,7 @@ use std::marker::Send;
 use std::ops::DerefMut;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use log::error;
 use mio::{self, Events, Interest};
@@ -147,7 +148,17 @@ fn feed_decoded_pty_bytes<M: ActiveTerminal, W: io::Write>(
     writer: &mut W,
     bytes: &[u8],
 ) {
-    for item in state.tmux.feed(bytes) {
+    let items = state.tmux.feed(bytes);
+    apply_tmux_feed_items(state, terminal, writer, items);
+}
+
+fn apply_tmux_feed_items<M: ActiveTerminal, W: io::Write>(
+    state: &mut State,
+    terminal: &mut M,
+    writer: &mut W,
+    items: Vec<TmuxFeedItem>,
+) {
+    for item in items {
         match item {
             TmuxFeedItem::Shell(shell) => {
                 state.parser.parse_bytes(terminal, &shell, writer);
@@ -204,6 +215,9 @@ fn feed_decoded_pty_bytes<M: ActiveTerminal, W: io::Write>(
                 for pending in replay {
                     state.write_list.push_back(pending);
                 }
+            }
+            TmuxFeedItem::OverflowRecovering { detach } => {
+                state.write_list.push_back(detach);
             }
         }
     }
@@ -489,7 +503,15 @@ where
                     // Wait for events, but only up to the remaining timeout for the synchronous output
                     // update (if any).
                     let sync_state_timeout = state.parser.sync_output_remaining_timeout();
-                    if let Err(err) = self.poll.poll(&mut events, sync_state_timeout) {
+                    let tmux_start_timeout = FeatureFlag::TmuxControlPrototype
+                        .is_enabled()
+                        .then(|| state.tmux.start_pending_remaining())
+                        .flatten();
+                    let poll_timeout = match (sync_state_timeout, tmux_start_timeout) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
+                    if let Err(err) = self.poll.poll(&mut events, poll_timeout) {
                         match err.kind() {
                             ErrorKind::Interrupted => continue,
                             _ => panic!("EventLoop polling error: {err:?}"),
@@ -507,6 +529,21 @@ where
                             state
                                 .write_list
                                 .push_back(Cow::Owned(terminal_response_sequences));
+                        }
+                        if FeatureFlag::TmuxControlPrototype.is_enabled() {
+                            let timeout_items = state.tmux.check_start_timeout(Instant::now());
+                            if !timeout_items.is_empty() {
+                                let mut timeout_writer = Vec::new();
+                                apply_tmux_feed_items(
+                                    &mut state,
+                                    &mut *self.terminal.lock(),
+                                    &mut timeout_writer,
+                                    timeout_items,
+                                );
+                                if !timeout_writer.is_empty() {
+                                    state.write_list.push_back(Cow::Owned(timeout_writer));
+                                }
+                            }
                         }
                     }
 

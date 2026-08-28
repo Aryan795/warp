@@ -30,8 +30,21 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
     fn on_tmux_control_mode(&mut self, active: bool) {
         self.set_tmux_control_mode(active);
         #[cfg(not(feature = "remote_tty"))]
-        if !active {
-            crate::terminal::tmux::bridge::TmuxRuntime::global().clear_session();
+        {
+            use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+            if active && !self.is_tmux_presentation() {
+                if self.tmux_instance_id().is_none() {
+                    let runtime = TmuxRuntime::new();
+                    self.set_tmux_instance_id(Some(runtime.id().as_u64()));
+                }
+            } else if !active {
+                if let Some(id) = self.tmux_instance_id()
+                    && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
+                {
+                    runtime.unregister();
+                }
+                self.set_tmux_instance_id(None);
+            }
         }
     }
 
@@ -41,7 +54,14 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
         bytes: &[u8],
     ) {
         #[cfg(not(feature = "remote_tty"))]
-        crate::terminal::tmux::bridge::TmuxRuntime::global().deliver_output(pane_id, bytes);
+        {
+            use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+            if let Some(id) = self.tmux_instance_id()
+                && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
+            {
+                runtime.deliver_output(pane_id, bytes);
+            }
+        }
         #[cfg(feature = "remote_tty")]
         {
             let _ = (pane_id, bytes);

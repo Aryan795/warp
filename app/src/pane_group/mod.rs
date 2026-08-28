@@ -257,6 +257,22 @@ fn get_minimum_pane_size(app: &AppContext) -> f32 {
     }
 }
 
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+fn tmux_runtime_for_window(
+    window: WindowId,
+    model: &Arc<FairMutex<TerminalModel>>,
+) -> Option<Arc<crate::terminal::tmux::bridge::TmuxRuntime>> {
+    use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+    TmuxRuntime::for_presentation(window)
+        .or_else(|| TmuxRuntime::for_gateway(window))
+        .or_else(|| {
+            model
+                .lock()
+                .tmux_instance_id()
+                .and_then(|id| TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)))
+        })
+}
+
 /// Resolves a tab config `shell` value (e.g. `"pwsh"` or
 /// `"/opt/homebrew/bin/pwsh"`) into an [`AvailableShell`], using the fallback
 /// order expected by tab configs:
@@ -824,6 +840,8 @@ pub struct NewTerminalOptions {
     pub hide_homepage: bool,
     /// Create a PTY-less presentation view for a tmux-owned window.
     pub tmux_presentation: bool,
+    /// Gateway window that owns this presentation, when `tmux_presentation` is set.
+    pub tmux_gateway_window: Option<WindowId>,
     /// Whether or not to start sharing the terminal session as soon as it's ready.
     pub is_shared_session_creator: IsSharedSessionCreator,
     /// The AI conversation to restore when the terminal is created.
@@ -3463,6 +3481,7 @@ impl PaneGroup {
         model_event_sender: Option<SyncSender<ModelEvent>>,
         pane_contents: &mut HashMap<PaneId, Box<dyn AnyPaneContent>>,
         pane_history: &mut Vec<PaneId>,
+        gateway_window: Option<WindowId>,
         ctx: &mut ViewContext<Self>,
     ) -> (PaneData, InitialFocus) {
         let uuid = Uuid::new_v4();
@@ -3471,6 +3490,7 @@ impl PaneGroup {
                 resources,
                 view_bounds.size(),
                 ctx.window_id(),
+                gateway_window,
                 ctx,
             );
         Self::terminal_pane_data(
@@ -3564,6 +3584,7 @@ impl PaneGroup {
                                 model_event_sender_clone,
                                 pane_contents,
                                 pane_history,
+                                options.tmux_gateway_window,
                                 ctx,
                             )
                         } else {
@@ -4116,7 +4137,10 @@ impl PaneGroup {
         let model = view.read(ctx, |view, _| view.model.clone());
         model.lock().set_tmux_pane_id(Some(tmux_pane_id.to_owned()));
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-        crate::terminal::tmux::bridge::TmuxRuntime::global().register_pane(tmux_pane_id, model);
+        if let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), &model) {
+            runtime.register_pane(tmux_pane_id, model);
+            runtime.note_capture(tmux_pane_id);
+        }
         self.write_tmux_command(
             crate::terminal::tmux::protocol::capture_pane_command(
                 &crate::terminal::tmux::parser::PaneId::from(tmux_pane_id),
@@ -4124,8 +4148,6 @@ impl PaneGroup {
             .into_bytes(),
             ctx,
         );
-        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-        crate::terminal::tmux::bridge::TmuxRuntime::global().note_capture(tmux_pane_id);
     }
 
     pub fn add_tmux_presentation_pane(
@@ -4147,6 +4169,7 @@ impl PaneGroup {
                     resources,
                     view_bounds.size(),
                     ctx.window_id(),
+                    None,
                     ctx,
                 );
             let uuid = Uuid::new_v4();

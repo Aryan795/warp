@@ -504,6 +504,7 @@ pub struct TerminalModel {
     tmux_control_mode: bool,
     tmux_focused_pane: Option<String>,
     tmux_pane_id: Option<String>,
+    tmux_instance_id: Option<u64>,
     tmux_presentation: bool,
     tmux_open_presentation: bool,
     tmux_close_presentation: bool,
@@ -1124,6 +1125,7 @@ impl TerminalModel {
             tmux_control_mode: false,
             tmux_focused_pane: None,
             tmux_pane_id: None,
+            tmux_instance_id: None,
             tmux_presentation: false,
             tmux_open_presentation: false,
             tmux_close_presentation: false,
@@ -1586,6 +1588,14 @@ impl TerminalModel {
 
     pub fn set_tmux_pane_id(&mut self, pane_id: Option<String>) {
         self.tmux_pane_id = pane_id;
+    }
+
+    pub fn tmux_instance_id(&self) -> Option<u64> {
+        self.tmux_instance_id
+    }
+
+    pub fn set_tmux_instance_id(&mut self, id: Option<u64>) {
+        self.tmux_instance_id = id;
     }
 
     pub fn push_tmux_event(&mut self, event: TmuxClientEvent) {

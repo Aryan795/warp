@@ -96,7 +96,7 @@ pub enum ControlEvent {
         reason: Option<String>,
     },
     /// Incomplete control line or command-reply payload exceeded the bound.
-    /// The parser has reset to shell bytes so a spoofed stream cannot stall VT.
+    /// The parser discards further control text until `%exit` or PTY teardown.
     ProtocolOverflow,
 }
 
@@ -108,6 +108,9 @@ enum State {
         line: Vec<u8>,
         in_command_reply: bool,
         reply_payload: Vec<String>,
+    },
+    DiscardUntilExit {
+        line: Vec<u8>,
     },
 }
 
@@ -194,6 +197,16 @@ impl ControlModeParser {
                     }
                     break;
                 }
+                State::DiscardUntilExit { line } => {
+                    line.extend_from_slice(remaining);
+                    remaining = &[];
+                    let (control_items, leftover) = self.drain_discard_lines();
+                    items.extend(control_items);
+                    if leftover.is_some() {
+                        continue;
+                    }
+                    break;
+                }
             }
         }
         items
@@ -215,9 +228,8 @@ impl ControlModeParser {
                 || reply_payload.len() > MAX_REPLY_PAYLOAD_LINES
                 || reply_payload.iter().map(String::len).sum::<usize>() > MAX_REPLY_PAYLOAD_BYTES
             {
-                self.state = State::SeekingDcs {
-                    pending: Vec::new(),
-                };
+                let leftover = std::mem::take(line);
+                self.state = State::DiscardUntilExit { line: leftover };
                 items.push(DecodeItem::Control(ControlEvent::ProtocolOverflow));
                 return (items, Some(()));
             }
@@ -237,6 +249,42 @@ impl ControlModeParser {
             if exited {
                 let leftover = std::mem::take(line);
                 self.state = State::SeekingDcs { pending: leftover };
+                return (items, Some(()));
+            }
+        }
+    }
+
+    fn drain_discard_lines(&mut self) -> (Vec<DecodeItem>, Option<()>) {
+        let State::DiscardUntilExit { line } = &mut self.state else {
+            return (Vec::new(), None);
+        };
+        let mut items = Vec::new();
+        loop {
+            if line.len() > MAX_CONTROL_LINE_BYTES {
+                line.clear();
+                return (items, None);
+            }
+            let Some(newline_at) = line.iter().position(|&b| b == b'\n') else {
+                return (items, None);
+            };
+            let mut raw_line = line.drain(..=newline_at).collect::<Vec<_>>();
+            raw_line.pop();
+            if raw_line.last() == Some(&b'\r') {
+                raw_line.pop();
+            }
+            let Ok(text) = std::str::from_utf8(&raw_line) else {
+                continue;
+            };
+            if let Some(rest) = text.strip_prefix("%exit") {
+                let reason = rest.trim();
+                let reason = if reason.is_empty() {
+                    None
+                } else {
+                    Some(reason.trim_start().to_owned())
+                };
+                let leftover = std::mem::take(line);
+                self.state = State::SeekingDcs { pending: leftover };
+                items.push(DecodeItem::Control(ControlEvent::Exit { reason }));
                 return (items, Some(()));
             }
         }

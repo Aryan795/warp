@@ -54,16 +54,120 @@ fn pending_input_is_replayed_raw_when_entry_fails() {
     let mut io = TmuxIoState::new();
     io.enqueue_input(start_command());
     io.enqueue_input(Cow::Borrowed(b"typed-before-dcs"));
-    let items = io.feed(CONTROL_MODE_DCS);
-    assert!(matches!(items[0], TmuxFeedItem::EnteredControl { .. }));
-    let mut overflow = CONTROL_MODE_DCS.to_vec();
-    overflow.extend(vec![b'x'; 1_048_577]);
-    let items = io.feed(&overflow);
+    let items = io.feed(b"tmux: command not found\n");
     let replay = items.iter().find_map(|item| match item {
         TmuxFeedItem::Exited { replay } => Some(replay.clone()),
         _ => None,
     });
     assert_eq!(replay, Some(vec![Cow::Borrowed(&b"typed-before-dcs"[..])]));
+    assert_eq!(io.phase(), TmuxPhaseKind::Inactive);
+}
+
+#[test]
+fn benign_startup_output_does_not_fail_start_pending() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.enqueue_input(Cow::Borrowed(b"held"));
+    let items = io.feed(b"starting tmux 3.4\n");
+    assert_eq!(io.phase(), TmuxPhaseKind::StartPending);
+    assert!(
+        items
+            .iter()
+            .all(|item| !matches!(item, TmuxFeedItem::Exited { .. }))
+    );
+    let items = io.feed(CONTROL_MODE_DCS);
+    assert!(matches!(items[0], TmuxFeedItem::EnteredControl { .. }));
+    assert_eq!(io.phase(), TmuxPhaseKind::InControl);
+}
+
+#[test]
+fn start_pending_timeout_replays_queued_input() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.enqueue_input(Cow::Borrowed(b"typed-while-waiting"));
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let items = io.check_start_timeout(later);
+    let replay = items.iter().find_map(|item| match item {
+        TmuxFeedItem::Exited { replay } => Some(replay.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        replay,
+        Some(vec![Cow::Borrowed(&b"typed-while-waiting"[..])])
+    );
+    assert_eq!(io.phase(), TmuxPhaseKind::Inactive);
+}
+
+#[test]
+fn command_not_found_interleaved_with_dcs_does_not_enter_control() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.enqueue_input(Cow::Borrowed(b"held"));
+    let mut bytes = b"bash: tmux: command not found\n".to_vec();
+    bytes.extend_from_slice(CONTROL_MODE_DCS);
+    bytes.extend_from_slice(b"%output %0 leaked\n");
+    let items = io.feed(&bytes);
+    assert_eq!(io.phase(), TmuxPhaseKind::Inactive);
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::Exited { .. }))
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::EnteredControl { .. }))
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::PaneOutput { .. }))
+    );
+}
+
+#[test]
+fn overflow_does_not_replay_while_tmux_still_in_control_mode() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    io.enqueue_input(Cow::Borrowed(b"typed-in-control"));
+    let overflow = vec![b'x'; 1_048_577];
+    let items = io.feed(&overflow);
+    assert_eq!(io.phase(), TmuxPhaseKind::OverflowRecovering);
+    assert!(items.iter().any(|item| match item {
+        TmuxFeedItem::OverflowRecovering { detach } =>
+            detach.as_ref() as &[u8] == b"detach-client\n",
+        _ => false,
+    }));
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::Exited { .. }))
+    );
+    assert!(io.enqueue_input(Cow::Borrowed(b"more")).is_empty());
+}
+
+#[test]
+fn valid_notification_after_overflow_does_not_reach_shell() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    io.feed(&vec![b'x'; 1_048_577]);
+    let items = io.feed(b"%output %0 leaked\n%exit\n$ ");
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::PaneOutput { .. }))
+    );
+    assert!(!items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::Shell(bytes) if bytes.windows(b"%output".len()).any(|w| w == b"%output")
+    )));
+    let replay = items.iter().find_map(|item| match item {
+        TmuxFeedItem::Exited { replay } => Some(replay.clone()),
+        _ => None,
+    });
+    assert!(replay.is_some());
     assert_eq!(io.phase(), TmuxPhaseKind::Inactive);
 }
 
