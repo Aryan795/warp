@@ -156,14 +156,6 @@ fn dev_container_exec_args_includes_remote_user_when_present() {
     assert_eq!(args[user_pos + 1], "vscode");
 }
 
-/// Verifies that `disable_signal_generation` controls whether the leader
-/// side of the pty a spawned `Command` inherits ends up in raw mode: only
-/// when requested (the Dev Container attach path, so a Ctrl-C byte reaches
-/// `docker exec` immediately instead of being buffered by `ICANON` or
-/// converted into a `SIGINT` that kills the local `docker exec` relay --
-/// see `dev_container_exec_args`'s doc comment), otherwise left in cooked
-/// mode so Ctrl-C and line-based input behave normally for every other
-/// session type.
 #[test]
 fn spawn_command_in_pty_uses_raw_mode_only_when_requested() {
     let size = SizeInfo::new_without_font_metrics(24, 80);
