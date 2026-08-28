@@ -142,4 +142,10 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
             },
         );
     }
+
+    fn on_tmux_presentation_unready(&mut self) {
+        self.push_tmux_event(
+            crate::terminal::model::terminal_model::TmuxClientEvent::PresentationUnready,
+        );
+    }
 }

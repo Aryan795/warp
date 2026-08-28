@@ -3,7 +3,7 @@ pub mod io;
 pub mod layout;
 pub mod parser;
 
-pub use encode::{refresh_client_command, send_keys_command};
+pub use encode::{LIST_WINDOWS_LAYOUT_COMMAND, refresh_client_command, send_keys_command};
 pub use io::{TmuxFeedItem, TmuxIoState, TmuxPhaseKind, is_tmux_cc_start, is_tmux_client_command};
 pub use layout::{LayoutNode, SplitStep, missing_from_layout, parse_window_layout, split_steps};
 pub use parser::{

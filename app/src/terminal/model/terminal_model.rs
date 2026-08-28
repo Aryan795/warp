@@ -128,6 +128,7 @@ pub enum TmuxClientEvent {
         payload: Vec<String>,
         capture_pane: Option<String>,
     },
+    PresentationUnready,
 }
 
 #[derive(Debug, Clone, Default)]

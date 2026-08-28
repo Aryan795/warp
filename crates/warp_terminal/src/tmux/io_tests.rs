@@ -302,3 +302,85 @@ fn window_events_are_forwarded() {
         }]
     );
 }
+
+#[test]
+fn enter_issues_list_windows_snapshot() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    let items = io.feed(CONTROL_MODE_DCS);
+    assert!(items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::EncodedPending(bytes)
+            if bytes.as_slice() == crate::tmux::encode::LIST_WINDOWS_LAYOUT_COMMAND.as_bytes()
+    )));
+}
+
+#[test]
+fn tmux_3_6a_new_session_without_layout_change_bootstraps_at0_percent0() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    let mut bytes = CONTROL_MODE_DCS.to_vec();
+    bytes.extend_from_slice(
+        b"%begin 271 0\n%end 271 0\n%window-add @0\n%sessions-changed\n%session-changed $0 warp\n%output %0 hi\n",
+    );
+    let items = io.feed(&bytes);
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::EnteredControl { .. }))
+    );
+    assert!(items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::WindowAdd {
+            window_id
+        } if window_id.as_str() == "@0"
+    )));
+    assert!(items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::LayoutChange {
+            window_id,
+            layout,
+            ..
+        } if window_id.as_str() == "@0" && layout.contains(",0")
+    )));
+    assert_eq!(io.focused_pane().map(PaneId::as_str), Some("%0"));
+    assert!(items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::PaneOutput { pane_id, bytes }
+            if pane_id.as_str() == "%0" && bytes == b"hi"
+    )));
+}
+
+#[test]
+fn empty_new_session_command_end_does_not_steal_snapshot() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    io.feed(b"%begin 271 0\n%end 271 0\n");
+    let items = io.feed(b"%begin 272 1\n@0 80x24,0,0,0\n%end 272 1\n");
+    assert!(items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::LayoutChange {
+            window_id,
+            layout,
+            ..
+        } if window_id.as_str() == "@0" && layout == "80x24,0,0,0"
+    )));
+    assert_eq!(io.focused_pane().map(PaneId::as_str), Some("%0"));
+}
+
+#[test]
+fn presentation_ready_timeout_detaches_when_layout_never_arrives() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    let later = instant::Instant::now() + std::time::Duration::from_secs(30);
+    let items = io.check_timeouts(later);
+    assert!(items.iter().any(|item| match item {
+        TmuxFeedItem::PresentationUnready { detach } => {
+            detach.as_ref() as &[u8] == b"detach-client\n"
+        }
+        _ => false,
+    }));
+    assert_eq!(io.phase(), TmuxPhaseKind::InControl);
+}

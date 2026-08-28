@@ -4,10 +4,11 @@ use std::time::Duration;
 
 use instant::Instant;
 
-use super::encode::{refresh_client_command, send_keys_command};
+use super::encode::{LIST_WINDOWS_LAYOUT_COMMAND, refresh_client_command, send_keys_command};
 use super::parser::{ControlEvent, ControlModeParser, DecodeItem, PaneId, WindowId};
 
 const START_PENDING_TIMEOUT: Duration = Duration::from_secs(8);
+const PRESENTATION_READY_TIMEOUT: Duration = Duration::from_secs(8);
 const DETACH_CLIENT: &[u8] = b"detach-client\n";
 
 pub fn is_tmux_client_command(bytes: &[u8]) -> bool {
@@ -22,6 +23,9 @@ pub fn is_tmux_client_command(bytes: &[u8]) -> bool {
         || bytes.starts_with(b"detach-client")
         || bytes.starts_with(b"pipe-pane")
         || bytes.starts_with(b"capture-pane")
+        || bytes.starts_with(b"list-windows")
+        || bytes.starts_with(b"list-panes")
+        || bytes.starts_with(b"display-message")
 }
 
 pub fn is_tmux_cc_start(bytes: &[u8]) -> bool {
@@ -37,12 +41,6 @@ pub enum TmuxPhaseKind {
     OverflowRecovering,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PendingCommand {
-    Capture(PaneId),
-    Other,
-}
-
 enum TmuxPhase {
     Inactive,
     StartPending {
@@ -55,7 +53,11 @@ enum TmuxPhase {
         known_panes: HashSet<PaneId>,
         pending_writes: Vec<Cow<'static, [u8]>>,
         pending_resize: Option<(usize, usize)>,
-        pending_commands: VecDeque<PendingCommand>,
+        pending_captures: VecDeque<PaneId>,
+        pending_snapshot: bool,
+        pending_bootstrap_window: Option<WindowId>,
+        layout_ready: bool,
+        ready_deadline: Option<Instant>,
     },
     OverflowRecovering {
         pending_writes: Vec<Cow<'static, [u8]>>,
@@ -171,6 +173,27 @@ impl TmuxIoState {
         }
     }
 
+    pub fn presentation_ready_remaining(&self) -> Option<Duration> {
+        match &self.phase {
+            TmuxPhase::InControl {
+                layout_ready: false,
+                ready_deadline: Some(deadline),
+                ..
+            } => Some(deadline.saturating_duration_since(Instant::now())),
+            _ => None,
+        }
+    }
+
+    pub fn poll_timeout_remaining(&self) -> Option<Duration> {
+        match (
+            self.start_pending_remaining(),
+            self.presentation_ready_remaining(),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     pub fn check_start_timeout(&mut self, now: Instant) -> Vec<TmuxFeedItem> {
         let TmuxPhase::StartPending { started_at, .. } = &self.phase else {
             return Vec::new();
@@ -179,6 +202,27 @@ impl TmuxIoState {
             return Vec::new();
         }
         self.fail_start_pending()
+    }
+
+    pub fn check_timeouts(&mut self, now: Instant) -> Vec<TmuxFeedItem> {
+        let start = self.check_start_timeout(now);
+        if !start.is_empty() {
+            return start;
+        }
+        self.check_presentation_timeout(now)
+    }
+
+    pub fn check_presentation_timeout(&mut self, now: Instant) -> Vec<TmuxFeedItem> {
+        if let TmuxPhase::InControl {
+            layout_ready: false,
+            ready_deadline: Some(deadline),
+            ..
+        } = &self.phase
+            && now >= *deadline
+        {
+            return self.fail_presentation_ready();
+        }
+        Vec::new()
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<TmuxFeedItem> {
@@ -248,6 +292,9 @@ pub enum TmuxFeedItem {
     OverflowRecovering {
         detach: Cow<'static, [u8]>,
     },
+    PresentationUnready {
+        detach: Cow<'static, [u8]>,
+    },
 }
 
 impl TmuxIoState {
@@ -273,18 +320,28 @@ impl TmuxIoState {
                     known_panes: HashSet::new(),
                     pending_writes,
                     pending_resize,
-                    pending_commands: VecDeque::new(),
+                    pending_captures: VecDeque::new(),
+                    pending_snapshot: false,
+                    pending_bootstrap_window: None,
+                    layout_ready: false,
+                    ready_deadline: Some(Instant::now() + PRESENTATION_READY_TIMEOUT),
                 };
                 let refresh_client =
                     pending_resize.map(|(columns, rows)| refresh_client_command(columns, rows));
                 if let Some(command) = refresh_client.as_ref() {
                     self.note_outgoing_command(command.as_bytes());
                 }
-                vec![TmuxFeedItem::EnteredControl { refresh_client }]
+                let mut items = vec![TmuxFeedItem::EnteredControl { refresh_client }];
+                self.note_outgoing_command(LIST_WINDOWS_LAYOUT_COMMAND.as_bytes());
+                items.push(TmuxFeedItem::EncodedPending(
+                    LIST_WINDOWS_LAYOUT_COMMAND.as_bytes().to_vec(),
+                ));
+                items
             }
             ControlEvent::PaneOutput { pane_id, bytes } => {
                 self.note_pane(pane_id.clone());
-                let mut items = vec![TmuxFeedItem::PaneOutput { pane_id, bytes }];
+                let mut items = self.bootstrap_layout_from_output(&pane_id);
+                items.push(TmuxFeedItem::PaneOutput { pane_id, bytes });
                 items.extend(self.flush_pending_if_focused());
                 items
             }
@@ -301,17 +358,7 @@ impl TmuxIoState {
                 visible_layout,
                 flags,
             } => {
-                if let Some(parsed) = super::layout::parse_window_layout(&layout) {
-                    let ids = parsed.pane_ids();
-                    for id in &ids {
-                        self.note_pane(id.clone());
-                    }
-                    if ids.len() == 1
-                        && let Some(id) = ids.into_iter().next()
-                    {
-                        self.set_focused(id);
-                    }
-                }
+                self.note_layout(&layout);
                 let mut items = vec![TmuxFeedItem::LayoutChange {
                     window_id,
                     layout,
@@ -322,6 +369,7 @@ impl TmuxIoState {
                 items
             }
             ControlEvent::WindowAdd { window_id } => {
+                self.set_bootstrap_window(window_id.clone());
                 vec![TmuxFeedItem::WindowAdd { window_id }]
             }
             ControlEvent::WindowClose { window_id } => {
@@ -331,6 +379,7 @@ impl TmuxIoState {
                 vec![TmuxFeedItem::WindowRenamed { window_id, name }]
             }
             ControlEvent::SessionWindowChanged { window_id } => {
+                self.set_bootstrap_window(window_id.clone());
                 vec![TmuxFeedItem::SessionWindowChanged { window_id }]
             }
             ControlEvent::CommandEnd {
@@ -338,20 +387,7 @@ impl TmuxIoState {
                 error,
                 payload,
                 ..
-            } => {
-                if payload.len() == 1
-                    && let Some(pane_id) = payload.first().and_then(|line| parse_pane_id_line(line))
-                {
-                    self.note_pane(pane_id.clone());
-                }
-                let capture_pane = self.take_pending_command_capture();
-                vec![TmuxFeedItem::CommandEnd {
-                    number,
-                    error,
-                    payload,
-                    capture_pane,
-                }]
-            }
+            } => self.apply_command_end(number, error, payload),
             ControlEvent::CommandBegin { .. } => Vec::new(),
             ControlEvent::ProtocolOverflow => {
                 let pending_writes = self.take_pending_writes();
@@ -431,30 +467,174 @@ impl TmuxIoState {
     }
 
     fn note_outgoing_command(&mut self, bytes: &[u8]) {
-        let command = if let Some(pane_id) = capture_pane_target(bytes) {
-            PendingCommand::Capture(pane_id)
-        } else {
-            PendingCommand::Other
-        };
-        if let TmuxPhase::InControl {
-            pending_commands, ..
+        let TmuxPhase::InControl {
+            pending_captures,
+            pending_snapshot,
+            ..
         } = &mut self.phase
-        {
-            pending_commands.push_back(command);
+        else {
+            return;
+        };
+        if let Some(pane_id) = capture_pane_target(bytes) {
+            pending_captures.push_back(pane_id);
+        } else if is_snapshot_command(bytes) {
+            *pending_snapshot = true;
         }
     }
 
-    fn take_pending_command_capture(&mut self) -> Option<PaneId> {
+    fn apply_command_end(
+        &mut self,
+        number: u64,
+        error: bool,
+        payload: Vec<String>,
+    ) -> Vec<TmuxFeedItem> {
+        if payload.len() == 1
+            && let Some(pane_id) = payload.first().and_then(|line| parse_pane_id_line(line))
+        {
+            self.note_pane(pane_id);
+        }
+        if self.peek_pending_snapshot()
+            && !error
+            && payload
+                .iter()
+                .any(|line| parse_window_layout_line(line).is_some())
+        {
+            self.clear_pending_snapshot();
+            return self.apply_snapshot_payload(payload);
+        }
+        let capture_pane = self.pop_pending_capture();
+        vec![TmuxFeedItem::CommandEnd {
+            number,
+            error,
+            payload,
+            capture_pane,
+        }]
+    }
+
+    fn apply_snapshot_payload(&mut self, payload: Vec<String>) -> Vec<TmuxFeedItem> {
+        let mut items = Vec::new();
+        for line in payload {
+            let Some((window_id, layout)) = parse_window_layout_line(&line) else {
+                continue;
+            };
+            self.note_layout(&layout);
+            items.push(TmuxFeedItem::WindowAdd {
+                window_id: window_id.clone(),
+            });
+            items.push(TmuxFeedItem::LayoutChange {
+                window_id,
+                layout,
+                visible_layout: None,
+                flags: None,
+            });
+        }
+        items.extend(self.flush_pending_if_focused());
+        items
+    }
+
+    fn bootstrap_layout_from_output(&mut self, pane_id: &PaneId) -> Vec<TmuxFeedItem> {
+        let window_id = match &self.phase {
+            TmuxPhase::InControl {
+                layout_ready: false,
+                pending_bootstrap_window: Some(window_id),
+                ..
+            } => window_id.clone(),
+            _ => return Vec::new(),
+        };
+        let layout = dummy_layout_for_pane(pane_id);
+        self.note_layout(&layout);
+        let mut items = vec![TmuxFeedItem::LayoutChange {
+            window_id,
+            layout,
+            visible_layout: None,
+            flags: None,
+        }];
+        items.extend(self.flush_pending_if_focused());
+        items
+    }
+
+    fn set_bootstrap_window(&mut self, window_id: WindowId) {
+        if let TmuxPhase::InControl {
+            layout_ready: false,
+            pending_bootstrap_window,
+            ..
+        } = &mut self.phase
+        {
+            *pending_bootstrap_window = Some(window_id);
+        }
+    }
+
+    fn note_layout(&mut self, layout: &str) {
+        if let Some(parsed) = super::layout::parse_window_layout(layout) {
+            let ids = parsed.pane_ids();
+            for id in &ids {
+                self.note_pane(id.clone());
+            }
+            if ids.len() == 1
+                && let Some(id) = ids.into_iter().next()
+            {
+                self.set_focused(id);
+            }
+            self.mark_layout_ready();
+        }
+    }
+
+    fn mark_layout_ready(&mut self) {
+        if let TmuxPhase::InControl {
+            layout_ready,
+            ready_deadline,
+            pending_bootstrap_window,
+            ..
+        } = &mut self.phase
+        {
+            *layout_ready = true;
+            *ready_deadline = None;
+            *pending_bootstrap_window = None;
+        }
+    }
+
+    fn fail_presentation_ready(&mut self) -> Vec<TmuxFeedItem> {
+        if let TmuxPhase::InControl {
+            ready_deadline,
+            layout_ready,
+            ..
+        } = &mut self.phase
+        {
+            *ready_deadline = None;
+            *layout_ready = true;
+        }
+        vec![TmuxFeedItem::PresentationUnready {
+            detach: Cow::Borrowed(DETACH_CLIENT),
+        }]
+    }
+
+    fn peek_pending_snapshot(&self) -> bool {
+        matches!(
+            &self.phase,
+            TmuxPhase::InControl {
+                pending_snapshot: true,
+                ..
+            }
+        )
+    }
+
+    fn clear_pending_snapshot(&mut self) {
+        if let TmuxPhase::InControl {
+            pending_snapshot, ..
+        } = &mut self.phase
+        {
+            *pending_snapshot = false;
+        }
+    }
+
+    fn pop_pending_capture(&mut self) -> Option<PaneId> {
         let TmuxPhase::InControl {
-            pending_commands, ..
+            pending_captures, ..
         } = &mut self.phase
         else {
             return None;
         };
-        match pending_commands.pop_front() {
-            Some(PendingCommand::Capture(pane_id)) => Some(pane_id),
-            _ => None,
-        }
+        pending_captures.pop_front()
     }
 }
 
@@ -496,6 +676,25 @@ fn parse_pane_id_line(line: &str) -> Option<PaneId> {
         return None;
     }
     Some(PaneId::from(line))
+}
+
+fn is_snapshot_command(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"list-windows")
+}
+
+fn parse_window_layout_line(line: &str) -> Option<(WindowId, String)> {
+    let line = line.trim();
+    let (id, layout) = line.split_once(' ')?;
+    let digits = id.strip_prefix('@')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) || layout.is_empty() {
+        return None;
+    }
+    Some((WindowId::from(id), layout.to_owned()))
+}
+
+fn dummy_layout_for_pane(pane_id: &PaneId) -> String {
+    let index = pane_id.as_str().trim_start_matches('%');
+    format!("80x24,0,0,{index}")
 }
 
 #[cfg(test)]

@@ -2,6 +2,10 @@ use super::parser::PaneId;
 
 const SEND_KEYS_CHUNK_BYTES: usize = 128;
 
+/// Correlated query for the initial window/layout dump. tmux 3.6a `new-session -A`
+/// enters control mode without `%layout-change` or `%window-pane-changed`.
+pub const LIST_WINDOWS_LAYOUT_COMMAND: &str = "list-windows -F '#{window_id} #{window_layout}'\n";
+
 pub fn refresh_client_command(columns: usize, rows: usize) -> String {
     format!("refresh-client -C {columns}x{rows}\n")
 }

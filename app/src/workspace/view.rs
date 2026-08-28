@@ -12924,31 +12924,36 @@ impl Workspace {
     ) -> Option<warpui::ViewHandle<crate::terminal::TerminalView>> {
         let instance_id = instance_id?;
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-        let gateway_window = crate::terminal::tmux::bridge::TmuxRuntime::for_id(
-            crate::terminal::tmux::bridge::TmuxInstanceId::from_u64(instance_id),
-        )
-        .and_then(|runtime| runtime.gateway_window());
-        #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
-        let gateway_window: Option<WindowId> = None;
-        crate::workspace::WorkspaceRegistry::as_ref(ctx)
-            .all_workspaces(ctx)
-            .into_iter()
-            .find_map(|(window_id, workspace)| {
-                if gateway_window.is_some_and(|gateway| gateway != window_id) {
-                    return None;
-                }
-                workspace.read(ctx, |workspace, ctx| {
-                    workspace
-                        .get_pane_group_view(workspace.active_tab_index)
-                        .and_then(|pane_group| pane_group.as_ref(ctx).active_session_view(ctx))
-                        .filter(|view| {
-                            let model = view.as_ref(ctx).model.lock();
-                            model.is_tmux_control_mode()
-                                && !model.is_tmux_presentation()
-                                && model.tmux_instance_id() == Some(instance_id)
-                        })
+        {
+            let runtime = crate::terminal::tmux::bridge::TmuxRuntime::for_id(
+                crate::terminal::tmux::bridge::TmuxInstanceId::from_u64(instance_id),
+            )?;
+            let gateway_window = runtime.gateway_window()?;
+            crate::workspace::WorkspaceRegistry::as_ref(ctx)
+                .all_workspaces(ctx)
+                .into_iter()
+                .find_map(|(window_id, workspace)| {
+                    if window_id != gateway_window {
+                        return None;
+                    }
+                    workspace.read(ctx, |workspace, ctx| {
+                        workspace
+                            .get_pane_group_view(workspace.active_tab_index)
+                            .and_then(|pane_group| pane_group.as_ref(ctx).active_session_view(ctx))
+                            .filter(|view| {
+                                let model = view.as_ref(ctx).model.lock();
+                                model.is_tmux_control_mode()
+                                    && !model.is_tmux_presentation()
+                                    && model.tmux_instance_id() == Some(instance_id)
+                            })
+                    })
                 })
-            })
+        }
+        #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+        {
+            let _ = ctx;
+            None
+        }
     }
 
     #[cfg(test)]
@@ -12989,6 +12994,15 @@ impl Workspace {
         events: &[crate::terminal::model::terminal_model::TmuxClientEvent],
         ctx: &mut ViewContext<Self>,
     ) {
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                crate::terminal::model::terminal_model::TmuxClientEvent::PresentationUnready
+            )
+        }) {
+            self.fail_tmux_presentation(ctx);
+            return;
+        }
         let Some(presentation) = Self::presentation_workspace(ctx, Some(ctx.window_id())) else {
             return;
         };
@@ -13037,12 +13051,14 @@ impl Workspace {
                         }
                     }
                     TmuxClientEvent::SessionWindowChanged { window_id } => {
+                        self.ensure_tmux_window_tab(window_id, ctx);
                         if let Some(index) = self.tabs.iter().position(|tab| {
                             tab.tmux_window_id.as_deref() == Some(window_id.as_str())
                         }) {
                             self.activate_tab_internal(index, ctx);
                         }
                     }
+                    TmuxClientEvent::PresentationUnready => {}
                     TmuxClientEvent::LayoutChange {
                         window_id, layout, ..
                     } => {
@@ -13166,6 +13182,60 @@ impl Workspace {
             }
             pane_group.reconcile_tmux_panes(&leaves, ctx);
         });
+    }
+
+    fn fail_tmux_presentation(&mut self, ctx: &mut ViewContext<Self>) {
+        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+        {
+            let instance_id = self
+                .tmux_runtime(ctx.window_id())
+                .map(|runtime| runtime.id().as_u64());
+            let window_id = ctx.window_id();
+            WorkspaceToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::error(
+                        "Failed to start tmux presentation. Restored the original session."
+                            .to_owned(),
+                    ),
+                    window_id,
+                    ctx,
+                );
+            });
+            self.close_tmux_presentation_windows(instance_id, ctx);
+        }
+        #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+        {
+            let _ = ctx;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_tmux_client_events_for_tests(
+        &mut self,
+        events: &[crate::terminal::model::terminal_model::TmuxClientEvent],
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.apply_tmux_client_events_inner(events, ctx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tmux_active_window_and_pane(
+        &self,
+        ctx: &AppContext,
+    ) -> (Option<String>, Option<String>) {
+        let window_id = self
+            .tabs
+            .get(self.active_tab_index)
+            .and_then(|tab| tab.tmux_window_id.clone());
+        let pane_id = self
+            .get_pane_group_view(self.active_tab_index)
+            .and_then(|pane_group| pane_group.as_ref(ctx).active_session_view(ctx))
+            .and_then(|view| {
+                view.read(ctx, |view, _| {
+                    view.model.lock().tmux_pane_id().map(str::to_owned)
+                })
+            });
+        (window_id, pane_id)
     }
 
     fn apply_tmux_command_end(

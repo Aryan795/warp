@@ -66,6 +66,7 @@ pub trait ActiveTerminal: ansi::Handler + Send {
         _capture_pane: Option<&crate::tmux::PaneId>,
     ) {
     }
+    fn on_tmux_presentation_unready(&mut self) {}
 }
 
 pub struct EventLoop<P: local_tty::EventedPty, M: ActiveTerminal> {
@@ -159,6 +160,28 @@ fn feed_decoded_pty_bytes<M: ActiveTerminal, W: io::Write>(
     apply_tmux_feed_items(state, terminal, writer, items);
 }
 
+fn apply_tmux_timeouts<M: ActiveTerminal>(
+    state: &mut State,
+    terminal: &Arc<FairMutex<M>>,
+    event_listener: &ChannelEventListener,
+    timeout_items: Vec<TmuxFeedItem>,
+) {
+    if timeout_items.is_empty() {
+        return;
+    }
+    let mut timeout_writer = Vec::new();
+    apply_tmux_feed_items(
+        state,
+        &mut *terminal.lock(),
+        &mut timeout_writer,
+        timeout_items,
+    );
+    if !timeout_writer.is_empty() {
+        state.write_list.push_back(Cow::Owned(timeout_writer));
+    }
+    event_listener.send_wakeup_event();
+}
+
 fn apply_tmux_feed_items<M: ActiveTerminal, W: io::Write>(
     state: &mut State,
     terminal: &mut M,
@@ -226,6 +249,10 @@ fn apply_tmux_feed_items<M: ActiveTerminal, W: io::Write>(
             }
             TmuxFeedItem::OverflowRecovering { detach } => {
                 state.write_list.push_back(detach);
+            }
+            TmuxFeedItem::PresentationUnready { detach } => {
+                state.write_list.push_back(detach);
+                terminal.on_tmux_presentation_unready();
             }
         }
     }
@@ -511,11 +538,11 @@ where
                     // Wait for events, but only up to the remaining timeout for the synchronous output
                     // update (if any).
                     let sync_state_timeout = state.parser.sync_output_remaining_timeout();
-                    let tmux_start_timeout = FeatureFlag::TmuxControlPrototype
+                    let tmux_timeout = FeatureFlag::TmuxControlPrototype
                         .is_enabled()
-                        .then(|| state.tmux.start_pending_remaining())
+                        .then(|| state.tmux.poll_timeout_remaining())
                         .flatten();
-                    let poll_timeout = match (sync_state_timeout, tmux_start_timeout) {
+                    let poll_timeout = match (sync_state_timeout, tmux_timeout) {
                         (Some(a), Some(b)) => Some(a.min(b)),
                         (a, b) => a.or(b),
                     };
@@ -540,19 +567,22 @@ where
                         }
                         if FeatureFlag::TmuxControlPrototype.is_enabled() {
                             let timeout_items = state.tmux.check_start_timeout(Instant::now());
-                            if !timeout_items.is_empty() {
-                                let mut timeout_writer = Vec::new();
-                                apply_tmux_feed_items(
-                                    &mut state,
-                                    &mut *self.terminal.lock(),
-                                    &mut timeout_writer,
-                                    timeout_items,
-                                );
-                                if !timeout_writer.is_empty() {
-                                    state.write_list.push_back(Cow::Owned(timeout_writer));
-                                }
-                            }
+                            apply_tmux_timeouts(
+                                &mut state,
+                                &self.terminal,
+                                &self.event_listener,
+                                timeout_items,
+                            );
                         }
+                    }
+                    if FeatureFlag::TmuxControlPrototype.is_enabled() {
+                        let timeout_items = state.tmux.check_presentation_timeout(Instant::now());
+                        apply_tmux_timeouts(
+                            &mut state,
+                            &self.terminal,
+                            &self.event_listener,
+                            timeout_items,
+                        );
                     }
 
                     for event in events.iter() {
