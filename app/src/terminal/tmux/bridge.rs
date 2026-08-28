@@ -9,6 +9,7 @@ use warpui::WindowId;
 use super::parser::PaneId;
 use crate::terminal::TerminalModel;
 use crate::terminal::model::ansi;
+use crate::terminal::model::terminal_model::TmuxClientEvent;
 use crate::terminal::tmux::pane_bytes::sink_writer;
 
 const MAX_BUFFERED_PANE_BYTES: usize = 64 * 1024;
@@ -43,6 +44,7 @@ struct Inner {
     panes: HashMap<String, PaneSink>,
     buffers: HashMap<String, Vec<u8>>,
     pending_captures: VecDeque<String>,
+    pending_client_events: Vec<TmuxClientEvent>,
 }
 
 /// One Warp-managed tmux control-mode session (gateway PTY + presentation window).
@@ -81,6 +83,7 @@ impl TmuxRuntime {
                 panes: HashMap::new(),
                 buffers: HashMap::new(),
                 pending_captures: VecDeque::new(),
+                pending_client_events: Vec::new(),
             }),
             applying: AtomicBool::new(false),
         });
@@ -148,6 +151,7 @@ impl TmuxRuntime {
         inner.panes.clear();
         inner.buffers.clear();
         inner.pending_captures.clear();
+        inner.pending_client_events.clear();
     }
 
     pub fn is_applying(&self) -> bool {
@@ -206,6 +210,25 @@ impl TmuxRuntime {
         self.inner.lock().pending_captures.pop_front()
     }
 
+    pub fn buffer_client_events(&self, events: &[TmuxClientEvent]) {
+        if events.is_empty() {
+            return;
+        }
+        log::info!(
+            "tmux runtime {} buffering {} client events until presentation binds",
+            self.id.as_u64(),
+            events.len()
+        );
+        self.inner
+            .lock()
+            .pending_client_events
+            .extend(events.iter().cloned());
+    }
+
+    pub fn take_client_events(&self) -> Vec<TmuxClientEvent> {
+        std::mem::take(&mut self.inner.lock().pending_client_events)
+    }
+
     #[cfg(test)]
     fn buffered_output(&self, pane_id: &str) -> Option<Vec<u8>> {
         self.inner.lock().buffers.get(pane_id).cloned()
@@ -233,6 +256,7 @@ mod tests {
                 panes: HashMap::new(),
                 buffers: HashMap::new(),
                 pending_captures: VecDeque::new(),
+                pending_client_events: Vec::new(),
             }),
             applying: AtomicBool::new(false),
         }

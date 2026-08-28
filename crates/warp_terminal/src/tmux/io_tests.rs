@@ -382,5 +382,106 @@ fn presentation_ready_timeout_detaches_when_layout_never_arrives() {
         }
         _ => false,
     }));
-    assert_eq!(io.phase(), TmuxPhaseKind::InControl);
+    assert_eq!(io.phase(), TmuxPhaseKind::PresentationRecovering);
+}
+
+#[test]
+fn output_before_window_add_bootstraps_first_pane_only() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    let mut bytes = CONTROL_MODE_DCS.to_vec();
+    bytes.extend_from_slice(
+        b"%begin 271 0\n%end 271 0\n%output %0 hi\n%output %1 later\n%window-add @0\n",
+    );
+    let items = io.feed(&bytes);
+    assert!(items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::LayoutChange {
+            window_id,
+            layout,
+            ..
+        } if window_id.as_str() == "@0" && layout == "80x24,0,0,0"
+    )));
+    assert_eq!(io.focused_pane().map(PaneId::as_str), Some("%0"));
+}
+
+#[test]
+fn presentation_timeout_holds_input_and_ignores_late_snapshot_until_exit() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    let later = instant::Instant::now() + std::time::Duration::from_secs(30);
+    io.check_timeouts(later);
+    assert_eq!(io.phase(), TmuxPhaseKind::PresentationRecovering);
+    assert!(
+        io.enqueue_input(Cow::Borrowed(b"typed-after-timeout"))
+            .is_empty()
+    );
+    let late = io.feed(b"%begin 1 1\n@0 80x24,0,0,0\n%end 1 1\n%output %0 leaked\n");
+    assert!(
+        !late
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::LayoutChange { .. }))
+    );
+    assert!(
+        !late
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::PaneOutput { .. }))
+    );
+    let items = io.feed(b"%exit\n");
+    let replay = items.iter().find_map(|item| match item {
+        TmuxFeedItem::Exited { replay } => Some(replay.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        replay,
+        Some(vec![Cow::Borrowed(&b"typed-after-timeout"[..])])
+    );
+    assert_eq!(io.phase(), TmuxPhaseKind::Inactive);
+}
+
+#[test]
+fn superseded_snapshot_reply_is_ignored() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    io.enqueue_input(Cow::Borrowed(
+        crate::tmux::encode::LIST_WINDOWS_LAYOUT_COMMAND.as_bytes(),
+    ));
+    let stale = io.feed(b"%begin 1 1\n@0 80x24,0,0,0\n%end 1 1\n");
+    assert!(
+        !stale
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::LayoutChange { .. }))
+    );
+    assert!(io.focused_pane().is_none());
+    let live = io.feed(b"%begin 1 2\n@0 80x24,0,0,7\n%end 1 2\n");
+    assert!(live.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::LayoutChange {
+            window_id,
+            layout,
+            ..
+        } if window_id.as_str() == "@0" && layout == "80x24,0,0,7"
+    )));
+    assert_eq!(io.focused_pane().map(PaneId::as_str), Some("%7"));
+}
+
+#[test]
+fn snapshot_error_clears_intent_and_ignores_late_success() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    let err = io.feed(b"%begin 1 1\nno windows\n%error 1 1\n");
+    assert!(
+        err.iter()
+            .any(|item| matches!(item, TmuxFeedItem::CommandEnd { error: true, .. }))
+    );
+    let late = io.feed(b"%begin 1 2\n@0 80x24,0,0,0\n%end 1 2\n");
+    assert!(
+        !late
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::LayoutChange { .. }))
+    );
+    assert!(io.focused_pane().is_none());
 }

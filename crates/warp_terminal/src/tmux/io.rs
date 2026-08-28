@@ -39,8 +39,10 @@ pub enum TmuxPhaseKind {
     StartPending,
     InControl,
     OverflowRecovering,
+    PresentationRecovering,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum TmuxPhase {
     Inactive,
     StartPending {
@@ -54,12 +56,18 @@ enum TmuxPhase {
         pending_writes: Vec<Cow<'static, [u8]>>,
         pending_resize: Option<(usize, usize)>,
         pending_captures: VecDeque<PaneId>,
-        pending_snapshot: bool,
+        pending_snapshots: VecDeque<u64>,
+        live_snapshot: Option<u64>,
+        next_snapshot_generation: u64,
         pending_bootstrap_window: Option<WindowId>,
+        pending_bootstrap_pane: Option<PaneId>,
         layout_ready: bool,
         ready_deadline: Option<Instant>,
     },
     OverflowRecovering {
+        pending_writes: Vec<Cow<'static, [u8]>>,
+    },
+    PresentationRecovering {
         pending_writes: Vec<Cow<'static, [u8]>>,
     },
 }
@@ -89,6 +97,7 @@ impl TmuxIoState {
             TmuxPhase::StartPending { .. } => TmuxPhaseKind::StartPending,
             TmuxPhase::InControl { .. } => TmuxPhaseKind::InControl,
             TmuxPhase::OverflowRecovering { .. } => TmuxPhaseKind::OverflowRecovering,
+            TmuxPhase::PresentationRecovering { .. } => TmuxPhaseKind::PresentationRecovering,
         }
     }
 
@@ -117,7 +126,8 @@ impl TmuxIoState {
                 vec![input]
             }
             TmuxPhase::StartPending { pending_writes, .. }
-            | TmuxPhase::OverflowRecovering { pending_writes } => {
+            | TmuxPhase::OverflowRecovering { pending_writes }
+            | TmuxPhase::PresentationRecovering { pending_writes } => {
                 pending_writes.push(input);
                 Vec::new()
             }
@@ -151,7 +161,9 @@ impl TmuxIoState {
     pub fn enqueue_resize(&mut self, columns: usize, rows: usize) -> Option<Cow<'static, [u8]>> {
         let in_control = matches!(self.phase, TmuxPhase::InControl { .. });
         match &mut self.phase {
-            TmuxPhase::Inactive | TmuxPhase::OverflowRecovering { .. } => return None,
+            TmuxPhase::Inactive
+            | TmuxPhase::OverflowRecovering { .. }
+            | TmuxPhase::PresentationRecovering { .. } => return None,
             TmuxPhase::StartPending { pending_resize, .. }
             | TmuxPhase::InControl { pending_resize, .. } => {
                 *pending_resize = Some((columns, rows));
@@ -298,12 +310,22 @@ pub enum TmuxFeedItem {
 }
 
 impl TmuxIoState {
+    fn is_recovering(&self) -> bool {
+        matches!(
+            self.phase,
+            TmuxPhase::OverflowRecovering { .. } | TmuxPhase::PresentationRecovering { .. }
+        )
+    }
+
     fn apply_control(&mut self, event: ControlEvent) -> Vec<TmuxFeedItem> {
+        if self.is_recovering() {
+            return match event {
+                ControlEvent::Exit { .. } => self.exit_to_inactive(),
+                _ => Vec::new(),
+            };
+        }
         match event {
             ControlEvent::EnteredControlMode => {
-                if matches!(self.phase, TmuxPhase::OverflowRecovering { .. }) {
-                    return Vec::new();
-                }
                 let (pending_writes, pending_resize) = match &mut self.phase {
                     TmuxPhase::StartPending {
                         pending_writes,
@@ -311,9 +333,7 @@ impl TmuxIoState {
                         ..
                     } => (std::mem::take(pending_writes), pending_resize.take()),
                     TmuxPhase::Inactive => (Vec::new(), None),
-                    TmuxPhase::InControl { .. } | TmuxPhase::OverflowRecovering { .. } => {
-                        (Vec::new(), None)
-                    }
+                    _ => (Vec::new(), None),
                 };
                 self.phase = TmuxPhase::InControl {
                     focused: None,
@@ -321,8 +341,11 @@ impl TmuxIoState {
                     pending_writes,
                     pending_resize,
                     pending_captures: VecDeque::new(),
-                    pending_snapshot: false,
+                    pending_snapshots: VecDeque::new(),
+                    live_snapshot: None,
+                    next_snapshot_generation: 0,
                     pending_bootstrap_window: None,
+                    pending_bootstrap_pane: None,
                     layout_ready: false,
                     ready_deadline: Some(Instant::now() + PRESENTATION_READY_TIMEOUT),
                 };
@@ -369,8 +392,11 @@ impl TmuxIoState {
                 items
             }
             ControlEvent::WindowAdd { window_id } => {
-                self.set_bootstrap_window(window_id.clone());
-                vec![TmuxFeedItem::WindowAdd { window_id }]
+                let mut items = vec![TmuxFeedItem::WindowAdd {
+                    window_id: window_id.clone(),
+                }];
+                items.extend(self.bootstrap_layout_from_window(window_id));
+                items
             }
             ControlEvent::WindowClose { window_id } => {
                 vec![TmuxFeedItem::WindowClose { window_id }]
@@ -379,8 +405,11 @@ impl TmuxIoState {
                 vec![TmuxFeedItem::WindowRenamed { window_id, name }]
             }
             ControlEvent::SessionWindowChanged { window_id } => {
-                self.set_bootstrap_window(window_id.clone());
-                vec![TmuxFeedItem::SessionWindowChanged { window_id }]
+                let mut items = vec![TmuxFeedItem::SessionWindowChanged {
+                    window_id: window_id.clone(),
+                }];
+                items.extend(self.bootstrap_layout_from_window(window_id));
+                items
             }
             ControlEvent::CommandEnd {
                 number,
@@ -396,11 +425,7 @@ impl TmuxIoState {
                     detach: Cow::Borrowed(DETACH_CLIENT),
                 }]
             }
-            ControlEvent::Exit { .. } => {
-                let replay = self.take_pending_writes();
-                self.phase = TmuxPhase::Inactive;
-                vec![TmuxFeedItem::Exited { replay }]
-            }
+            ControlEvent::Exit { .. } => self.exit_to_inactive(),
         }
     }
 
@@ -454,9 +479,18 @@ impl TmuxIoState {
         match &mut self.phase {
             TmuxPhase::StartPending { pending_writes, .. }
             | TmuxPhase::InControl { pending_writes, .. }
-            | TmuxPhase::OverflowRecovering { pending_writes } => std::mem::take(pending_writes),
+            | TmuxPhase::OverflowRecovering { pending_writes }
+            | TmuxPhase::PresentationRecovering { pending_writes } => {
+                std::mem::take(pending_writes)
+            }
             TmuxPhase::Inactive => Vec::new(),
         }
+    }
+
+    fn exit_to_inactive(&mut self) -> Vec<TmuxFeedItem> {
+        let replay = self.take_pending_writes();
+        self.phase = TmuxPhase::Inactive;
+        vec![TmuxFeedItem::Exited { replay }]
     }
 
     fn fail_start_pending(&mut self) -> Vec<TmuxFeedItem> {
@@ -467,19 +501,34 @@ impl TmuxIoState {
     }
 
     fn note_outgoing_command(&mut self, bytes: &[u8]) {
+        if let Some(pane_id) = capture_pane_target(bytes) {
+            if let TmuxPhase::InControl {
+                pending_captures, ..
+            } = &mut self.phase
+            {
+                pending_captures.push_back(pane_id);
+            }
+            return;
+        }
+        if is_snapshot_command(bytes) {
+            self.issue_snapshot();
+        }
+    }
+
+    fn issue_snapshot(&mut self) {
         let TmuxPhase::InControl {
-            pending_captures,
-            pending_snapshot,
+            pending_snapshots,
+            live_snapshot,
+            next_snapshot_generation,
             ..
         } = &mut self.phase
         else {
             return;
         };
-        if let Some(pane_id) = capture_pane_target(bytes) {
-            pending_captures.push_back(pane_id);
-        } else if is_snapshot_command(bytes) {
-            *pending_snapshot = true;
-        }
+        *next_snapshot_generation += 1;
+        let generation = *next_snapshot_generation;
+        *live_snapshot = Some(generation);
+        pending_snapshots.push_back(generation);
     }
 
     fn apply_command_end(
@@ -493,16 +542,20 @@ impl TmuxIoState {
         {
             self.note_pane(pane_id);
         }
-        if self.peek_pending_snapshot()
-            && !error
+        if !error
             && payload
                 .iter()
                 .any(|line| parse_window_layout_line(line).is_some())
         {
-            self.clear_pending_snapshot();
-            return self.apply_snapshot_payload(payload);
+            if self.take_live_snapshot_reply() {
+                return self.apply_snapshot_payload(payload);
+            }
+            return Vec::new();
         }
         let capture_pane = self.pop_pending_capture();
+        if error && capture_pane.is_none() {
+            self.take_snapshot_reply();
+        }
         vec![TmuxFeedItem::CommandEnd {
             number,
             error,
@@ -533,15 +586,41 @@ impl TmuxIoState {
     }
 
     fn bootstrap_layout_from_output(&mut self, pane_id: &PaneId) -> Vec<TmuxFeedItem> {
-        let window_id = match &self.phase {
+        if let TmuxPhase::InControl {
+            layout_ready: false,
+            pending_bootstrap_pane,
+            ..
+        } = &mut self.phase
+            && pending_bootstrap_pane.is_none()
+        {
+            *pending_bootstrap_pane = Some(pane_id.clone());
+        }
+        self.maybe_synthesize_bootstrap_layout()
+    }
+
+    fn bootstrap_layout_from_window(&mut self, window_id: WindowId) -> Vec<TmuxFeedItem> {
+        if let TmuxPhase::InControl {
+            layout_ready: false,
+            pending_bootstrap_window,
+            ..
+        } = &mut self.phase
+        {
+            *pending_bootstrap_window = Some(window_id);
+        }
+        self.maybe_synthesize_bootstrap_layout()
+    }
+
+    fn maybe_synthesize_bootstrap_layout(&mut self) -> Vec<TmuxFeedItem> {
+        let (window_id, pane_id) = match &self.phase {
             TmuxPhase::InControl {
                 layout_ready: false,
                 pending_bootstrap_window: Some(window_id),
+                pending_bootstrap_pane: Some(pane_id),
                 ..
-            } => window_id.clone(),
+            } => (window_id.clone(), pane_id.clone()),
             _ => return Vec::new(),
         };
-        let layout = dummy_layout_for_pane(pane_id);
+        let layout = dummy_layout_for_pane(&pane_id);
         self.note_layout(&layout);
         let mut items = vec![TmuxFeedItem::LayoutChange {
             window_id,
@@ -551,17 +630,6 @@ impl TmuxIoState {
         }];
         items.extend(self.flush_pending_if_focused());
         items
-    }
-
-    fn set_bootstrap_window(&mut self, window_id: WindowId) {
-        if let TmuxPhase::InControl {
-            layout_ready: false,
-            pending_bootstrap_window,
-            ..
-        } = &mut self.phase
-        {
-            *pending_bootstrap_window = Some(window_id);
-        }
     }
 
     fn note_layout(&mut self, layout: &str) {
@@ -584,47 +652,50 @@ impl TmuxIoState {
             layout_ready,
             ready_deadline,
             pending_bootstrap_window,
+            pending_bootstrap_pane,
             ..
         } = &mut self.phase
         {
             *layout_ready = true;
             *ready_deadline = None;
             *pending_bootstrap_window = None;
+            *pending_bootstrap_pane = None;
         }
     }
 
     fn fail_presentation_ready(&mut self) -> Vec<TmuxFeedItem> {
-        if let TmuxPhase::InControl {
-            ready_deadline,
-            layout_ready,
-            ..
-        } = &mut self.phase
-        {
-            *ready_deadline = None;
-            *layout_ready = true;
-        }
+        let pending_writes = self.take_pending_writes();
+        self.phase = TmuxPhase::PresentationRecovering { pending_writes };
         vec![TmuxFeedItem::PresentationUnready {
             detach: Cow::Borrowed(DETACH_CLIENT),
         }]
     }
 
-    fn peek_pending_snapshot(&self) -> bool {
-        matches!(
-            &self.phase,
-            TmuxPhase::InControl {
-                pending_snapshot: true,
-                ..
-            }
-        )
+    fn take_snapshot_reply(&mut self) -> Option<u64> {
+        let TmuxPhase::InControl {
+            pending_snapshots,
+            live_snapshot,
+            ..
+        } = &mut self.phase
+        else {
+            return None;
+        };
+        let generation = pending_snapshots.pop_front()?;
+        if *live_snapshot == Some(generation) {
+            *live_snapshot = None;
+        }
+        Some(generation)
     }
 
-    fn clear_pending_snapshot(&mut self) {
-        if let TmuxPhase::InControl {
-            pending_snapshot, ..
-        } = &mut self.phase
-        {
-            *pending_snapshot = false;
-        }
+    fn take_live_snapshot_reply(&mut self) -> bool {
+        let live = match &self.phase {
+            TmuxPhase::InControl { live_snapshot, .. } => *live_snapshot,
+            _ => None,
+        };
+        let Some(generation) = self.take_snapshot_reply() else {
+            return false;
+        };
+        live == Some(generation)
     }
 
     fn pop_pending_capture(&mut self) -> Option<PaneId> {

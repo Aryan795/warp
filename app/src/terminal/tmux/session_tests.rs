@@ -271,3 +271,62 @@ fn feature_off_does_not_treat_panes_as_tmux_owned() {
     assert!(!model.is_tmux_presentation());
     assert!(!NewTerminalOptions::default().tmux_presentation);
 }
+
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+#[test]
+fn tmux_36a_control_bytes_open_and_queue_layout_on_gateway_model() {
+    use warp_terminal::local_tty::event_loop::ActiveTerminal;
+    use warp_terminal::tmux::{CONTROL_MODE_DCS, TmuxFeedItem, TmuxIoState};
+
+    use crate::terminal::model::terminal_model::TmuxClientEvent;
+    use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(std::borrow::Cow::Borrowed(
+        b"tmux -CC new-session -A -s warp -n warp -x 80 -y 24\n",
+    ));
+    let mut bytes = CONTROL_MODE_DCS.to_vec();
+    bytes.extend_from_slice(
+        b"%begin 271 0\n%end 271 0\n%window-add @0\n%sessions-changed\n%session-changed $0 warp\n%output %0 hi\n",
+    );
+    let items = io.feed(&bytes);
+
+    let mut model = TerminalModel::mock(None, None);
+    for item in items {
+        match item {
+            TmuxFeedItem::EnteredControl { .. } => model.on_tmux_control_mode(true),
+            TmuxFeedItem::WindowAdd { window_id } => model.on_tmux_window_add(&window_id),
+            TmuxFeedItem::LayoutChange {
+                window_id,
+                layout,
+                visible_layout,
+                flags,
+            } => model.on_tmux_layout(
+                &window_id,
+                &layout,
+                visible_layout.as_deref(),
+                flags.as_deref(),
+            ),
+            TmuxFeedItem::PaneOutput { pane_id, bytes } => {
+                model.on_tmux_pane_output(&pane_id, &bytes);
+            }
+            _ => {}
+        }
+    }
+    assert!(model.take_tmux_open_presentation());
+    let events = model.take_tmux_events();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        TmuxClientEvent::WindowAdd { window_id } if window_id == "@0"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        TmuxClientEvent::LayoutChange { window_id, layout, .. }
+            if window_id == "@0" && layout == "80x24,0,0,0"
+    )));
+    if let Some(id) = model.tmux_instance_id() {
+        TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
+            .unwrap()
+            .unregister();
+    }
+}

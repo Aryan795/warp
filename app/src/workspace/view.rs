@@ -12777,6 +12777,51 @@ impl Workspace {
             .is_some_and(|runtime| runtime.is_applying())
     }
 
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn tmux_runtime_for_client_events(
+        &self,
+        ctx: &ViewContext<Self>,
+    ) -> Option<std::sync::Arc<crate::terminal::tmux::bridge::TmuxRuntime>> {
+        use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+        TmuxRuntime::for_gateway(ctx.window_id()).or_else(|| {
+            self.get_pane_group_view(self.active_tab_index)
+                .and_then(|pane_group| pane_group.as_ref(ctx).active_session_view(ctx))
+                .and_then(|view| view.as_ref(ctx).model.lock().tmux_instance_id())
+                .and_then(|id| TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)))
+        })
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn flush_buffered_tmux_client_events(
+        &self,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+        let Some(runtime) = instance_id
+            .and_then(|id| TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)))
+            .or_else(|| TmuxRuntime::for_gateway(ctx.window_id()))
+        else {
+            return;
+        };
+        let events = runtime.take_client_events();
+        if events.is_empty() {
+            return;
+        }
+        log::info!(
+            "tmux flushing {} buffered client events for instance {}",
+            events.len(),
+            runtime.id().as_u64()
+        );
+        let Some(presentation) = Self::presentation_workspace(ctx, runtime.gateway_window()) else {
+            runtime.buffer_client_events(&events);
+            return;
+        };
+        presentation.update(ctx, |workspace, ctx| {
+            workspace.apply_tmux_client_events_inner(&events, ctx);
+        });
+    }
+
     fn open_tmux_presentation_window(&self, instance_id: Option<u64>, ctx: &mut ViewContext<Self>) {
         let gateway_window = ctx.window_id();
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
@@ -12787,6 +12832,10 @@ impl Workspace {
             if let Some(id) = instance_id
                 && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
             {
+                log::info!(
+                    "tmux open presentation: bind gateway window for instance {}",
+                    id
+                );
                 runtime.bind_gateway(gateway_window);
             }
         }
@@ -12802,6 +12851,8 @@ impl Workspace {
             ctx,
         );
         ctx.windows().hide_window(gateway_window);
+        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+        self.flush_buffered_tmux_client_events(instance_id, ctx);
     }
 
     fn close_tmux_presentation_windows(
@@ -13000,10 +13051,18 @@ impl Workspace {
                 crate::terminal::model::terminal_model::TmuxClientEvent::PresentationUnready
             )
         }) {
+            log::info!(
+                "tmux presentation unready; rolling back gateway {}",
+                ctx.window_id()
+            );
             self.fail_tmux_presentation(ctx);
             return;
         }
         let Some(presentation) = Self::presentation_workspace(ctx, Some(ctx.window_id())) else {
+            #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+            if let Some(runtime) = self.tmux_runtime_for_client_events(ctx) {
+                runtime.buffer_client_events(events);
+            }
             return;
         };
         if presentation.id() == ctx.view_id() {
@@ -13145,6 +13204,11 @@ impl Workspace {
                     .pane_id_for_tmux_pane(first.as_str(), ctx)
                     .is_none()
                 {
+                    log::info!(
+                        "tmux bind presentation pane {} to window {}",
+                        first.as_str(),
+                        window_id
+                    );
                     pane_group.bind_tmux_pane(focused, first.as_str(), ctx);
                 }
             }
@@ -13216,6 +13280,24 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         self.apply_tmux_client_events_inner(events, ctx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_tmux_client_events_from_gateway_for_tests(
+        &mut self,
+        events: &[crate::terminal::model::terminal_model::TmuxClientEvent],
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.apply_tmux_client_events(events, ctx);
+    }
+
+    #[cfg(all(test, unix, feature = "local_tty", not(feature = "remote_tty")))]
+    pub(crate) fn flush_buffered_tmux_client_events_for_tests(
+        &self,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.flush_buffered_tmux_client_events(instance_id, ctx);
     }
 
     #[cfg(test)]
