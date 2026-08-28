@@ -169,7 +169,7 @@ const AI_ASSISTANT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 pub struct TaskStatusUpdate {
     pub message: String,
     pub error_code: Option<PlatformErrorCode>,
-    pub platform_error: Option<PlatformErrorInfo>,
+    pub platform_error: Option<Box<PlatformErrorInfo>>,
 }
 
 /// Error fetching git credentials for a task, either a structured platform error
@@ -215,7 +215,7 @@ fn agent_task_status_message_input(update: TaskStatusUpdate) -> AgentTaskStatusM
     AgentTaskStatusMessageInput {
         message: update.message,
         error_code: update.error_code,
-        error: update.platform_error.map(Into::into),
+        error: update.platform_error.map(|info| (*info).into()),
     }
 }
 fn public_api_user_query_mode(mode: UserQueryMode) -> &'static str {

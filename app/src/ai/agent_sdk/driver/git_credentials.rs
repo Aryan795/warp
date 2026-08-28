@@ -10,15 +10,15 @@
 /// - An async refresh loop that periodically fetches a fresh token from the
 ///   server and overwrites the credential files, keeping long-running agents
 ///   authenticated for their entire duration.
-use std::{future::Future, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 // Use the project's allowed Command wrapper (not std::process::Command, which is
 // disallowed by clippy rules because it flashes a terminal window on Windows).
 use command::blocking::Command as BlockingCommand;
-use warp_core::safe_warn;
 use warp_isolation_platform::IsolationPlatformError;
 
+use crate::server::retry_strategies::with_retry;
 use crate::server::server_api::ai::{AIClient, GitCredential, TaskGitCredentialsError};
 
 /// How long to wait between credential refresh attempts (~50 minutes, staying
@@ -46,7 +46,7 @@ const GLAB_CONFIG_FILENAME: &str = "config.yml";
 /// defer to the server's `retryable` flag; request-layer errors are retried
 /// unless they indicate the sandbox has no isolation platform at all, since
 /// retrying can never succeed in that case.
-fn is_retryable(error: &TaskGitCredentialsError) -> bool {
+pub(crate) fn is_retryable(error: &TaskGitCredentialsError) -> bool {
     match error {
         TaskGitCredentialsError::Platform { info, .. } => info.retryable,
         TaskGitCredentialsError::Request(error) => !error
@@ -282,99 +282,6 @@ pub(crate) fn configure_git_credentials(credentials: &[GitCredential]) -> Result
     write_git_credentials(credentials)
 }
 
-pub(crate) async fn fetch_with_retry<T, Fetch, FetchFuture, Sleep, SleepFuture>(
-    operation: &'static str,
-    backoff_delays: &[Duration],
-    mut fetch: Fetch,
-    mut sleep: Sleep,
-) -> Result<T, TaskGitCredentialsError>
-where
-    Fetch: FnMut() -> FetchFuture,
-    FetchFuture: Future<Output = Result<T, TaskGitCredentialsError>>,
-    Sleep: FnMut(Duration) -> SleepFuture,
-    SleepFuture: Future<Output = ()>,
-{
-    let mut attempt = 1usize;
-    loop {
-        match fetch().await {
-            Ok(value) => return Ok(value),
-            Err(error) if is_retryable(&error) && attempt <= backoff_delays.len() => {
-                let delay = backoff_delays[attempt - 1];
-                log_task_git_credentials_failure(operation, attempt, &error, Some(delay));
-                sleep(delay).await;
-                attempt += 1;
-            }
-            Err(error) => {
-                log_task_git_credentials_failure(operation, attempt, &error, None);
-                return Err(error);
-            }
-        }
-    }
-}
-
-fn log_task_git_credentials_failure(
-    operation: &str,
-    attempt: usize,
-    error: &TaskGitCredentialsError,
-    retry_delay: Option<Duration>,
-) {
-    match error {
-        TaskGitCredentialsError::Platform { info, .. } => {
-            let provider = info
-                .metadata
-                .get("provider")
-                .map(String::as_str)
-                .unwrap_or("unknown");
-            let resource = info
-                .metadata
-                .get("resource")
-                .map(String::as_str)
-                .unwrap_or("unknown");
-            log::warn!(
-                "{operation} failed (attempt {attempt}, code={:?}, retryable={}, \
-                 provider={provider}, resource={resource}, retry_delay_seconds={})",
-                info.code,
-                info.retryable,
-                retry_delay.map_or(0, |delay| delay.as_secs()),
-            );
-            tracing::warn!(
-                operation,
-                attempt,
-                error_code = ?info.code,
-                retryable = info.retryable,
-                provider,
-                resource,
-                retry_delay_seconds = retry_delay.map_or(0, |delay| delay.as_secs()),
-                debug = info.debug.as_deref(),
-                "Task git credentials request failed"
-            );
-        }
-        TaskGitCredentialsError::Request(source) => {
-            safe_warn!(
-                safe: ("{operation} request failed (attempt {attempt})"),
-                full: ("{operation} request failed (attempt {attempt}): {source:#}")
-            );
-            tracing::warn!(
-                operation,
-                attempt,
-                retry_delay_seconds = retry_delay.map_or(0, |delay| delay.as_secs()),
-                "Task git credentials request failed"
-            );
-        }
-        TaskGitCredentialsError::Unstructured { .. } => {
-            log::warn!(
-                "{operation} failed with a non-retryable user-facing error (attempt {attempt})"
-            );
-            tracing::warn!(
-                operation,
-                attempt,
-                retryable = false,
-                "Task git credentials request failed"
-            );
-        }
-    }
-}
-
 /// Run a git config command, logging a warning on failure rather than
 /// propagating the error (git may not be installed in all sandboxes).
 fn run_git_config(key: &str, value: &str) {
@@ -519,13 +426,14 @@ pub(crate) async fn refresh_loop(task_id: String, ai_client: Arc<dyn AIClient>) 
 
         log::info!("Refreshing git credentials for task {task_id}");
 
-        if fetch_with_retry(
+        if with_retry(
             "Git credentials refresh",
-            &GIT_CREDENTIALS_REFRESH_BACKOFF,
             || try_refresh(&task_id, &ai_client),
+            is_retryable,
             |delay| async move {
                 warpui::r#async::Timer::after(delay).await;
             },
+            |attempts_made| GIT_CREDENTIALS_REFRESH_BACKOFF.get(attempts_made).copied(),
         )
         .await
         .is_err()

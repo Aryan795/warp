@@ -71,6 +71,7 @@ use crate::cloud_object::CloudObjectLookup as _;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::send_telemetry_sync_from_app_ctx;
 use crate::server::ids::{ServerId, SyncId};
+use crate::server::retry_strategies::with_retry;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::ai::{
     AIClient, AgentConfigSnapshot, GitCredential, TaskGitCredentialsError,
@@ -852,9 +853,8 @@ impl AgentDriverRunner {
         task_id_str: String,
         ai_client: Arc<dyn AIClient>,
     ) -> Result<Vec<GitCredential>, TaskGitCredentialsError> {
-        driver::git_credentials::fetch_with_retry(
+        with_retry(
             "Git credentials bootstrap",
-            &driver::git_credentials::GIT_CREDENTIALS_BOOTSTRAP_BACKOFF,
             || {
                 let task_id_str = task_id_str.clone();
                 let ai_client = Arc::clone(&ai_client);
@@ -872,8 +872,14 @@ impl AgentDriverRunner {
                         .await
                 }
             },
+            driver::git_credentials::is_retryable,
             |delay| async move {
                 warpui::r#async::Timer::after(delay).await;
+            },
+            |attempts_made| {
+                driver::git_credentials::GIT_CREDENTIALS_BOOTSTRAP_BACKOFF
+                    .get(attempts_made)
+                    .copied()
             },
         )
         .await

@@ -440,7 +440,7 @@ fn classify_git_credentials_error(
                 TaskStatusUpdate {
                     message,
                     error_code: Some(info.code),
-                    platform_error: Some(info.clone()),
+                    platform_error: Some(Box::new(info.clone())),
                 },
             )
         }
@@ -449,10 +449,10 @@ fn classify_git_credentials_error(
             TaskStatusUpdate {
                 message: message.clone(),
                 error_code: Some(PlatformErrorCode::InvalidRequest),
-                platform_error: Some(PlatformErrorInfo::new(
+                platform_error: Some(Box::new(PlatformErrorInfo::new(
                     PlatformErrorCode::InvalidRequest,
                     false,
-                )),
+                ))),
             },
         ),
         TaskGitCredentialsError::Request(_) => (
@@ -460,10 +460,10 @@ fn classify_git_credentials_error(
             TaskStatusUpdate {
                 message: error.to_string(),
                 error_code: Some(PlatformErrorCode::InternalError),
-                platform_error: Some(PlatformErrorInfo::new(
+                platform_error: Some(Box::new(PlatformErrorInfo::new(
                     PlatformErrorCode::InternalError,
                     true,
-                )),
+                ))),
             },
         ),
     }
