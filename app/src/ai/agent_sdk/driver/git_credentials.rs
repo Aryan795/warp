@@ -58,13 +58,14 @@ fn is_retryable(error: &TaskGitCredentialsError) -> bool {
     }
 }
 
-/// Fails fast with `NoIsolationPlatformDetected` when no isolation platform is
-/// detected, instead of waiting for the workload-token request to fail
-/// asynchronously. `detect()` is a cheap, memoized, synchronous check, so this
-/// lets bootstrap/refresh skip the network attempt entirely when it can never
-/// succeed.
-pub(crate) fn ensure_isolation_platform_detected() -> Result<(), TaskGitCredentialsError> {
-    if warp_isolation_platform::detect().is_none() {
+/// Fails fast with `NoIsolationPlatformDetected` when no workload token can
+/// plausibly be issued, instead of waiting for the request to fail
+/// asynchronously. This accepts both a detected platform with its own
+/// issuance mechanism and a platform-agnostic token configured via
+/// `WARP_WORKLOAD_TOKEN`, matching `issue_workload_token`'s own resolution,
+/// so it only short-circuits attempts that are guaranteed to fail.
+pub(crate) fn ensure_workload_token_available() -> Result<(), TaskGitCredentialsError> {
+    if !warp_isolation_platform::workload_token_available() {
         return Err(TaskGitCredentialsError::Request(
             IsolationPlatformError::NoIsolationPlatformDetected.into(),
         ));
@@ -472,7 +473,7 @@ async fn try_refresh(
     task_id: &str,
     ai_client: &Arc<dyn AIClient>,
 ) -> Result<(), TaskGitCredentialsError> {
-    ensure_isolation_platform_detected()?;
+    ensure_workload_token_available()?;
 
     let workload_token =
         warp_isolation_platform::issue_workload_token(Some(Duration::from_secs(5 * 60)))

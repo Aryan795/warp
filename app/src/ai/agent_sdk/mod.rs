@@ -859,7 +859,7 @@ impl AgentDriverRunner {
                 let task_id_str = task_id_str.clone();
                 let ai_client = Arc::clone(&ai_client);
                 async move {
-                    driver::git_credentials::ensure_isolation_platform_detected()?;
+                    driver::git_credentials::ensure_workload_token_available()?;
 
                     let workload_token = warp_isolation_platform::issue_workload_token(Some(
                         std::time::Duration::from_secs(5 * 60),
