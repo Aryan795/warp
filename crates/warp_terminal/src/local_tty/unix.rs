@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::{io, ptr};
 
 use anyhow::{Context as _, Error, Result};
+use command::r#async::Command as AsyncCommand;
 use command::blocking::Command;
 use itertools::Itertools;
 use libc::{self, TIOCSCTTY, c_int, winsize};
@@ -124,10 +125,9 @@ fn docker_sandbox_run_args(starter: &DockerSandboxShellStarter) -> Vec<std::ffi:
 ///
 /// Passes `script -E never`: `script`'s default `--echo=auto` decides
 /// whether to echo on the pty it allocates by inspecting *its own* stdin,
-/// which here is the plain pipe `docker exec -i` gives it, not a real
-/// terminal — confirmed by hand (`stty -a` on the inner pty) that `auto`
-/// leaves echo on because it can't detect otherwise. `never` sets it
-/// explicitly instead of relying on that detection.
+/// which here is the plain pipe `docker exec -i` gives it rather than a
+/// real terminal, so `auto` cannot detect the missing tty and leaves echo
+/// on. `never` sets it explicitly instead of relying on that detection.
 fn dev_container_exec_args(starter: &DevContainerShellStarter) -> Vec<std::ffi::OsString> {
     let mut args = vec![
         std::ffi::OsString::from("exec"),
@@ -1201,12 +1201,11 @@ fn spawn_dev_container(
 /// live resizes from our outer pty automatically, the same as `docker run
 /// -it`/`docker attach` do, but [`dev_container_exec_args`] deliberately
 /// doesn't pass `-t` (see its doc comment), which forfeits that forwarding.
-/// Confirmed by hand that `SIGWINCH` does not reach the inner shell when the
-/// pane is resized after opening: the container-side `bash` keeps using
-/// whatever size it started with. Fixing this needs an explicit resize
-/// channel (e.g. `docker exec`'s `TTY resize` API against the
-/// `script`-owned pty, keyed by exec ID) rather than relying on Docker's
-/// implicit `-it` behavior.
+/// `SIGWINCH` therefore never reaches the inner shell when the pane is
+/// resized after opening, so the container-side `bash` keeps using whatever
+/// size it started with. Fixing this needs an explicit resize channel (e.g.
+/// `docker exec -F /dev/pts/N stty rows R cols C` against the `script`-owned
+/// pty) rather than relying on Docker's implicit `-it` behavior.
 ///
 /// Does not perform any PTY-level setup; hand the returned `Command` to
 /// [`spawn_command_in_pty`].
@@ -1317,11 +1316,17 @@ fn build_dev_container_command(
 /// to) to completion, treating a non-zero exit as an error. The error
 /// message includes the tail of stderr so failures are actionable when
 /// surfaced in a toast, rather than just an exit code.
-fn run_dev_container_docker_command(docker_path: &Path, args: Vec<OsString>) -> Result<()> {
+///
+/// Uses the async `Command` because this runs from the `/devcontainer`
+/// preflight, before any pane (or its own PTY thread) exists to absorb the
+/// latency — a blocking `Command` here would stall the view's executor for
+/// the round-trip time of a real `docker` invocation.
+async fn run_dev_container_docker_command(docker_path: &Path, args: Vec<OsString>) -> Result<()> {
     let args_display = args.iter().map(|a| a.to_string_lossy()).join(" ");
-    let output = Command::new(docker_path)
+    let output = AsyncCommand::new(docker_path)
         .args(&args)
         .output()
+        .await
         .with_context(|| format!("run `docker {args_display}`"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1348,7 +1353,7 @@ fn run_dev_container_docker_command(docker_path: &Path, args: Vec<OsString>) -> 
 /// On failure after the `docker cp` succeeds, best-effort removes the
 /// container-side copy rather than leaving it with unknown/insecure
 /// ownership.
-fn stage_and_secure_dev_container_file(
+async fn stage_and_secure_dev_container_file(
     docker_path: &Path,
     container_id: &str,
     host_path: &Path,
@@ -1383,31 +1388,36 @@ fn stage_and_secure_dev_container_file(
         docker_path,
         dev_container_cp_args(container_id, host_path, container_path),
     )
+    .await
     .with_context(|| format!("copy {container_path} into the container"))?;
 
     // `docker cp` preserves the *host* file's numeric uid/gid, which has no
     // guaranteed relationship to the uid of the user that will actually read
     // this file inside the container (different images, users, and
     // namespaces).
-    let secure_copy = run_dev_container_docker_command(
-        docker_path,
-        dev_container_chown_args(container_id, target_user, container_path),
-    )
-    .with_context(|| format!("chown {container_path}"))
-    .and_then(|_| {
+    let secure_copy = async {
+        run_dev_container_docker_command(
+            docker_path,
+            dev_container_chown_args(container_id, target_user, container_path),
+        )
+        .await
+        .with_context(|| format!("chown {container_path}"))?;
         run_dev_container_docker_command(
             docker_path,
             dev_container_chmod_args(container_id, container_path),
         )
+        .await
         .with_context(|| format!("chmod {container_path}"))
-    });
+    }
+    .await;
     if let Err(e) = secure_copy {
         // Best-effort: don't leave a copy with unknown/insecure permissions
         // sitting in the container just because we couldn't lock it down.
         let _ = run_dev_container_docker_command(
             docker_path,
             dev_container_rm_args(container_id, container_path),
-        );
+        )
+        .await;
         return Err(e);
     }
 
@@ -1446,44 +1456,51 @@ fn stage_and_secure_dev_container_file(
 /// caller's own pane size (the new session's pane doesn't exist yet), which
 /// the new pane inherits.
 ///
+/// Async because staging is several sequential `docker cp`/`exec` round
+/// trips; the caller (the `/devcontainer` preflight, before any pane or PTY
+/// thread exists) must run this off its own executor rather than block on
+/// it.
+///
 /// TODO(prototype): No cleanup on pane close, same as `prepare_docker_sandbox`.
-pub fn prepare_dev_container(
-    docker_path: &Path,
-    container_id: &str,
-    remote_user: Option<&str>,
-    sandbox_id: &str,
+pub async fn prepare_dev_container(
+    docker_path: PathBuf,
+    container_id: String,
+    remote_user: Option<String>,
+    sandbox_id: String,
     session_id: SessionId,
-    size: &SizeInfo,
+    size: SizeInfo,
 ) -> Result<()> {
     // If `devcontainer up` didn't report a `remoteUser`, resolve whichever
     // user the real attach's unqualified `docker exec` (no `-u`) would
     // actually run as; both staged files are owned by the same user.
     let target_user = match remote_user {
-        Some(remote_user) => remote_user.to_owned(),
-        None => resolve_default_container_user(docker_path, container_id)?,
+        Some(remote_user) => remote_user,
+        None => resolve_default_container_user(&docker_path, &container_id).await?,
     };
 
-    let init_script = dev_container_init_script(sandbox_id, session_id, size);
+    let init_script = dev_container_init_script(&sandbox_id, session_id, &size);
     stage_and_secure_dev_container_file(
-        docker_path,
-        container_id,
-        &host_init_script_path_for_sandbox_id(sandbox_id),
+        &docker_path,
+        &container_id,
+        &host_init_script_path_for_sandbox_id(&sandbox_id),
         init_script.as_bytes(),
-        &container_init_script_path_for_sandbox_id(sandbox_id),
+        &container_init_script_path_for_sandbox_id(&sandbox_id),
         &target_user,
-    )?;
+    )
+    .await?;
 
     // The same bootstrap script every local bash session gets, staged as a
     // file instead of typed into the pty. See `dev_container_init_script`.
     let bootstrap_script = script_for_shell(ShellType::Bash, &ASSETS);
     stage_and_secure_dev_container_file(
-        docker_path,
-        container_id,
-        &host_bootstrap_script_path_for_sandbox_id(sandbox_id),
+        &docker_path,
+        &container_id,
+        &host_bootstrap_script_path_for_sandbox_id(&sandbox_id),
         &bootstrap_script,
-        &container_bootstrap_script_path_for_sandbox_id(sandbox_id),
+        &container_bootstrap_script_path_for_sandbox_id(&sandbox_id),
         &target_user,
-    )?;
+    )
+    .await?;
 
     Ok(())
 }
@@ -1523,10 +1540,11 @@ fn dev_container_init_script(sandbox_id: &str, session_id: SessionId, size: &Siz
 /// (no `-u`) would run as in this container — i.e. the account
 /// [`dev_container_exec_args`] actually attaches as when `devcontainer up`
 /// didn't report a `remoteUser`.
-fn resolve_default_container_user(docker_path: &Path, container_id: &str) -> Result<String> {
-    let output = Command::new(docker_path)
+async fn resolve_default_container_user(docker_path: &Path, container_id: &str) -> Result<String> {
+    let output = AsyncCommand::new(docker_path)
         .args(dev_container_default_user_args(container_id))
         .output()
+        .await
         .context("resolve default Dev Container exec user")?;
     if !output.status.success() {
         return Err(Error::msg(

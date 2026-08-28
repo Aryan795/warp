@@ -520,3 +520,55 @@ fn write_enqueued_during_settle_window_is_deferred_to_a_separate_tick() {
         ));
     });
 }
+
+/// Companion to the two regression tests above, covering the write classes that bypass
+/// `pending_writes` entirely: `write_bytes`/`write_agent_bytes` (Ctrl-C/Ctrl-D, other raw
+/// terminal input, and agent input all go through one of the two) send straight to the event
+/// loop via `send_write_to_event_loop`, so they need their own settle-window gate rather than
+/// inheriting `execute_next_queued_write`'s.
+#[test]
+fn write_bytes_and_agent_bytes_during_settle_window_are_deferred_to_a_separate_tick() {
+    App::test((), |mut app| async move {
+        let (controller, line_editor_status, sender) = controller_with_active_zsh_session(&mut app);
+
+        line_editor_status.update(&mut app, |line_editor_status, ctx| {
+            line_editor_status.set_active_for_test(ctx);
+        });
+        assert_eq!(
+            sender.messages.lock().len(),
+            1,
+            "only the input-reporting probe should be sent when nothing else is queued yet"
+        );
+
+        // Ctrl-C (write_bytes) and agent input (write_agent_bytes) during the settle window must
+        // not land adjacent to the probe, even though the line editor is inactive while a
+        // foreground command runs -- the exact circumstance under which a user would send either.
+        controller.update(&mut app, |controller, ctx| {
+            controller.write_bytes(&[escape_sequences::C0::ETX][..], ctx);
+            controller.write_agent_bytes(b"agent-input".to_vec(), &AIAgentPtyWriteMode::Raw, ctx);
+        });
+        assert_eq!(
+            sender.messages.lock().len(),
+            1,
+            "writes sent via write_bytes/write_agent_bytes during the settle window must not be \
+             sent adjacent to the probe"
+        );
+
+        warpui::r#async::Timer::after(PENDING_WRITE_SETTLE_DELAY * 4).await;
+
+        let messages = sender.messages.lock();
+        assert_eq!(
+            messages.len(),
+            3,
+            "both deferred writes should be sent once the settle window clears"
+        );
+        assert!(matches!(
+            &messages[1],
+            Message::Input(bytes) if bytes[..] == [escape_sequences::C0::ETX]
+        ));
+        assert!(matches!(
+            &messages[2],
+            Message::Input(bytes) if bytes[..] == *b"agent-input"
+        ));
+    });
+}

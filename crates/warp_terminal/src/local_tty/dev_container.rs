@@ -26,10 +26,9 @@ use crate::shell::ShellType;
 ///
 /// Lives under the Warp per-user cache directory for the same reasons as
 /// [`super::docker_sandbox::docker_sandbox_host_root`]: protected by the
-/// user's home-directory permissions. Unlike the Docker sandbox (and this
-/// module's own earlier bind-mount design), this directory is never mounted
-/// into a container — see [`DevContainerShellStarter::new`] for why a bind
-/// mount doesn't work here.
+/// user's home-directory permissions. Unlike the Docker sandbox, this
+/// directory is never mounted into a container — see
+/// [`DevContainerShellStarter::new`] for why a bind mount doesn't work here.
 fn dev_container_host_root() -> PathBuf {
     warp_core::paths::cache_dir().join("dev-container")
 }
@@ -101,17 +100,16 @@ pub struct DevContainerShellStarter {
 impl DevContainerShellStarter {
     /// Construct a new starter for the given `sandbox_id`.
     ///
-    /// `sandbox_id` need not match anything from the `devcontainer up` step:
-    /// unlike the Docker sandbox (and an earlier version of this feature),
-    /// the init script is delivered via `docker cp` immediately before
-    /// `docker exec` runs, not a bind mount configured back when the
-    /// container was created. A bind mount only takes effect the *first*
-    /// time a container is created; `devcontainer up` reuses an existing
-    /// container (matched by workspace label) on subsequent invocations
-    /// without re-applying `--mount`, so a fresh per-invocation mount path
-    /// would silently stop existing inside the container after the first
-    /// session. `docker cp` has no such lifecycle coupling — it works
-    /// against any running container regardless of how it was created.
+    /// `sandbox_id` need not match anything from the `devcontainer up` step: the
+    /// init script is delivered via `docker cp` immediately before `docker exec`
+    /// runs, not a bind mount configured when the container was created. A bind
+    /// mount only takes effect the *first* time a container is created;
+    /// `devcontainer up` reuses an existing container (matched by workspace
+    /// label) on subsequent invocations without re-applying `--mount`, so a
+    /// fresh per-invocation mount path would silently stop existing inside the
+    /// container after the first session. `docker cp` has no such lifecycle
+    /// coupling — it works against any running container regardless of how it
+    /// was created.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         direct: DirectShellStarter,

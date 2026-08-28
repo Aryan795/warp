@@ -83,6 +83,13 @@ pub struct PtyController<T: EventLoopSender> {
     sessions: ModelHandle<Sessions>,
     model_event_dispatcher: ModelHandle<ModelEventDispatcher>,
     pending_writes: VecDeque<PtyWrite>,
+    /// Writes from [`Self::write_bytes`]/[`Self::write_agent_bytes`] received while
+    /// [`Self::is_settling_after_non_command_write`] was set, held here (in request order) until
+    /// the settle window clears. These bypass `pending_writes` entirely in the common case, since
+    /// unlike queued command writes they must still reach a foreground command that's already
+    /// running -- which is precisely when the line editor `execute_next_queued_write` waits on is
+    /// inactive.
+    deferred_direct_writes: VecDeque<PtyWrite>,
     is_user_command_executing: bool,
     is_bracketed_paste_enabled: bool,
     /// Set for [`PENDING_WRITE_SETTLE_DELAY`] after a non-command write, blocking every other
@@ -188,6 +195,7 @@ impl<T: EventLoopSender> PtyController<T> {
             sessions,
             model_event_dispatcher,
             pending_writes: VecDeque::new(),
+            deferred_direct_writes: VecDeque::new(),
             is_user_command_executing: false,
             is_bracketed_paste_enabled: false,
             is_settling_after_non_command_write: false,
@@ -336,6 +344,9 @@ impl<T: EventLoopSender> PtyController<T> {
                     warpui::r#async::Timer::after(PENDING_WRITE_SETTLE_DELAY),
                     |me, _, ctx| {
                         me.is_settling_after_non_command_write = false;
+                        while let Some(write) = me.deferred_direct_writes.pop_front() {
+                            me.send_write_to_event_loop(write, ctx);
+                        }
                         me.execute_next_queued_write(ctx);
                     },
                 );
@@ -619,7 +630,7 @@ impl<T: EventLoopSender> PtyController<T> {
         mode: &AIAgentPtyWriteMode,
         ctx: &mut ModelContext<Self>,
     ) {
-        self.send_write_to_event_loop(
+        self.send_write_respecting_settle_window(
             PtyWrite::AgentInput {
                 bytes: bytes.into(),
                 mode: *mode,
@@ -637,12 +648,34 @@ impl<T: EventLoopSender> PtyController<T> {
         bytes: B,
         ctx: &mut ModelContext<Self>,
     ) {
-        self.send_write_to_event_loop(
+        self.send_write_respecting_settle_window(
             PtyWrite::Bytes {
                 bytes: bytes.into(),
             },
             ctx,
         );
+    }
+
+    /// Sends `write` immediately unless we're in the post-non-command-write settle window (see
+    /// `is_settling_after_non_command_write`), in which case it's appended to
+    /// `deferred_direct_writes` and sent, in request order, once the window clears.
+    ///
+    /// This is the entry point for the write classes that bypass `pending_writes` entirely --
+    /// Ctrl-C/Ctrl-D, other raw terminal input, and agent input all reach the pty through
+    /// `write_bytes`/`write_agent_bytes` rather than `execute_next_queued_write`. Deliberately
+    /// does not also require the line editor to be active: unlike queued command writes, this
+    /// input must still reach a foreground command that's already running, which is precisely
+    /// when the line editor is inactive.
+    fn send_write_respecting_settle_window(
+        &mut self,
+        write: PtyWrite,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self.is_settling_after_non_command_write {
+            self.deferred_direct_writes.push_back(write);
+        } else {
+            self.send_write_to_event_loop(write, ctx);
+        }
     }
 
     /// Shuts down the pty and event loop.

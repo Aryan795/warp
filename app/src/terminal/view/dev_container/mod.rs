@@ -18,6 +18,8 @@ use std::sync::mpsc::SyncSender;
 #[cfg(feature = "local_tty")]
 use command::r#async::Command;
 #[cfg(feature = "local_tty")]
+use futures::FutureExt as _;
+#[cfg(feature = "local_tty")]
 use serde::Deserialize;
 #[cfg(feature = "local_tty")]
 use warp_core::SessionId;
@@ -385,49 +387,59 @@ impl TerminalView {
 
         ctx.spawn(preflight_future, move |me, result, ctx| match result {
             Ok(output) if output.status.success() => {
+                // Staging is several sequential `docker cp`/`exec` round trips (a
+                // default-user probe plus two copy+chown+chmod sequences), so it must
+                // run as its own spawned future rather than be awaited inline here:
+                // this closure runs on the main thread, and blocking it for that long
+                // right after `devcontainer up` would freeze the UI.
                 #[cfg(unix)]
-                let staging_result = crate::terminal::local_tty::prepare_dev_container(
-                    &docker_path,
-                    &container_id,
-                    remote_user.as_deref(),
-                    &sandbox_id,
+                let staging_future = crate::terminal::local_tty::prepare_dev_container(
+                    docker_path.clone(),
+                    container_id.clone(),
+                    remote_user.clone(),
+                    sandbox_id.clone(),
                     session_id,
-                    &size,
-                );
+                    size,
+                )
+                .boxed();
                 #[cfg(not(unix))]
-                let staging_result: anyhow::Result<()> = Err(anyhow::Error::msg(
+                let staging_future = futures::future::ready(Err(anyhow::Error::msg(
                     "Dev Container sessions are only supported on Linux and macOS",
-                ));
+                )))
+                .boxed();
 
-                match staging_result {
-                    Ok(()) => {
-                        me.show_dev_container_toast(
-                            format!(
-                                "Dev container ready — opening session in {}…",
-                                workspace_folder.display()
-                            ),
-                            ToastFlavor::Success,
-                            ctx,
-                        );
-                        me.create_and_push_dev_container(
-                            workspace_folder,
-                            docker_path,
-                            container_id,
-                            remote_user,
-                            remote_workspace_folder,
-                            sandbox_id,
-                            session_id,
-                            ctx,
-                        );
-                    }
-                    Err(e) => {
-                        me.show_dev_container_toast(
-                            format!("Failed to prepare the Dev Container session: {e:#}"),
-                            ToastFlavor::Error,
-                            ctx,
-                        );
-                    }
-                }
+                ctx.spawn(
+                    staging_future,
+                    move |me, staging_result, ctx| match staging_result {
+                        Ok(()) => {
+                            me.show_dev_container_toast(
+                                format!(
+                                    "Dev container ready — opening session in {}…",
+                                    workspace_folder.display()
+                                ),
+                                ToastFlavor::Success,
+                                ctx,
+                            );
+                            me.create_and_push_dev_container(
+                                workspace_folder,
+                                docker_path,
+                                container_id,
+                                remote_user,
+                                remote_workspace_folder,
+                                sandbox_id,
+                                session_id,
+                                ctx,
+                            );
+                        }
+                        Err(e) => {
+                            me.show_dev_container_toast(
+                                format!("Failed to prepare the Dev Container session: {e:#}"),
+                                ToastFlavor::Error,
+                                ctx,
+                            );
+                        }
+                    },
+                );
             }
             Ok(output) => {
                 let detail = tail_lines(&String::from_utf8_lossy(&output.stderr), 5);
