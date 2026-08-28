@@ -462,8 +462,40 @@ impl PaneData {
         successful_split
     }
 
+    pub fn split_beside_subtree(
+        &mut self,
+        parent_leaves: &[PaneId],
+        new_id: PaneId,
+        direction: Direction,
+    ) -> bool {
+        match parent_leaves {
+            [] => false,
+            [parent] => self.split(*parent, new_id, direction),
+            _ if self.root.pane_ids() == parent_leaves => {
+                self.split_root(new_id, direction);
+                true
+            }
+            _ => {
+                let successful = self
+                    .root
+                    .split_beside_subtree(parent_leaves, new_id, direction);
+                if successful {
+                    self.len += 1;
+                }
+                successful
+            }
+        }
+    }
+
     pub fn set_pane_flex(&mut self, pane_id: PaneId, flex: f32) -> bool {
         self.root.set_pane_flex(pane_id, flex)
+    }
+
+    pub fn set_subtree_flex(&mut self, leaves: &[PaneId], flex: f32) -> bool {
+        match leaves {
+            [pane_id] => self.set_pane_flex(*pane_id, flex),
+            _ => self.root.set_subtree_flex(leaves, flex),
+        }
     }
 
     #[cfg(test)]
@@ -698,6 +730,20 @@ impl PaneNode {
         }
     }
 
+    fn split_beside_subtree(
+        &mut self,
+        parent_leaves: &[PaneId],
+        new_pane_id: PaneId,
+        direction: Direction,
+    ) -> bool {
+        match self {
+            PaneNode::Leaf(_) => false,
+            PaneNode::Branch(branch) => {
+                branch.split_beside_subtree(parent_leaves, new_pane_id, direction)
+            }
+        }
+    }
+
     /// Number of splits at the node in the given axis. For leaf nodes, this is always one.
     pub fn num_splits_in_direction(&self, axis: SplitDirection) -> usize {
         match self {
@@ -892,6 +938,13 @@ impl PaneNode {
         }
     }
 
+    fn set_subtree_flex(&mut self, leaves: &[PaneId], flex: f32) -> bool {
+        match self {
+            PaneNode::Leaf(_) => false,
+            PaneNode::Branch(branch) => branch.set_subtree_flex(leaves, flex),
+        }
+    }
+
     fn replace_pane(&mut self, old_pane_id: PaneId, new_pane_id: PaneId) -> bool {
         match self {
             PaneNode::Leaf(id) => {
@@ -985,6 +1038,39 @@ impl PaneBranch {
             }
         }
         false
+    }
+
+    fn split_beside_subtree(
+        &mut self,
+        parent_leaves: &[PaneId],
+        new_pane_id: PaneId,
+        direction: Direction,
+    ) -> bool {
+        if let Some(idx) = self
+            .nodes
+            .iter()
+            .position(|(_, node)| node.pane_ids() == parent_leaves)
+        {
+            if direction.axis() == self.axis {
+                self.nodes.insert(
+                    match direction {
+                        Direction::Left | Direction::Up => idx,
+                        Direction::Right | Direction::Down => idx + 1,
+                    },
+                    (DEFAULT_FLEX_SIZE, PaneNode::Leaf(new_pane_id)),
+                );
+                self.dividers.insert(idx, Divider::new());
+            } else {
+                let node = &mut self.nodes[idx].1;
+                let old = mem::replace(node, PaneNode::Leaf(new_pane_id));
+                *node =
+                    PaneNode::Branch(PaneBranch::new(old, PaneNode::Leaf(new_pane_id), direction));
+            }
+            return true;
+        }
+        self.nodes
+            .iter_mut()
+            .any(|(_, node)| node.split_beside_subtree(parent_leaves, new_pane_id, direction))
     }
 
     /// Inserts `new_pane_id` into this branch at either the start or the end, according to the
@@ -1334,6 +1420,19 @@ impl PaneBranch {
                 return true;
             }
             if node.set_pane_flex(pane_id, flex) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn set_subtree_flex(&mut self, leaves: &[PaneId], flex: f32) -> bool {
+        for (pane_flex, node) in &mut self.nodes {
+            if node.pane_ids() == leaves {
+                *pane_flex = PaneFlex(flex);
+                return true;
+            }
+            if node.set_subtree_flex(leaves, flex) {
                 return true;
             }
         }

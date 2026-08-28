@@ -4156,7 +4156,7 @@ impl PaneGroup {
     pub fn add_tmux_presentation_pane(
         &mut self,
         direction: Direction,
-        base_pane_id: Option<PaneId>,
+        parent_leaves: &[PaneId],
         ctx: &mut ViewContext<Self>,
     ) -> Option<PaneId> {
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
@@ -4183,25 +4183,48 @@ impl PaneGroup {
                 self.model_event_sender.clone(),
                 ctx,
             );
-            self.add_pane(direction, base_pane_id, Box::new(pane_data), true, ctx)
+            let pane_id = self.init_pane(Box::new(pane_data), ctx)?;
+            let split_succeeded = if parent_leaves.is_empty() {
+                self.panes.split_root(pane_id, direction);
+                true
+            } else {
+                self.panes
+                    .split_beside_subtree(parent_leaves, pane_id, direction)
+            };
+            if !split_succeeded {
+                report_error!(
+                    "Failed to split pane tree when adding tmux pane",
+                    extra: { "pane_id" => ?pane_id }
+                );
+                self.panes.remove_hidden_pane(pane_id);
+                self.clean_up_pane(pane_id, ctx);
+                self.pane_contents.remove(&pane_id);
+                return None;
+            }
+            self.restore_missing_child_agent_panes_for_terminal_pane_if_needed(pane_id, ctx);
+            self.focus_pane_and_record_in_history(pane_id, ctx);
+            self.handle_pane_count_change(ctx);
+            ctx.notify();
+            ctx.emit(Event::AppStateChanged);
+            Some(pane_id)
         }
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
         {
-            let _ = (direction, base_pane_id, ctx);
+            let _ = (direction, parent_leaves, ctx);
             None
         }
     }
 
     pub fn set_tmux_split_flex(
         &mut self,
-        parent: PaneId,
+        parent_leaves: &[PaneId],
         new_pane: PaneId,
         parent_flex: f32,
         new_flex: f32,
     ) {
         let parent_flex = parent_flex.max(1.0);
         let new_flex = new_flex.max(1.0);
-        self.panes.set_pane_flex(parent, parent_flex);
+        self.panes.set_subtree_flex(parent_leaves, parent_flex);
         self.panes.set_pane_flex(new_pane, new_flex);
     }
 

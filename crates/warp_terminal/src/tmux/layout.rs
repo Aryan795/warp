@@ -62,10 +62,10 @@ impl LayoutNode {
     }
 }
 
-/// Split steps that recreate `layout` as Warp pane splits, starting from the first leaf.
+/// A Warp split that inserts a pane beside the previous sibling subtree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitStep {
-    pub parent: PaneId,
+    pub parent: Vec<PaneId>,
     pub new_pane: PaneId,
     pub side_by_side: bool,
     pub parent_size: u32,
@@ -105,24 +105,21 @@ fn collect_split_steps(node: &LayoutNode, steps: &mut Vec<SplitStep>) {
     if children.is_empty() {
         return;
     }
-    let first_ids = children[0].pane_ids();
-    let Some(mut insert_after) = first_ids.first().cloned() else {
-        return;
-    };
     collect_split_steps(&children[0], steps);
+    let mut previous_leaves = children[0].pane_ids();
     let mut previous_size = children[0].size_along(*horizontal);
     for child in children.iter().skip(1) {
         let child_ids = child.pane_ids();
         if let Some(new_pane) = child_ids.first().cloned() {
             let new_size = child.size_along(*horizontal);
             steps.push(SplitStep {
-                parent: insert_after.clone(),
+                parent: previous_leaves,
                 new_pane: new_pane.clone(),
                 side_by_side: *horizontal,
                 parent_size: previous_size,
                 new_size,
             });
-            insert_after = new_pane;
+            previous_leaves = child_ids;
             previous_size = new_size;
         }
         collect_split_steps(child, steps);

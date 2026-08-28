@@ -32,7 +32,7 @@ fn split_steps_emit_one_side_by_side_from_first_leaf() {
     assert_eq!(
         split_steps(&layout),
         vec![SplitStep {
-            parent: PaneId::from("%0"),
+            parent: vec![PaneId::from("%0")],
             new_pane: PaneId::from("%1"),
             side_by_side: true,
             parent_size: 40,
@@ -47,7 +47,7 @@ fn stacked_split_is_not_side_by_side() {
     assert_eq!(
         split_steps(&layout),
         vec![SplitStep {
-            parent: PaneId::from("%0"),
+            parent: vec![PaneId::from("%0")],
             new_pane: PaneId::from("%2"),
             side_by_side: false,
             parent_size: 12,
@@ -69,14 +69,14 @@ fn nested_split_preserves_tree_order_and_sizes() {
         split_steps(&layout),
         vec![
             SplitStep {
-                parent: PaneId::from("%0"),
+                parent: vec![PaneId::from("%0")],
                 new_pane: PaneId::from("%1"),
                 side_by_side: true,
                 parent_size: 40,
                 new_size: 40,
             },
             SplitStep {
-                parent: PaneId::from("%1"),
+                parent: vec![PaneId::from("%1")],
                 new_pane: PaneId::from("%2"),
                 side_by_side: false,
                 parent_size: 12,
@@ -93,18 +93,91 @@ fn non_even_three_way_split_keeps_proportions() {
         split_steps(&layout),
         vec![
             SplitStep {
-                parent: PaneId::from("%0"),
+                parent: vec![PaneId::from("%0")],
                 new_pane: PaneId::from("%1"),
                 side_by_side: true,
                 parent_size: 30,
                 new_size: 20,
             },
             SplitStep {
-                parent: PaneId::from("%1"),
+                parent: vec![PaneId::from("%1")],
                 new_pane: PaneId::from("%2"),
                 side_by_side: true,
                 parent_size: 20,
                 new_size: 39,
+            },
+        ]
+    );
+}
+
+#[test]
+fn nested_first_outer_child_splits_beside_the_subtree() {
+    let layout =
+        parse_window_layout("80x24,0,0{40x24,0,0[40x12,0,0,0,40x11,40,13,1],39x24,41,0,2}")
+            .unwrap();
+    assert_eq!(
+        layout.pane_ids(),
+        vec![PaneId::from("%0"), PaneId::from("%1"), PaneId::from("%2")]
+    );
+    assert_eq!(
+        split_steps(&layout),
+        vec![
+            SplitStep {
+                parent: vec![PaneId::from("%0")],
+                new_pane: PaneId::from("%1"),
+                side_by_side: false,
+                parent_size: 12,
+                new_size: 11,
+            },
+            SplitStep {
+                parent: vec![PaneId::from("%0"), PaneId::from("%1")],
+                new_pane: PaneId::from("%2"),
+                side_by_side: true,
+                parent_size: 40,
+                new_size: 39,
+            },
+        ]
+    );
+}
+
+#[test]
+fn nested_middle_outer_child_splits_beside_the_subtree() {
+    let layout = parse_window_layout(
+        "80x24,0,0{20x24,0,0,0,40x24,21,0[40x12,21,0,1,40x11,21,13,2],19x24,62,0,3}",
+    )
+    .unwrap();
+    assert_eq!(
+        layout.pane_ids(),
+        vec![
+            PaneId::from("%0"),
+            PaneId::from("%1"),
+            PaneId::from("%2"),
+            PaneId::from("%3"),
+        ]
+    );
+    assert_eq!(
+        split_steps(&layout),
+        vec![
+            SplitStep {
+                parent: vec![PaneId::from("%0")],
+                new_pane: PaneId::from("%1"),
+                side_by_side: true,
+                parent_size: 20,
+                new_size: 40,
+            },
+            SplitStep {
+                parent: vec![PaneId::from("%1")],
+                new_pane: PaneId::from("%2"),
+                side_by_side: false,
+                parent_size: 12,
+                new_size: 11,
+            },
+            SplitStep {
+                parent: vec![PaneId::from("%1"), PaneId::from("%2")],
+                new_pane: PaneId::from("%3"),
+                side_by_side: true,
+                parent_size: 40,
+                new_size: 19,
             },
         ]
     );

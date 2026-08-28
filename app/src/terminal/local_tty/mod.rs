@@ -31,8 +31,14 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
         self.set_tmux_control_mode(active);
         #[cfg(not(feature = "remote_tty"))]
         {
-            use crate::terminal::tmux::bridge::TmuxRuntime;
-            if active && !self.is_tmux_presentation() && self.tmux_instance_id().is_none() {
+            use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+            if active
+                && !self.is_tmux_presentation()
+                && self
+                    .tmux_instance_id()
+                    .and_then(|id| TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)))
+                    .is_none()
+            {
                 let runtime = TmuxRuntime::new();
                 self.set_tmux_instance_id(Some(runtime.id().as_u64()));
             }

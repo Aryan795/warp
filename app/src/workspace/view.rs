@@ -12819,10 +12819,14 @@ impl Workspace {
                 .and_then(|id| TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)))
                 .or_else(|| self.tmux_runtime(ctx.window_id()))
             else {
+                if let Some(id) = instance_id {
+                    self.clear_gateway_tmux_instance_id(id, None, ctx);
+                }
                 return;
             };
             let presentation = runtime.presentation_window();
             let gateway = runtime.gateway_window();
+            let bound_id = runtime.id().as_u64();
             if let Some(presentation) = presentation {
                 let windows: Vec<_> = crate::workspace::WorkspaceRegistry::as_ref(ctx)
                     .all_workspaces(ctx)
@@ -12839,6 +12843,7 @@ impl Workspace {
                 ctx.windows().show_window_and_focus_app(gateway);
             }
             runtime.unregister();
+            self.clear_gateway_tmux_instance_id(bound_id, gateway, ctx);
         }
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
         {
@@ -12855,6 +12860,49 @@ impl Workspace {
                     ctx.close_window();
                 });
             }
+        }
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn clear_gateway_tmux_instance_id(
+        &self,
+        instance_id: u64,
+        gateway: Option<WindowId>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let current = ctx.window_id();
+        if gateway.is_none_or(|g| g == current) {
+            self.clear_local_gateway_tmux_instance_id(instance_id, ctx);
+            return;
+        }
+        let Some(gateway) = gateway else {
+            return;
+        };
+        let Some(workspace) = crate::workspace::WorkspaceRegistry::as_ref(ctx)
+            .all_workspaces(ctx)
+            .into_iter()
+            .find(|(window_id, _)| *window_id == gateway)
+            .map(|(_, workspace)| workspace)
+        else {
+            return;
+        };
+        workspace.update(ctx, |workspace, ctx| {
+            workspace.clear_local_gateway_tmux_instance_id(instance_id, ctx);
+        });
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn clear_local_gateway_tmux_instance_id(&self, instance_id: u64, ctx: &mut ViewContext<Self>) {
+        let Some(view) = self
+            .get_pane_group_view(self.active_tab_index)
+            .and_then(|pane_group| pane_group.as_ref(ctx).active_session_view(ctx))
+        else {
+            return;
+        };
+        let model = view.as_ref(ctx).model.clone();
+        let mut model = model.lock();
+        if !model.is_tmux_presentation() && model.tmux_instance_id() == Some(instance_id) {
+            model.set_tmux_instance_id(None);
         }
     }
 
@@ -13070,24 +13118,29 @@ impl Workspace {
                 {
                     continue;
                 }
-                let parent = pane_group.pane_id_for_tmux_pane(step.parent.as_str(), ctx);
+                let parent_leaves: Vec<_> = step
+                    .parent
+                    .iter()
+                    .filter_map(|id| pane_group.pane_id_for_tmux_pane(id.as_str(), ctx))
+                    .collect();
+                if parent_leaves.is_empty() {
+                    continue;
+                }
                 let direction = if step.side_by_side {
                     PaneGroupDirection::Right
                 } else {
                     PaneGroupDirection::Down
                 };
                 if let Some(new_pane) =
-                    pane_group.add_tmux_presentation_pane(direction, parent, ctx)
+                    pane_group.add_tmux_presentation_pane(direction, &parent_leaves, ctx)
                 {
                     pane_group.bind_tmux_pane(new_pane, step.new_pane.as_str(), ctx);
-                    if let Some(parent) = parent {
-                        pane_group.set_tmux_split_flex(
-                            parent,
-                            new_pane,
-                            step.parent_size as f32,
-                            step.new_size as f32,
-                        );
-                    }
+                    pane_group.set_tmux_split_flex(
+                        &parent_leaves,
+                        new_pane,
+                        step.parent_size as f32,
+                        step.new_size as f32,
+                    );
                 }
             }
             pane_group.reconcile_tmux_panes(&leaves, ctx);

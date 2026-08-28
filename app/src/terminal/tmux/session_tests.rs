@@ -130,6 +130,64 @@ fn control_mode_exit_keeps_instance_id_for_close() {
     assert!(model.take_tmux_close_presentation());
 }
 
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+#[test]
+fn enter_exit_close_enter_creates_and_binds_a_fresh_runtime() {
+    use warp_terminal::local_tty::event_loop::ActiveTerminal;
+
+    use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+
+    let mut model = TerminalModel::mock(None, None);
+    model.on_tmux_control_mode(true);
+    let first = model.tmux_instance_id().expect("runtime bound on enter");
+    assert!(TmuxRuntime::for_id(TmuxInstanceId::from_u64(first)).is_some());
+    assert!(model.take_tmux_open_presentation());
+
+    model.on_tmux_control_mode(false);
+    assert_eq!(model.tmux_instance_id(), Some(first));
+    assert!(model.take_tmux_close_presentation());
+
+    TmuxRuntime::for_id(TmuxInstanceId::from_u64(first))
+        .expect("runtime still registered for close")
+        .unregister();
+    model.set_tmux_instance_id(None);
+
+    model.on_tmux_control_mode(true);
+    let second = model.tmux_instance_id().expect("fresh runtime on re-enter");
+    assert_ne!(first, second);
+    assert!(TmuxRuntime::for_id(TmuxInstanceId::from_u64(second)).is_some());
+    TmuxRuntime::for_id(TmuxInstanceId::from_u64(second))
+        .unwrap()
+        .unregister();
+}
+
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+#[test]
+fn reenter_with_stale_instance_id_creates_a_fresh_runtime() {
+    use warp_terminal::local_tty::event_loop::ActiveTerminal;
+
+    use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+
+    let mut model = TerminalModel::mock(None, None);
+    model.on_tmux_control_mode(true);
+    let first = model.tmux_instance_id().expect("runtime bound on enter");
+    let _ = model.take_tmux_open_presentation();
+
+    model.on_tmux_control_mode(false);
+    assert_eq!(model.tmux_instance_id(), Some(first));
+    TmuxRuntime::for_id(TmuxInstanceId::from_u64(first))
+        .unwrap()
+        .unregister();
+
+    model.on_tmux_control_mode(true);
+    let second = model.tmux_instance_id().expect("fresh runtime on re-enter");
+    assert_ne!(first, second);
+    assert!(TmuxRuntime::for_id(TmuxInstanceId::from_u64(second)).is_some());
+    TmuxRuntime::for_id(TmuxInstanceId::from_u64(second))
+        .unwrap()
+        .unregister();
+}
+
 #[test]
 fn default_new_terminal_options_are_not_tmux_owned() {
     assert!(!NewTerminalOptions::default().tmux_presentation);
