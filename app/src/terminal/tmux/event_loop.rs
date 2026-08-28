@@ -213,14 +213,18 @@ where
             .unwrap();
 
         let mut events = mio::Events::with_capacity(1024);
-        let mut child_exited = false;
+        let mut shutdown = false;
 
         'event_loop: loop {
             events.clear();
             if let Err(err) = self.poll.poll(&mut events, None) {
                 match err.kind() {
                     ErrorKind::Interrupted => continue,
-                    _ => panic!("tmux control-mode event loop polling error: {err:?}"),
+                    _ => {
+                        log::error!("tmux control-mode event loop polling error: {err}");
+                        self.notify_abnormal_exit();
+                        break 'event_loop;
+                    }
                 }
             }
 
@@ -232,24 +236,23 @@ where
                             child_exited: exited,
                         } => {
                             if exited {
-                                notify_exit(&mut *self.terminal.lock());
-                                child_exited = true;
-                                self.event_listener.send_wakeup_event();
+                                self.notify_abnormal_exit();
+                            } else {
+                                shutdown = true;
                             }
                             break 'event_loop;
                         }
                     },
                     token if token == self.pty.child_event_token() => {
                         if let Some(local_tty::ChildEvent::Exited) = self.pty.next_child_event() {
-                            notify_exit(&mut *self.terminal.lock());
-                            child_exited = true;
-                            self.event_listener.send_wakeup_event();
+                            self.notify_abnormal_exit();
                             break 'event_loop;
                         }
                     }
                     token if token == self.pty.read_token() || token == self.pty.write_token() => {
                         if event.is_read_closed() || event.is_write_closed() {
-                            continue;
+                            self.notify_abnormal_exit();
+                            break 'event_loop;
                         }
                         if event.is_readable() {
                             can_read = true;
@@ -267,10 +270,8 @@ where
                     match self.pty_read(&mut state, &mut buf, &mut can_read) {
                         Ok(()) => {}
                         Err(err) => {
-                            if err.kind() == ErrorKind::Other {
-                                continue;
-                            }
                             log::error!("Error reading tmux control client: {err}");
+                            self.notify_abnormal_exit();
                             break 'event_loop;
                         }
                     }
@@ -278,14 +279,50 @@ where
                 if state.needs_write() && can_write {
                     if let Err(err) = self.pty_write(&mut state, &mut can_write) {
                         log::error!("Error writing tmux control client: {err}");
+                        self.notify_abnormal_exit();
                         break 'event_loop;
                     }
                 }
             }
         }
 
-        let _ = child_exited;
+        if shutdown {
+            self.flush_pending_writes(&mut state);
+        }
         let _ = self.pty.kill();
+    }
+
+    fn notify_abnormal_exit(&self) {
+        notify_exit(&mut *self.terminal.lock());
+        self.event_listener.send_wakeup_event();
+    }
+
+    fn flush_pending_writes(&mut self, state: &mut LoopState) {
+        if !state.needs_write() {
+            return;
+        }
+        let mut can_write = true;
+        if self.pty_write(state, &mut can_write).is_err() || !state.needs_write() {
+            return;
+        }
+        if !can_write {
+            let mut events = mio::Events::with_capacity(16);
+            if self
+                .poll
+                .poll(&mut events, Some(std::time::Duration::from_millis(100)))
+                .is_err()
+            {
+                return;
+            }
+            can_write = events.iter().any(|event| {
+                (event.token() == self.pty.write_token() || event.token() == self.pty.read_token())
+                    && event.is_writable()
+                    && !event.is_write_closed()
+            });
+        }
+        if can_write {
+            let _ = self.pty_write(state, &mut can_write);
+        }
     }
 
     fn drain_recv_channel(&mut self, state: &mut LoopState) -> ChannelResult {
@@ -437,3 +474,7 @@ where
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "event_loop_tests.rs"]
+mod tests;

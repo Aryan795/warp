@@ -36,8 +36,7 @@ use crate::terminal::{
     TerminalModel, TerminalView, terminal_manager,
 };
 
-/// Owns a Warp-managed tmux control-mode pane: local TerminalModel, control-client PTY, and
-/// a sender that translates pane writes into tmux commands.
+/// Owns the lifecycle of a Warp-managed tmux control-mode pane.
 pub struct TmuxTerminalManager {
     model: Arc<FairMutex<TerminalModel>>,
     event_loop_tx: TmuxControlSender,

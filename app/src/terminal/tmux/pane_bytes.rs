@@ -5,11 +5,9 @@ use crate::terminal::model::ansi;
 use crate::terminal::model::terminal_model::ExitReason;
 use crate::terminal::tmux::parser::{ControlEvent, ControlModeParser, PaneId};
 
-/// Feed control-mode (or journal) bytes into a local TerminalModel.
+/// Feed tmux `-CC` bytes into a local TerminalModel.
 ///
 /// Only decoded `%output` pane bytes reach the ANSI processor. Protocol chatter never does.
-/// The source of `bytes` is intentionally unspecified so a later `pipe-pane -O` spool can reuse
-/// this path.
 pub fn feed_control_bytes<H, W>(
     parser: &mut ControlModeParser,
     ansi_parser: &mut ansi::Processor,

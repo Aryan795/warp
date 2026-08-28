@@ -1,8 +1,7 @@
-//! Line-oriented tmux control-mode parser.
+//! Line-oriented tmux control-mode parser for `-CC` notifications.
 //!
-//! The byte source is intentionally unspecified so the same parser can consume live `%output`
-//! notifications or a later per-pane journal (`pipe-pane -O`) without changing the TerminalModel
-//! path.
+//! Raw `pipe-pane -O` journal bytes are not control-mode lines and must not be fed through this
+//! parser.
 
 /// DCS sequence tmux emits when a client enters control mode (`tmux -CC`).
 pub const CONTROL_MODE_DCS: &[u8] = b"\x1bP1000p";
