@@ -10,7 +10,7 @@ use parking_lot::FairMutex;
 use super::{ControlClientEventLoop, SharedControlState, TmuxControlSender};
 use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::local_tty::{ChildEvent, EventedPty, EventedReadWrite, mio_channel};
-use crate::terminal::tmux::protocol::kill_session_command;
+use crate::terminal::tmux::protocol::kill_server_command;
 use crate::terminal::writeable_pty::Message;
 use crate::terminal::writeable_pty::pty_controller::EventLoopSender as _;
 use crate::terminal::{SizeInfo, TerminalModel};
@@ -174,7 +174,7 @@ fn join_loop(handle: JoinHandle<()>) {
 }
 
 #[test]
-fn shutdown_writes_kill_session_before_stopping() {
+fn shutdown_writes_kill_server_before_stopping() {
     let harness = start_loop(None, None);
     harness
         .sender
@@ -182,7 +182,7 @@ fn shutdown_writes_kill_session_before_stopping() {
         .expect("send shutdown");
     join_loop(harness.handle);
     let written = harness.written.lock().expect("written lock").clone();
-    assert_eq!(written, kill_session_command().as_bytes());
+    assert_eq!(written, kill_server_command().as_bytes());
     assert!(!harness.model.lock().is_read_only());
 }
 

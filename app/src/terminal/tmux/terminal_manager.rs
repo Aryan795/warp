@@ -24,7 +24,8 @@ use crate::terminal::terminal_manager::BlockSpacing;
 use crate::terminal::tmux::event_loop::{SharedControlState, TmuxControlSender};
 use crate::terminal::tmux::gateway::spawn_control_client;
 use crate::terminal::tmux::protocol::{
-    fallback_supported_shell, pane_bootstrap_for_available_shell, pane_bootstrap_for_shell,
+    fallback_supported_shell, kill_dedicated_server, pane_bootstrap_for_available_shell,
+    pane_bootstrap_for_shell,
 };
 use crate::terminal::writeable_pty::pty_controller::EventLoopSender as _;
 use crate::terminal::writeable_pty::terminal_manager_util::{
@@ -41,6 +42,7 @@ pub struct TmuxTerminalManager {
     model: Arc<FairMutex<TerminalModel>>,
     event_loop_tx: TmuxControlSender,
     event_loop_handle: Option<JoinHandle<()>>,
+    socket: Option<std::path::PathBuf>,
     /// Kept alive so subscriptions between the surface and PTY writes are not dropped.
     #[allow(dead_code)]
     pty_controller: ModelHandle<PtyController<TmuxControlSender>>,
@@ -137,6 +139,7 @@ impl TmuxTerminalManager {
         });
 
         let mut event_loop_handle = None;
+        let mut socket = None;
         if let Some(bootstrap) = bootstrap {
             model.lock().register_session_id(bootstrap.session_id);
             model.lock().set_login_shell_spawned(bootstrap.shell_type);
@@ -156,6 +159,7 @@ impl TmuxTerminalManager {
             ) {
                 Ok(spawned) => {
                     event_loop_handle = Some(spawned.event_loop_handle);
+                    socket = Some(spawned.socket);
                     view.update(ctx, |view, ctx| {
                         view.on_shell_determined(ctx);
                     });
@@ -182,6 +186,7 @@ impl TmuxTerminalManager {
             model,
             event_loop_tx: control_sender,
             event_loop_handle,
+            socket,
             pty_controller,
         };
         let manager_model = ctx.add_model(|_ctx| {
@@ -200,6 +205,9 @@ impl Drop for TmuxTerminalManager {
         let _ = self.event_loop_tx.send(Message::Shutdown);
         if let Some(handle) = self.event_loop_handle.take() {
             let _ = handle.join();
+        }
+        if let Some(socket) = self.socket.take() {
+            kill_dedicated_server(&socket);
         }
     }
 }

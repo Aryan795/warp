@@ -130,8 +130,30 @@ pub fn refresh_client_command(columns: usize, rows: usize) -> String {
     format!("refresh-client -C {columns}x{rows}\n")
 }
 
-pub fn kill_session_command() -> &'static str {
-    "kill-session\n"
+/// Tear down the dedicated Warp tmux server. `kill-session` can leave that
+/// server process alive on this socket after the control client detaches.
+pub fn kill_server_command() -> &'static str {
+    "kill-server\n"
+}
+
+pub fn kill_server_argv(tmux_path: &Path, socket: &Path) -> Vec<OsString> {
+    vec![
+        tmux_path.as_os_str().to_owned(),
+        "-S".into(),
+        socket.as_os_str().to_owned(),
+        "kill-server".into(),
+    ]
+}
+
+/// Best-effort out-of-band teardown if the control-client write never lands.
+pub fn kill_dedicated_server(socket: &Path) {
+    if let Some(tmux_path) = resolve_tmux_binary() {
+        let argv = kill_server_argv(&tmux_path, socket);
+        let mut command = std::process::Command::new(&argv[0]);
+        command.args(&argv[1..]);
+        let _ = command.status();
+    }
+    let _ = std::fs::remove_file(socket);
 }
 
 /// Encode pane input as `send-keys -H` so arbitrary bytes never pass through tmux key-name parsing.

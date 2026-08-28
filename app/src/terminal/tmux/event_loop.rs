@@ -17,7 +17,7 @@ use crate::terminal::model::ansi;
 use crate::terminal::tmux::pane_bytes::{feed_control_bytes, notify_exit, sink_writer};
 use crate::terminal::tmux::parser::PaneId;
 use crate::terminal::tmux::protocol::{
-    kill_session_command, refresh_client_command, send_keys_commands, zsh_init_bytes,
+    kill_server_command, refresh_client_command, send_keys_commands, zsh_init_bytes,
 };
 use crate::terminal::writeable_pty::Message;
 use crate::terminal::writeable_pty::pty_controller::{EventLoopSendError, EventLoopSender};
@@ -86,7 +86,7 @@ impl EventLoopSender for TmuxControlSender {
             }
             Message::Shutdown => {
                 let _ = self.send_inner(Message::Input(Cow::Borrowed(
-                    kill_session_command().as_bytes(),
+                    kill_server_command().as_bytes(),
                 )));
                 self.send_inner(Message::Shutdown)
             }

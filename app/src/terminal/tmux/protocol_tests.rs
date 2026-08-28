@@ -4,14 +4,67 @@ use warp_core::SessionId;
 use warp_terminal::shell::ShellType;
 
 use super::{
-    PaneBootstrap, control_client_argv, pane_bootstrap_for_shell, refresh_client_command,
-    send_keys_commands, zsh_init_bytes,
+    PaneBootstrap, control_client_argv, kill_server_argv, kill_server_command,
+    pane_bootstrap_for_shell, refresh_client_command, send_keys_commands, zsh_init_bytes,
 };
 use crate::terminal::tmux::parser::PaneId;
 
 #[test]
 fn refresh_client_uses_columns_x_rows() {
     assert_eq!(refresh_client_command(80, 24), "refresh-client -C 80x24\n");
+}
+
+#[test]
+fn kill_server_argv_targets_dedicated_socket() {
+    assert_eq!(kill_server_command(), "kill-server\n");
+    let argv = kill_server_argv(
+        PathBuf::from("/usr/bin/tmux").as_path(),
+        PathBuf::from("/tmp/warp.sock").as_path(),
+    );
+    let argv: Vec<String> = argv
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        argv,
+        vec!["/usr/bin/tmux", "-S", "/tmp/warp.sock", "kill-server"]
+    );
+}
+
+#[test]
+fn kill_dedicated_server_terminates_tmux_on_socket() {
+    let Some(tmux_path) = super::resolve_tmux_binary() else {
+        return;
+    };
+    let socket =
+        std::env::temp_dir().join(format!("warp-tmux-kill-test-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&socket);
+    let started = std::process::Command::new(&tmux_path)
+        .args([
+            "-S",
+            socket.to_str().expect("socket utf8"),
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-s",
+            "warp-kill-test",
+        ])
+        .status()
+        .expect("spawn dedicated tmux server");
+    assert!(started.success());
+    let listed = std::process::Command::new(&tmux_path)
+        .args(["-S", socket.to_str().expect("socket utf8"), "list-sessions"])
+        .status()
+        .expect("list dedicated tmux sessions");
+    assert!(listed.success());
+    super::kill_dedicated_server(&socket);
+    let listed_after = std::process::Command::new(&tmux_path)
+        .args(["-S", socket.to_str().expect("socket utf8"), "list-sessions"])
+        .status()
+        .expect("list dedicated tmux sessions after kill");
+    assert!(!listed_after.success());
+    assert!(!socket.exists());
 }
 
 #[test]
