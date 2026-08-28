@@ -12906,14 +12906,31 @@ impl Workspace {
         }
     }
 
-    fn write_tmux_to_gateway(bytes: std::borrow::Cow<'static, [u8]>, ctx: &mut ViewContext<Self>) {
+    fn write_tmux_to_gateway(
+        bytes: std::borrow::Cow<'static, [u8]>,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(view) = Self::gateway_view_for_tmux_control_write(instance_id, ctx) {
+            view.update(ctx, |view, ctx| {
+                view.write_to_pty(bytes, ctx);
+            });
+        }
+    }
+
+    fn gateway_view_for_tmux_control_write(
+        instance_id: Option<u64>,
+        ctx: &AppContext,
+    ) -> Option<warpui::ViewHandle<crate::terminal::TerminalView>> {
+        let instance_id = instance_id?;
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-        let gateway_window =
-            crate::terminal::tmux::bridge::TmuxRuntime::for_presentation(ctx.window_id())
-                .and_then(|runtime| runtime.gateway_window());
+        let gateway_window = crate::terminal::tmux::bridge::TmuxRuntime::for_id(
+            crate::terminal::tmux::bridge::TmuxInstanceId::from_u64(instance_id),
+        )
+        .and_then(|runtime| runtime.gateway_window());
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
         let gateway_window: Option<WindowId> = None;
-        let gateway = crate::workspace::WorkspaceRegistry::as_ref(ctx)
+        crate::workspace::WorkspaceRegistry::as_ref(ctx)
             .all_workspaces(ctx)
             .into_iter()
             .find_map(|(window_id, workspace)| {
@@ -12922,20 +12939,24 @@ impl Workspace {
                 }
                 workspace.read(ctx, |workspace, ctx| {
                     workspace
-                        .active_tab_pane_group()
-                        .as_ref(ctx)
-                        .active_session_view(ctx)
+                        .get_pane_group_view(workspace.active_tab_index)
+                        .and_then(|pane_group| pane_group.as_ref(ctx).active_session_view(ctx))
                         .filter(|view| {
                             let model = view.as_ref(ctx).model.lock();
-                            model.is_tmux_control_mode() && !model.is_tmux_presentation()
+                            model.is_tmux_control_mode()
+                                && !model.is_tmux_presentation()
+                                && model.tmux_instance_id() == Some(instance_id)
                         })
                 })
-            });
-        if let Some(view) = gateway {
-            view.update(ctx, |view, ctx| {
-                view.write_to_pty(bytes, ctx);
-            });
-        }
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gateway_view_for_tmux_control_write_for_tests(
+        instance_id: Option<u64>,
+        ctx: &AppContext,
+    ) -> Option<warpui::ViewHandle<crate::terminal::TerminalView>> {
+        Self::gateway_view_for_tmux_control_write(instance_id, ctx)
     }
 
     fn presentation_workspace(
@@ -17106,8 +17127,8 @@ impl Workspace {
             pane_group::Event::CloseTmuxPresentationWindow { instance_id } => {
                 self.close_tmux_presentation_windows(*instance_id, ctx);
             }
-            pane_group::Event::TmuxControlWrite { bytes } => {
-                Self::write_tmux_to_gateway(bytes.clone(), ctx);
+            pane_group::Event::TmuxControlWrite { bytes, instance_id } => {
+                Self::write_tmux_to_gateway(bytes.clone(), *instance_id, ctx);
             }
             pane_group::Event::TmuxClientEvents(events) => {
                 self.apply_tmux_client_events(events, ctx);

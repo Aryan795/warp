@@ -257,11 +257,12 @@ fn get_minimum_pane_size(app: &AppContext) -> f32 {
     }
 }
 
-struct TmuxPresentationBinding {
+pub(crate) struct TmuxPresentationBinding {
     is_tmux: bool,
     is_presentation: bool,
     pane_id: Option<String>,
     split_target_pane: Option<String>,
+    instance_id: Option<u64>,
 }
 
 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
@@ -675,6 +676,7 @@ pub enum Event {
     },
     TmuxControlWrite {
         bytes: std::borrow::Cow<'static, [u8]>,
+        instance_id: Option<u64>,
     },
     TmuxClientEvents(Vec<crate::terminal::model::terminal_model::TmuxClientEvent>),
     OpenSuggestedAgentModeWorkflowModal {
@@ -4053,7 +4055,7 @@ impl PaneGroup {
         )
     }
 
-    fn tmux_presentation_binding(
+    pub(crate) fn tmux_presentation_binding(
         &self,
         pane_id: PaneId,
         ctx: &AppContext,
@@ -4065,6 +4067,7 @@ impl PaneGroup {
             is_presentation: model.is_tmux_presentation(),
             pane_id: model.tmux_pane_id().map(str::to_owned),
             split_target_pane: model.tmux_split_target_pane().map(str::to_owned),
+            instance_id: model.tmux_instance_id(),
         })
     }
 
@@ -4088,6 +4091,7 @@ impl PaneGroup {
                 side_by_side,
             )
             .into_bytes(),
+            binding.instance_id,
             ctx,
         );
         true
@@ -4098,9 +4102,15 @@ impl PaneGroup {
             .is_some_and(|binding| binding.is_tmux)
     }
 
-    fn write_tmux_command(&self, bytes: Vec<u8>, ctx: &mut ViewContext<Self>) {
+    fn write_tmux_command(
+        &self,
+        bytes: Vec<u8>,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
         ctx.emit(Event::TmuxControlWrite {
             bytes: bytes.into(),
+            instance_id,
         });
     }
 
@@ -4117,6 +4127,7 @@ impl PaneGroup {
                 crate::terminal::tmux::protocol::detach_client_command()
                     .as_bytes()
                     .to_vec(),
+                binding.instance_id,
                 ctx,
             );
         } else if let Some(tmux_pane) = binding.pane_id {
@@ -4125,6 +4136,7 @@ impl PaneGroup {
                     &crate::terminal::tmux::parser::PaneId::from(tmux_pane.as_str()),
                 )
                 .into_bytes(),
+                binding.instance_id,
                 ctx,
             );
         }
@@ -4146,6 +4158,7 @@ impl PaneGroup {
                 &crate::terminal::tmux::parser::PaneId::from(tmux_pane.as_str()),
             )
             .into_bytes(),
+            binding.instance_id,
             ctx,
         );
         true
@@ -4171,7 +4184,11 @@ impl PaneGroup {
             return;
         };
         let model = view.read(ctx, |view, _| view.model.clone());
-        model.lock().set_tmux_pane_id(Some(tmux_pane_id.to_owned()));
+        let instance_id = {
+            let mut locked = model.lock();
+            locked.set_tmux_pane_id(Some(tmux_pane_id.to_owned()));
+            locked.tmux_instance_id()
+        };
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         if let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), &model) {
             runtime.register_pane(tmux_pane_id, model);
@@ -4181,6 +4198,7 @@ impl PaneGroup {
                 &crate::terminal::tmux::parser::PaneId::from(tmux_pane_id),
             )
             .into_bytes(),
+            instance_id,
             ctx,
         );
     }

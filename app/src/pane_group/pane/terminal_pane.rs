@@ -1473,28 +1473,20 @@ fn handle_terminal_view_event(
             }
             #[cfg(all(unix, feature = "local_tty"))]
             Event::WriteBytesToPty { bytes } => {
-                if group
-                    .terminal_view_from_pane_id(terminal_pane_id, ctx)
-                    .is_some_and(|view| view.as_ref(ctx).model.lock().is_tmux_presentation())
+                if let Some(binding) = group.tmux_presentation_binding(pane_id, ctx)
+                    && binding.is_presentation
                 {
                     ctx.emit(pane_group::Event::TmuxControlWrite {
                         bytes: bytes.clone(),
+                        instance_id: binding.instance_id,
                     });
                 }
             }
             #[cfg(all(unix, feature = "local_tty"))]
             Event::Resize { size_update } => {
-                if let Some(tmux_pane) = group
-                    .terminal_view_from_pane_id(terminal_pane_id, ctx)
-                    .and_then(|view| {
-                        view.read(ctx, |view, _| {
-                            view.model
-                                .lock()
-                                .is_tmux_presentation()
-                                .then(|| view.model.lock().tmux_pane_id().map(str::to_owned))
-                                .flatten()
-                        })
-                    })
+                if let Some(binding) = group.tmux_presentation_binding(pane_id, ctx)
+                    && binding.is_presentation
+                    && let Some(tmux_pane) = binding.pane_id
                 {
                     let size = size_update.new_size();
                     ctx.emit(pane_group::Event::TmuxControlWrite {
@@ -1505,6 +1497,7 @@ fn handle_terminal_view_event(
                         )
                         .into_bytes()
                         .into(),
+                        instance_id: binding.instance_id,
                     });
                 }
             }

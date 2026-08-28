@@ -296,6 +296,78 @@ fn empty_workspace_new_session_is_not_tmux_owned() {
     });
 }
 
+fn configure_tmux_gateway(workspace: &ViewHandle<Workspace>, app: &mut App, instance_id: u64) {
+    workspace.update(app, |workspace, ctx| {
+        if workspace.tab_count() == 0 {
+            workspace.add_new_session_tab_with_default_mode(
+                NewSessionSource::Window,
+                None,
+                None,
+                None,
+                false,
+                ctx,
+            );
+        }
+        let view = workspace
+            .active_tab_pane_group()
+            .as_ref(ctx)
+            .active_session_view(ctx)
+            .expect("gateway has a terminal");
+        let model = view.as_ref(ctx).model.clone();
+        let mut model = model.lock();
+        model.set_tmux_control_mode(true);
+        let _ = model.take_tmux_open_presentation();
+        model.set_tmux_instance_id(Some(instance_id));
+    });
+}
+
+#[test]
+fn two_tmux_gateways_control_writes_reach_only_owning_runtime() {
+    let _tmux = FeatureFlag::TmuxControlPrototype.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let gateway_a = mock_workspace(&mut app);
+        let gateway_b = mock_workspace(&mut app);
+        configure_tmux_gateway(&gateway_a, &mut app, 11);
+        configure_tmux_gateway(&gateway_b, &mut app, 22);
+
+        let (id_a, id_b) = app.read(|ctx| {
+            let view_a = Workspace::gateway_view_for_tmux_control_write_for_tests(Some(11), ctx)
+                .expect("write for runtime 11 reaches gateway A");
+            let view_b = Workspace::gateway_view_for_tmux_control_write_for_tests(Some(22), ctx)
+                .expect("write for runtime 22 reaches gateway B");
+            assert_ne!(view_a.id(), view_b.id());
+            assert!(
+                Workspace::gateway_view_for_tmux_control_write_for_tests(None, ctx).is_none(),
+                "writes without an instance id must not fall back to another session"
+            );
+            assert!(
+                Workspace::gateway_view_for_tmux_control_write_for_tests(Some(99), ctx).is_none()
+            );
+            (view_a.id(), view_b.id())
+        });
+
+        gateway_a.read(&app, |workspace, ctx| {
+            let local = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("gateway A terminal")
+                .id();
+            assert_eq!(local, id_a);
+        });
+        gateway_b.read(&app, |workspace, ctx| {
+            let local = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("gateway B terminal")
+                .id();
+            assert_eq!(local, id_b);
+        });
+    });
+}
+
 #[test]
 fn test_open_new_window_for_team_reuses_existing_team_window() {
     App::test((), |mut app| async move {
