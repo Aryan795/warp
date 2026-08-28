@@ -13,10 +13,6 @@ impl SkillManager {
         Self {}
     }
 
-    pub fn set_cloud_environment(&mut self, _value: bool) {}
-
-    pub fn set_cloud_maa_listing(&mut self, _value: bool) {}
-
     pub fn get_skills_for_working_directory(
         &self,
         _working_directory: Option<&LocalOrRemotePath>,
