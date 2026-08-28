@@ -37,6 +37,10 @@ use crate::terminal::{
     TerminalModel, TerminalView, terminal_manager,
 };
 
+fn should_kill_dedicated_server(detach_type: DetachType) -> bool {
+    matches!(detach_type, DetachType::Closed)
+}
+
 /// Owns the lifecycle of a Warp-managed tmux control-mode pane.
 pub struct TmuxTerminalManager {
     model: Arc<FairMutex<TerminalModel>>,
@@ -217,14 +221,12 @@ impl TerminalManagerTrait for TmuxTerminalManager {
     }
 
     fn on_view_detached(&self, detach_type: DetachType, _app: &mut AppContext) {
-        match detach_type {
-            DetachType::Closed | DetachType::HiddenForClose => {
-                let _ = self.event_loop_tx.send(Message::Shutdown);
-                if let Some(socket) = self.socket.clone() {
-                    schedule_kill_dedicated_server(socket);
-                }
-            }
-            DetachType::Moved => {}
+        if !should_kill_dedicated_server(detach_type) {
+            return;
+        }
+        let _ = self.event_loop_tx.send(Message::Shutdown);
+        if let Some(socket) = self.socket.clone() {
+            schedule_kill_dedicated_server(socket);
         }
     }
 
@@ -236,3 +238,7 @@ impl TerminalManagerTrait for TmuxTerminalManager {
         self
     }
 }
+
+#[cfg(test)]
+#[path = "terminal_manager_tests.rs"]
+mod tests;

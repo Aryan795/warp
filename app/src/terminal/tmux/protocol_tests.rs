@@ -8,8 +8,9 @@ use warp_core::SessionId;
 use warp_terminal::shell::ShellType;
 
 use super::{
-    PaneBootstrap, control_client_argv, kill_server_argv, kill_server_command,
-    pane_bootstrap_for_shell, refresh_client_command, send_keys_commands, zsh_init_bytes,
+    PaneBootstrap, cleanup_unspawned_dedicated_files, control_client_argv, kill_server_argv,
+    kill_server_command, pane_bootstrap_for_shell, refresh_client_command,
+    register_dedicated_server, schedule_kill_dedicated_server, send_keys_commands, zsh_init_bytes,
 };
 use crate::terminal::tmux::parser::PaneId;
 
@@ -49,6 +50,35 @@ fn write_placeholder_socket() -> PathBuf {
     let socket = unique_temp_path("warp-tmux-kill-test.sock");
     std::fs::write(&socket, b"keep-me").expect("write placeholder socket");
     socket
+}
+
+fn write_placeholder_socket_and_config() -> (PathBuf, PathBuf) {
+    let socket = unique_temp_path("warp-tmux-stale").with_extension("sock");
+    let config = socket.with_extension("conf");
+    std::fs::write(&socket, b"keep-me").expect("write placeholder socket");
+    std::fs::write(&config, b"keep-me").expect("write placeholder config");
+    (socket, config)
+}
+
+fn wait_until(pred: impl Fn() -> bool, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if pred() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    pred()
+}
+
+#[cfg(unix)]
+fn chmod_script(script: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut permissions = std::fs::metadata(script)
+        .expect("script metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(script, permissions).expect("chmod script");
 }
 
 #[test]
@@ -111,18 +141,11 @@ fn kill_dedicated_server_removes_socket_when_no_server_is_running() {
     let script = unique_temp_path("warp-tmux-no-server.sh");
     std::fs::write(
         &script,
-        b"#!/bin/sh\necho 'error connecting to /tmp/missing (No such file or directory)' >&2\nexit 1\n",
+        b"#!/bin/sh\necho 'no server running on /tmp/missing' >&2\nexit 1\n",
     )
     .expect("write no-server script");
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut permissions = std::fs::metadata(&script)
-            .expect("no-server script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod no-server script");
-    }
+    chmod_script(&script);
     let socket = write_placeholder_socket();
     let config = socket.with_extension("conf");
     std::fs::write(&config, b"keep-me").expect("write placeholder config");
@@ -137,14 +160,7 @@ fn kill_dedicated_server_preserves_socket_when_kill_times_out() {
     let script = unique_temp_path("warp-tmux-hang-kill-server.sh");
     std::fs::write(&script, b"#!/bin/sh\nexec sleep 30\n").expect("write hang script");
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut permissions = std::fs::metadata(&script)
-            .expect("hang script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod hang script");
-    }
+    chmod_script(&script);
     let socket = write_placeholder_socket();
     let started = Instant::now();
     super::kill_dedicated_server_with(Some(&script), &socket, Duration::from_millis(80));
@@ -158,10 +174,37 @@ fn kill_dedicated_server_preserves_socket_when_kill_times_out() {
 fn schedule_kill_dedicated_server_does_not_block_caller() {
     let socket = write_placeholder_socket();
     let started = Instant::now();
-    super::schedule_kill_dedicated_server(socket.clone());
+    schedule_kill_dedicated_server(socket.clone());
     assert!(started.elapsed() < Duration::from_millis(200));
     std::thread::sleep(Duration::from_millis(50));
     let _ = std::fs::remove_file(&socket);
+}
+
+#[test]
+fn kill_dedicated_server_preserves_socket_on_permission_error() {
+    let script = unique_temp_path("warp-tmux-permission.sh");
+    std::fs::write(
+        &script,
+        b"#!/bin/sh\necho 'error connecting to /tmp/x (Permission denied)' >&2\nexit 1\n",
+    )
+    .expect("write permission script");
+    #[cfg(unix)]
+    chmod_script(&script);
+    let (socket, config) = write_placeholder_socket_and_config();
+    super::kill_dedicated_server_with(Some(&script), &socket, Duration::from_secs(1));
+    assert!(socket.exists());
+    assert!(config.exists());
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&config);
+    let _ = std::fs::remove_file(&script);
+}
+
+#[test]
+fn cleanup_unspawned_dedicated_files_removes_socket_and_config() {
+    let (socket, config) = write_placeholder_socket_and_config();
+    cleanup_unspawned_dedicated_files(&socket);
+    assert!(!socket.exists());
+    assert!(!config.exists());
 }
 
 #[cfg(unix)]
@@ -173,25 +216,51 @@ fn detached_kill_helper_unlinks_socket_and_config_when_server_is_gone() {
         b"#!/bin/sh\necho 'no server running on /tmp/missing' >&2\nexit 1\n",
     )
     .expect("write detached no-server script");
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut permissions = std::fs::metadata(&script)
-            .expect("detached no-server script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod detached no-server script");
-    }
-    let socket = write_placeholder_socket();
-    let config = socket.with_extension("conf");
-    std::fs::write(&config, b"keep-me").expect("write placeholder config");
+    chmod_script(&script);
+    let (socket, config) = write_placeholder_socket_and_config();
     super::spawn_detached_kill_helper(Some(&script), &socket);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && (socket.exists() || config.exists()) {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!socket.exists());
-    assert!(!config.exists());
+    assert!(wait_until(
+        || !socket.exists() && !config.exists(),
+        Duration::from_secs(3)
+    ));
     let _ = std::fs::remove_file(&script);
+}
+
+#[cfg(unix)]
+#[test]
+fn detached_kill_helper_times_out_hanging_tmux_and_keeps_files() {
+    let script = unique_temp_path("warp-tmux-hang-helper.sh");
+    std::fs::write(&script, b"#!/bin/sh\nexec sleep 30\n").expect("write hang helper");
+    chmod_script(&script);
+    let (socket, config) = write_placeholder_socket_and_config();
+    let started = Instant::now();
+    super::spawn_detached_kill_helper(Some(&script), &socket);
+    assert!(started.elapsed() < Duration::from_millis(200));
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert!(socket.exists());
+    assert!(config.exists());
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&config);
+    let _ = std::fs::remove_file(&script);
+}
+
+#[test]
+fn register_then_kill_does_not_accumulate_tracked_sockets() {
+    let _guard = super::registry_test_lock();
+    let before = super::registered_dedicated_server_count();
+    let sockets: Vec<_> = (0..3).map(|_| write_placeholder_socket()).collect();
+    for socket in &sockets {
+        register_dedicated_server(socket.clone());
+    }
+    assert_eq!(super::registered_dedicated_server_count(), before + 3);
+    for socket in &sockets {
+        schedule_kill_dedicated_server(socket.clone());
+    }
+    assert_eq!(super::registered_dedicated_server_count(), before);
+    for socket in sockets {
+        let _ = std::fs::remove_file(socket);
+    }
 }
 
 #[test]

@@ -18,8 +18,9 @@ use crate::terminal::local_tty::{Pty, PtyOptions, mio_channel};
 use crate::terminal::session_settings::SessionSettings;
 use crate::terminal::tmux::event_loop::{ControlClientEventLoop, SharedControlState};
 use crate::terminal::tmux::protocol::{
-    DEDICATED_TMUX_CONFIG, PaneBootstrap, control_client_argv, dedicated_config_path,
-    dedicated_socket_path, resolve_tmux_binary, spawn_parent_exit_reaper, tmux_shell_starter,
+    DEDICATED_TMUX_CONFIG, PaneBootstrap, cleanup_unspawned_dedicated_files, control_client_argv,
+    dedicated_config_path, dedicated_socket_path, register_dedicated_server, resolve_tmux_binary,
+    tmux_shell_starter,
 };
 use crate::terminal::writeable_pty::Message;
 
@@ -105,7 +106,13 @@ pub fn spawn_control_client(
     let hooks = ControlClientSpawnHooks {
         is_crash_reporting_enabled,
     };
-    let pty = Pty::new(options, &hooks, ctx).context("failed to spawn tmux control client")?;
+    let pty = match Pty::new(options, &hooks, ctx) {
+        Ok(pty) => pty,
+        Err(err) => {
+            cleanup_unspawned_dedicated_files(&socket);
+            return Err(err).context("failed to spawn tmux control client");
+        }
+    };
 
     let zsh_init = bootstrap
         .init_script
@@ -119,7 +126,7 @@ pub fn spawn_control_client(
         shared,
         zsh_init,
     );
-    spawn_parent_exit_reaper(socket.clone());
+    register_dedicated_server(socket.clone());
     Ok(SpawnedControlClient {
         event_loop_handle: event_loop.spawn(),
         socket,

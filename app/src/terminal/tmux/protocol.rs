@@ -1,11 +1,14 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use command::blocking::Command;
 use instant::Instant;
+use parking_lot::Mutex;
 use warp_core::SessionId;
 use warp_core::paths::cache_dir;
 use warp_terminal::bootstrap::{generate_session_id, init_shell_script_for_shell};
@@ -32,39 +35,65 @@ const DETACHED_KILL_BODY: &str = r#"
 tmux_bin=$1
 sock=$2
 conf=$3
-err=$("$tmux_bin" -S "$sock" kill-server 2>&1)
-status=$?
-if [ "$status" -eq 0 ] || printf '%s' "$err" | grep -E -q "no server running|error connecting to"
-then
-  rm -f "$sock" "$conf"
-  exit 0
-fi
-if ! "$tmux_bin" -S "$sock" list-sessions >/dev/null 2>&1
-then
-  rm -f "$sock" "$conf"
-fi
+errfile=${sock}.kill-err
+"$tmux_bin" -S "$sock" kill-server >"$errfile" 2>&1 &
+pid=$!
+n=0
+while [ "$n" -lt 20 ]; do
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid"
+    status=$?
+    err=$(cat "$errfile" 2>/dev/null)
+    rm -f "$errfile"
+    if [ "$status" -eq 0 ] || printf '%s' "$err" | grep -q "no server running"; then
+      rm -f "$sock" "$conf"
+    fi
+    exit 0
+  fi
+  sleep 0.1
+  n=$((n + 1))
+done
+kill "$pid" 2>/dev/null
+wait "$pid" 2>/dev/null
+rm -f "$errfile"
+exit 1
 "#;
 
 #[cfg(unix)]
-const PARENT_EXIT_REAPER_SCRIPT: &str = r#"
+const APP_EXIT_REAPER_SCRIPT: &str = r#"
 parent=$1
-tmux_bin=$2
-sock=$3
-conf=$4
+dir=$2
+tmux_bin=$3
 while kill -0 "$parent" 2>/dev/null; do
   sleep 0.1
 done
-err=$("$tmux_bin" -S "$sock" kill-server 2>&1)
-status=$?
-if [ "$status" -eq 0 ] || printf '%s' "$err" | grep -E -q "no server running|error connecting to"
-then
-  rm -f "$sock" "$conf"
-  exit 0
-fi
-if ! "$tmux_bin" -S "$sock" list-sessions >/dev/null 2>&1
-then
-  rm -f "$sock" "$conf"
-fi
+for sock in "$dir"/warp-*.sock; do
+  [ -e "$sock" ] || continue
+  conf=${sock%.sock}.conf
+  errfile=${sock}.kill-err
+  "$tmux_bin" -S "$sock" kill-server >"$errfile" 2>&1 &
+  pid=$!
+  n=0
+  while [ "$n" -lt 20 ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      status=$?
+      err=$(cat "$errfile" 2>/dev/null)
+      rm -f "$errfile"
+      if [ "$status" -eq 0 ] || printf '%s' "$err" | grep -q "no server running"; then
+        rm -f "$sock" "$conf"
+      fi
+      break
+    fi
+    sleep 0.1
+    n=$((n + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    rm -f "$errfile"
+  fi
+done
 "#;
 
 /// Bootstrap data for the Warp-managed pane process (not the control client).
@@ -222,8 +251,7 @@ impl std::fmt::Display for KillDedicatedServerError {
 }
 
 /// Out-of-band teardown if the control-client write never lands.
-/// Unlinks the socket only after `tmux kill-server` succeeds, so a failed kill
-/// cannot hide a still-running dedicated server.
+/// Unlinks files only after `tmux kill-server` succeeds or reports no server.
 pub fn kill_dedicated_server(socket: &Path) {
     kill_dedicated_server_with(
         resolve_tmux_binary().as_deref(),
@@ -244,6 +272,10 @@ fn kill_dedicated_server_with(tmux_path: Option<&Path>, socket: &Path, timeout: 
     }
 }
 
+pub fn cleanup_unspawned_dedicated_files(socket: &Path) {
+    remove_dedicated_server_files(socket);
+}
+
 fn remove_dedicated_server_files(socket: &Path) {
     for path in [socket, &socket.with_extension("conf")] {
         if let Err(err) = std::fs::remove_file(path)
@@ -254,11 +286,70 @@ fn remove_dedicated_server_files(socket: &Path) {
     }
 }
 
-fn server_already_gone(stderr: &str) -> bool {
-    stderr.contains("no server running") || stderr.contains("error connecting to")
+fn dedicated_server_dir() -> PathBuf {
+    cache_dir().join("tmux-control-prototype")
 }
 
+fn dedicated_sockets() -> &'static Mutex<HashSet<PathBuf>> {
+    static SOCKETS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    SOCKETS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn lock_dedicated_sockets() -> parking_lot::MutexGuard<'static, HashSet<PathBuf>> {
+    dedicated_sockets().lock()
+}
+
+fn app_exit_reaper_started() -> &'static Mutex<bool> {
+    static STARTED: OnceLock<Mutex<bool>> = OnceLock::new();
+    STARTED.get_or_init(|| Mutex::new(false))
+}
+
+/// Track a dedicated socket so last-tab app exit can still tear it down.
+pub fn register_dedicated_server(socket: PathBuf) {
+    lock_dedicated_sockets().insert(socket);
+    ensure_app_exit_reaper();
+}
+
+fn unregister_dedicated_server(socket: &Path) {
+    lock_dedicated_sockets().remove(socket);
+}
+
+/// Last-tab close on Linux quits the app without dropping pane managers.
+pub fn schedule_kill_registered_dedicated_servers() {
+    let sockets: Vec<PathBuf> = lock_dedicated_sockets().drain().collect();
+    for socket in sockets {
+        schedule_kill_dedicated_server(socket);
+    }
+}
+
+fn ensure_app_exit_reaper() {
+    #[cfg(unix)]
+    {
+        let mut started = app_exit_reaper_started().lock();
+        if *started {
+            return;
+        }
+        let Some(tmux_path) = resolve_tmux_binary() else {
+            return;
+        };
+        let dir = dedicated_server_dir();
+        let parent = std::process::id().to_string();
+        spawn_setsid_sh(
+            APP_EXIT_REAPER_SCRIPT,
+            "tmux-control-prototype-exit-reaper",
+            &[
+                std::ffi::OsStr::new(&parent),
+                dir.as_os_str(),
+                tmux_path.as_os_str(),
+            ],
+        );
+        *started = true;
+    }
+}
+
+/// Kill the dedicated server without blocking the caller.
 pub fn schedule_kill_dedicated_server(socket: PathBuf) {
+    unregister_dedicated_server(&socket);
     #[cfg(unix)]
     spawn_detached_kill_helper(resolve_tmux_binary().as_deref(), &socket);
     #[cfg(not(unix))]
@@ -293,49 +384,11 @@ fn spawn_detached_kill_helper(tmux_path: Option<&Path>, socket: &Path) {
             socket.as_os_str(),
             config.as_os_str(),
         ],
-        Some(socket),
-    );
-}
-
-/// Last-tab close calls `close_window` without detaching panes, so Drop may never run.
-pub fn spawn_parent_exit_reaper(socket: PathBuf) {
-    #[cfg(unix)]
-    spawn_parent_exit_reaper_unix(resolve_tmux_binary().as_deref(), &socket);
-    #[cfg(not(unix))]
-    let _ = socket;
-}
-
-#[cfg(unix)]
-fn spawn_parent_exit_reaper_unix(tmux_path: Option<&Path>, socket: &Path) {
-    let Some(tmux_path) = tmux_path else {
-        log::error!(
-            "leaving tmux socket {} in place: tmux binary not found",
-            socket.display()
-        );
-        return;
-    };
-    let config = socket.with_extension("conf");
-    let parent = std::process::id().to_string();
-    spawn_setsid_sh(
-        PARENT_EXIT_REAPER_SCRIPT,
-        "tmux-control-prototype-exit-reaper",
-        &[
-            std::ffi::OsStr::new(&parent),
-            tmux_path.as_os_str(),
-            socket.as_os_str(),
-            config.as_os_str(),
-        ],
-        None,
     );
 }
 
 #[cfg(unix)]
-fn spawn_setsid_sh(
-    script: &str,
-    arg0: &str,
-    args: &[&std::ffi::OsStr],
-    fallback_socket: Option<&Path>,
-) {
+fn spawn_setsid_sh(script: &str, arg0: &str, args: &[&std::ffi::OsStr]) {
     let mut command = Command::new("/bin/sh");
     command.arg("-c").arg(script).arg(arg0);
     for arg in args {
@@ -345,11 +398,12 @@ fn spawn_setsid_sh(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // SAFETY: setsid(2) is async-signal-safe and only creates a new session. pre_exec
-    // closures run between fork and exec in the child process.
+    // Last-tab Warp exit otherwise kills this helper with the UI process group.
     unsafe {
         command.pre_exec(|| {
-            libc::setsid();
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
             Ok(())
         });
     }
@@ -363,11 +417,23 @@ fn spawn_setsid_sh(
         }
         Err(err) => {
             log::error!("failed to spawn tmux kill-server helper: {err}");
-            if let Some(socket) = fallback_socket {
-                kill_dedicated_server(socket);
-            }
         }
     }
+}
+
+fn server_already_gone(stderr: &str) -> bool {
+    stderr.contains("no server running")
+}
+
+#[cfg(test)]
+fn registry_test_lock() -> parking_lot::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock()
+}
+
+#[cfg(test)]
+fn registered_dedicated_server_count() -> usize {
+    lock_dedicated_sockets().len()
 }
 
 fn try_kill_dedicated_server(
