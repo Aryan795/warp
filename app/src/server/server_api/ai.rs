@@ -1540,6 +1540,9 @@ pub trait AIClient: 'static + Send + Sync {
         run_id: &str,
     ) -> anyhow::Result<serde_json::Value, anyhow::Error>;
 
+    /// Fetch the raw third-party harness transcript for a run.
+    async fn get_run_transcript(&self, run_id: &str) -> anyhow::Result<String, anyhow::Error>;
+
     /// Generates AI copy for code-review flows: commit messages at dialog-open
     /// time and PR titles / bodies at confirm time. `output_type` in the
     /// request picks which of the three the server returns.
@@ -3016,6 +3019,13 @@ impl AIClient for ServerApi {
             .get_public_api(&format!("agent/runs/{run_id}/conversation"))
             .await?;
         Ok(response)
+    }
+
+    async fn get_run_transcript(&self, run_id: &str) -> anyhow::Result<String, anyhow::Error> {
+        let response = self
+            .get_public_api_response(&format!("agent/runs/{run_id}/transcript"))
+            .await?;
+        Ok(response.text().await?)
     }
 
     async fn generate_code_review_content(

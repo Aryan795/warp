@@ -1,13 +1,17 @@
 //! Unit tests for ambient agent CLI argument mapping and message helpers.
 use chrono::{TimeZone, Utc};
+use futures::executor::block_on;
 use warp_cli::SortOrderArg;
 use warp_cli::json_filter::JsonOutput;
 use warp_cli::task::{
     ArtifactTypeArg, ExecutionLocationArg, ListTasksArgs, RunSortByArg, RunSourceArg, RunStateArg,
 };
+use warp_server_client::HttpStatusError;
 
 use super::*;
-use crate::server::server_api::ai::{ArtifactType, ExecutionLocation, RunSortBy, RunSortOrder};
+use crate::server::server_api::ai::{
+    ArtifactType, ExecutionLocation, MockAIClient, RunSortBy, RunSortOrder,
+};
 
 const TASK_ID: &str = "00000000-0000-0000-0000-000000000001";
 const OTHER_TASK_ID: &str = "00000000-0000-0000-0000-000000000002";
@@ -218,4 +222,150 @@ fn task_id_from_oz_run_id_env_rejects_invalid_value() {
     unsafe { std::env::remove_var(warp_cli::OZ_RUN_ID_ENV) };
 
     assert!(err.to_string().contains("Invalid OZ_RUN_ID"));
+}
+
+const RUN_ID: &str = "run-123";
+const CONVERSATION_ID: &str = "conv-123";
+const UNSUPPORTED_BODY: &str = r#"{
+  "type": "https://docs.warp.dev/errors/operation_not_supported",
+  "title": "normalized conversations are only supported for Warp-native transcripts",
+  "status": 422,
+  "error": "normalized conversations are only supported for Warp-native transcripts",
+  "retryable": false
+}"#;
+
+fn http_error(status: u16, body: &str) -> anyhow::Error {
+    anyhow::Error::new(HttpStatusError {
+        status,
+        body: body.to_string(),
+    })
+    .context("API request failed")
+}
+
+#[test]
+fn run_conversation_prints_normalized_json_for_native_runs() {
+    let conversation = serde_json::json!({
+        "conversation_id": CONVERSATION_ID,
+        "steps": []
+    });
+    let expected = serde_json::to_string_pretty(&conversation).unwrap();
+    let mut client = MockAIClient::new();
+    client
+        .expect_get_run_conversation()
+        .times(1)
+        .returning(move |_| Ok(conversation.clone()));
+
+    let output = block_on(load_run_conversation_output(&client, RUN_ID)).unwrap();
+
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn run_conversation_falls_back_to_raw_transcript_on_unsupported_harness() {
+    let transcript = serde_json::json!({"sessionId": "claude-session", "events": []});
+    let expected = serde_json::to_string_pretty(&transcript).unwrap();
+    let mut client = MockAIClient::new();
+    client
+        .expect_get_run_conversation()
+        .times(1)
+        .returning(|_| Err(http_error(422, UNSUPPORTED_BODY)));
+    client
+        .expect_get_run_transcript()
+        .times(1)
+        .returning(move |_| Ok(transcript.to_string()));
+
+    let output = block_on(load_run_conversation_output(&client, RUN_ID)).unwrap();
+
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn run_conversation_does_not_fallback_on_unrelated_errors() {
+    let mut client = MockAIClient::new();
+    client
+        .expect_get_run_conversation()
+        .times(1)
+        .returning(|_| Err(http_error(404, r#"{"error":"conversation not found"}"#)));
+
+    let err = block_on(load_run_conversation_output(&client, RUN_ID)).unwrap_err();
+
+    assert!(err.to_string().contains("API request failed"));
+    assert_eq!(
+        err.chain()
+            .find_map(|cause| cause.downcast_ref::<HttpStatusError>())
+            .map(|status_error| status_error.status),
+        Some(404)
+    );
+}
+
+#[test]
+fn run_conversation_missing_raw_transcript_is_not_found() {
+    let mut client = MockAIClient::new();
+    client
+        .expect_get_run_conversation()
+        .times(1)
+        .returning(|_| Err(http_error(422, UNSUPPORTED_BODY)));
+    client.expect_get_run_transcript().times(1).returning(|_| {
+        Err(http_error(
+            404,
+            r#"{"error":"no transcript path in manifest"}"#,
+        ))
+    });
+
+    let err = block_on(load_run_conversation_output(&client, RUN_ID)).unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        format!("Raw transcript not found for run {RUN_ID}")
+    );
+}
+
+#[test]
+fn public_conversation_points_third_party_runs_at_run_get() {
+    let mut client = MockAIClient::new();
+    client
+        .expect_get_public_conversation()
+        .times(1)
+        .returning(|_| Err(http_error(422, UNSUPPORTED_BODY)));
+
+    let err = block_on(load_public_conversation_output(&client, CONVERSATION_ID)).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("oz run get <run_id> --conversation")
+    );
+}
+
+#[test]
+fn public_conversation_prints_normalized_json_for_native_conversations() {
+    let conversation = serde_json::json!({
+        "conversation_id": CONVERSATION_ID,
+        "steps": []
+    });
+    let expected = serde_json::to_string_pretty(&conversation).unwrap();
+    let mut client = MockAIClient::new();
+    client
+        .expect_get_public_conversation()
+        .times(1)
+        .returning(move |_| Ok(conversation.clone()));
+
+    let output = block_on(load_public_conversation_output(&client, CONVERSATION_ID)).unwrap();
+
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn unsupported_detection_requires_422_and_operation_not_supported() {
+    assert!(is_normalized_conversation_unsupported(&http_error(
+        422,
+        UNSUPPORTED_BODY
+    )));
+    assert!(!is_normalized_conversation_unsupported(&http_error(
+        422,
+        r#"{"error":"some other validation failure"}"#
+    )));
+    assert!(!is_normalized_conversation_unsupported(&http_error(
+        401,
+        UNSUPPORTED_BODY
+    )));
 }
