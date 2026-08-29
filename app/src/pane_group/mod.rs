@@ -6442,9 +6442,7 @@ impl PaneGroup {
         (terminal_view, terminal_manager)
     }
 
-    /// Creates a loading terminal view with MockTerminalManager in loading state.
-    /// This is used by both `new_for_conversation_transcript_viewer_loading` and `create_loading_terminal_pane`.
-    fn create_loading_terminal_manager_and_view(
+    fn create_mock_terminal_manager_and_view(
         resources: TerminalViewResources,
         view_bounds_size: Vector2F,
         window_id: WindowId,
@@ -6466,10 +6464,27 @@ impl PaneGroup {
             window_id,
             ctx,
         );
-        let terminal_manager = terminal_init.manager;
-        let terminal_view = terminal_init.view;
+        (terminal_init.view, terminal_init.manager)
+    }
 
-        // Set the conversation transcript viewer status to Loading
+    /// Creates a loading terminal view with MockTerminalManager in loading state.
+    /// This is used by both `new_for_conversation_transcript_viewer_loading` and `create_loading_terminal_pane`.
+    fn create_loading_terminal_manager_and_view(
+        resources: TerminalViewResources,
+        view_bounds_size: Vector2F,
+        window_id: WindowId,
+        ctx: &mut ViewContext<Self>,
+    ) -> (
+        ViewHandle<TerminalView>,
+        ModelHandle<Box<dyn TerminalManager>>,
+    ) {
+        let (terminal_view, terminal_manager) = Self::create_mock_terminal_manager_and_view(
+            resources,
+            view_bounds_size,
+            window_id,
+            ctx,
+        );
+
         terminal_manager.update(ctx, |terminal_manager, _ctx| {
             terminal_manager
                 .model()

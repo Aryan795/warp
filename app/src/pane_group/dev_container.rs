@@ -37,8 +37,7 @@ impl PaneGroup {
             });
         }
 
-        let pane_id =
-            self.add_loading_conversation_pane(Direction::Right, Some(originating_pane_id), ctx);
+        let pane_id = self.add_dev_container_build_pane(originating_pane_id, ctx);
         if !self.has_pane(pane_id) {
             let window_id = ctx.window_id();
             ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
@@ -76,6 +75,44 @@ impl PaneGroup {
                 });
             }
         }
+    }
+
+    // Conversation loading panes set Loading, which replaces the block list with a spinner. This
+    // pane streams into that block list, so it must start without that status.
+    fn add_dev_container_build_pane(
+        &mut self,
+        originating_pane_id: PaneId,
+        ctx: &mut ViewContext<Self>,
+    ) -> PaneId {
+        let uuid = uuid::Uuid::new_v4();
+        let resources = TerminalViewResources {
+            tips_completed: self.tips_completed.clone(),
+            server_api: self.server_api.clone(),
+            model_event_sender: self.model_event_sender.clone(),
+        };
+        let view_bounds = Self::estimated_view_bounds(ctx);
+        let (terminal_view, terminal_manager) = Self::create_mock_terminal_manager_and_view(
+            resources,
+            view_bounds.size(),
+            ctx.window_id(),
+            ctx,
+        );
+        let pane_data = TerminalPane::new(
+            uuid.as_bytes().to_vec(),
+            terminal_manager,
+            terminal_view,
+            self.model_event_sender.clone(),
+            ctx,
+        );
+        let pane_id: PaneId = pane_data.terminal_pane_id().into();
+        let _ = self.add_pane(
+            Direction::Right,
+            Some(originating_pane_id),
+            Box::new(pane_data),
+            true,
+            ctx,
+        );
+        pane_id
     }
 
     #[allow(clippy::too_many_arguments)]

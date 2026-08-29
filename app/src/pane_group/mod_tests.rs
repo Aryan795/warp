@@ -4046,6 +4046,94 @@ fn devcontainer_build_opens_focused_right_split() {
 
 #[cfg(feature = "local_tty")]
 #[test]
+fn devcontainer_build_pane_renders_streamed_output() {
+    use warp_terminal::model::ansi::Processor;
+    use warpui::View;
+    use warpui::elements::Element;
+
+    use crate::terminal::view::dev_container::operation::DevContainerBuildPhase;
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        pane_group.update(&mut app, |panes, ctx| {
+            let (_, build_pane) = start_mocked_dev_container_build(panes, ctx);
+            let build_view = panes
+                .terminal_view_from_pane_id(build_pane, ctx)
+                .expect("build view");
+
+            build_view.update(ctx, |view, _ctx| {
+                let mut model = view.model.lock();
+                assert!(
+                    !model.is_loading_conversation_transcript(),
+                    "build pane must not stay in conversation Loading status"
+                );
+                let mut processor = Processor::new();
+                processor.parse_bytes(&mut *model, b"step-one\r\n", &mut std::io::sink());
+            });
+
+            let rendered_text = build_view
+                .as_ref(ctx)
+                .render(ctx)
+                .debug_text_content()
+                .unwrap_or_default();
+            assert!(
+                !rendered_text.contains("Loading session..."),
+                "streamed build output must not be masked by the conversation spinner, got \
+                 {rendered_text:?}"
+            );
+            let output = build_view
+                .as_ref(ctx)
+                .model
+                .lock()
+                .block_list()
+                .active_block()
+                .output_grid()
+                .contents_to_string(false, None);
+            assert!(
+                output.contains("step-one"),
+                "streamed marker missing from displayed grid: {output:?}"
+            );
+
+            build_view.update(ctx, |view, ctx| {
+                view.fail_dev_container_build_for_test(
+                    DevContainerBuildPhase::Build,
+                    "boom".to_owned(),
+                    ctx,
+                );
+            });
+            let failed_text = build_view
+                .as_ref(ctx)
+                .render(ctx)
+                .debug_text_content()
+                .unwrap_or_default();
+            assert!(
+                !failed_text.contains("Loading session..."),
+                "failed build body must keep the log grid visible, got {failed_text:?}"
+            );
+            assert!(
+                build_view
+                    .as_ref(ctx)
+                    .dev_container_shows_retry_and_close(ctx)
+            );
+            let retained = build_view
+                .as_ref(ctx)
+                .model
+                .lock()
+                .block_list()
+                .active_block()
+                .output_grid()
+                .contents_to_string(false, None);
+            assert!(
+                retained.contains("step-one"),
+                "failed surface must retain already-rendered logs: {retained:?}"
+            );
+        });
+    });
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
 fn devcontainer_build_replaces_loading_pane_permanently() {
     use crate::terminal::view::dev_container::operation::DevContainerBuildPhase;
 
