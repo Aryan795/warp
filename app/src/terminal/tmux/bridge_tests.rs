@@ -15,7 +15,8 @@ fn runtime() -> TmuxRuntime {
             pending_bootstrap_panes: VecDeque::new(),
             bootstrap_stage_count: HashMap::new(),
             bootstrap_script_count: HashMap::new(),
-            bootstrap_generation: HashMap::new(),
+            next_generation: 0,
+            tracked_control_pane: None,
             early_init_shell: HashMap::new(),
             shell_type: None,
             app_bind_deadline: None,
@@ -388,4 +389,69 @@ fn early_init_shell_before_bind_reaches_ready_once() {
     assert_eq!(runtime.bootstrap_script_count("%0"), 1);
     assert!(runtime.complete_if_early_init_shell("%0").is_none());
     assert!(runtime.begin_pane_bootstrap("%0", sid(3)).is_none());
+}
+
+#[test]
+fn queued_timeout_failed_uses_presentation_unready() {
+    assert_eq!(
+        TmuxRuntime::bootstrap_failed_client_event(),
+        TmuxClientEvent::PresentationUnready
+    );
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    let claim = runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
+    let BootstrapTimeoutResult::Retry(retry) =
+        runtime.handle_bootstrap_timeout("%0", claim.generation)
+    else {
+        panic!("expected retry");
+    };
+    assert!(matches!(
+        runtime.handle_bootstrap_timeout("%0", retry.generation),
+        BootstrapTimeoutResult::Failed
+    ));
+    assert_eq!(
+        TmuxRuntime::bootstrap_failed_client_event(),
+        TmuxClientEvent::PresentationUnready
+    );
+}
+
+#[test]
+fn tracked_control_pane_hands_off_early_init_shell() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    assert_eq!(runtime.tracked_control_pane().as_deref(), Some("%0"));
+    runtime.note_early_init_shell("%0", sid(4));
+    runtime.begin_pane_bootstrap("%0", sid(4)).expect("stage");
+    assert_eq!(
+        runtime.complete_if_early_init_shell("%0"),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%0"));
+}
+
+#[test]
+fn unbind_retires_session_id_from_presentation_model() {
+    use crate::terminal::model::ansi::Handler as _;
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    let model = Arc::new(FairMutex::new(crate::terminal::TerminalModel::mock(
+        None, None,
+    )));
+    runtime.register_pane("%0", model.clone());
+    let claim = runtime.begin_pane_bootstrap("%0", sid(5)).expect("stage");
+    runtime.apply_claim_session(&claim);
+    assert!(model.lock().is_registered_session(sid(5)));
+    assert_eq!(runtime.on_init_shell("%0", sid(5)), Some(ShellType::Zsh));
+    runtime.unregister_pane("%0");
+    assert!(!model.lock().is_registered_session(sid(5)));
+    let reused = Arc::new(FairMutex::new(crate::terminal::TerminalModel::mock(
+        None, None,
+    )));
+    runtime.register_pane("%0", reused.clone());
+    let next = runtime.begin_pane_bootstrap("%0", sid(6)).expect("restage");
+    runtime.apply_claim_session(&next);
+    assert!(!reused.lock().is_registered_session(sid(5)));
+    assert!(reused.lock().is_registered_session(sid(6)));
+    assert!(runtime.on_init_shell("%0", sid(5)).is_none());
 }

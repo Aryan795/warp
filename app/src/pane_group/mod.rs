@@ -4378,7 +4378,7 @@ impl PaneGroup {
             }
             BootstrapTimeoutResult::Failed => {
                 ctx.emit(Event::TmuxClientEvents(vec![
-                    crate::terminal::model::terminal_model::TmuxClientEvent::PresentationUnready,
+                    TmuxRuntime::bootstrap_failed_client_event(),
                 ]));
             }
             BootstrapTimeoutResult::Stale => {}

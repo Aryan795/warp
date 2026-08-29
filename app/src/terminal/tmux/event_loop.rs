@@ -472,11 +472,17 @@ where
         }
         *stored = Some(pane_id.clone());
         drop(stored);
+        if let Some(instance_id) = instance_id {
+            use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+            if let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(instance_id)) {
+                runtime.note_tracked_control_pane(pane_id.as_str());
+            }
+        }
 
         let pending = std::mem::take(&mut *shared.pending_pane_writes.lock());
         let pending_control = std::mem::take(&mut *shared.pending_control.lock());
         let mut to_send = Vec::new();
-        let _ = (zsh_init.take(), instance_id);
+        let _ = zsh_init.take();
         to_send.extend(pending.into_iter().map(|bytes| bytes.into_owned()));
         for bytes in to_send {
             for command in send_keys_commands(&pane_id, &bytes) {

@@ -80,9 +80,11 @@ enum PaneBootstrapEntry {
     },
     Ready {
         generation: u64,
+        session_id: SessionId,
     },
     Failed {
         generation: u64,
+        session_id: SessionId,
     },
 }
 
@@ -98,7 +100,8 @@ struct Inner {
     pending_bootstrap_panes: VecDeque<String>,
     bootstrap_stage_count: HashMap<String, u32>,
     bootstrap_script_count: HashMap<String, u32>,
-    bootstrap_generation: HashMap<String, u64>,
+    next_generation: u64,
+    tracked_control_pane: Option<String>,
     early_init_shell: HashMap<String, SessionId>,
     shell_type: Option<ShellType>,
     app_bind_deadline: Option<instant::Instant>,
@@ -148,7 +151,8 @@ impl TmuxRuntime {
                 pending_bootstrap_panes: VecDeque::new(),
                 bootstrap_stage_count: HashMap::new(),
                 bootstrap_script_count: HashMap::new(),
-                bootstrap_generation: HashMap::new(),
+                next_generation: 0,
+                tracked_control_pane: None,
                 early_init_shell: HashMap::new(),
                 shell_type: None,
                 app_bind_deadline: None,
@@ -227,7 +231,8 @@ impl TmuxRuntime {
         inner.pending_bootstrap_panes.clear();
         inner.bootstrap_stage_count.clear();
         inner.bootstrap_script_count.clear();
-        inner.bootstrap_generation.clear();
+        inner.next_generation = 0;
+        inner.tracked_control_pane = None;
         inner.early_init_shell.clear();
         inner.app_bind_deadline = None;
         inner.presentation_ready = false;
@@ -261,8 +266,18 @@ impl TmuxRuntime {
 
     pub fn unregister_pane(&self, pane_id: &str) {
         let mut inner = self.inner.lock();
+        let session_id = match inner.pane_bootstrap.remove(pane_id) {
+            Some(PaneBootstrapEntry::Staging { session_id, .. })
+            | Some(PaneBootstrapEntry::Ready { session_id, .. })
+            | Some(PaneBootstrapEntry::Failed { session_id, .. }) => Some(session_id),
+            None => None,
+        };
+        if let Some(session_id) = session_id
+            && let Some(sink) = inner.panes.get(pane_id)
+        {
+            sink.model.lock().unregister_session_id(session_id);
+        }
         inner.panes.remove(pane_id);
-        inner.pane_bootstrap.remove(pane_id);
         inner.pending_bootstrap_panes.retain(|id| id != pane_id);
         inner.bootstrap_stage_count.remove(pane_id);
         inner.bootstrap_script_count.remove(pane_id);
@@ -429,7 +444,7 @@ impl TmuxRuntime {
             }
             return None;
         };
-        let generation = Self::next_bootstrap_generation(inner, pane_id);
+        let generation = Self::next_bootstrap_generation(inner);
         inner.pane_bootstrap.insert(
             pane_id.to_owned(),
             PaneBootstrapEntry::Staging {
@@ -452,15 +467,12 @@ impl TmuxRuntime {
         })
     }
 
-    fn next_bootstrap_generation(inner: &mut Inner, pane_id: &str) -> u64 {
-        let next = inner
-            .bootstrap_generation
-            .get(pane_id)
-            .copied()
-            .unwrap_or(0)
-            + 1;
-        inner.bootstrap_generation.insert(pane_id.to_owned(), next);
-        next
+    fn next_bootstrap_generation(inner: &mut Inner) -> u64 {
+        inner.next_generation = inner.next_generation.wrapping_add(1);
+        if inner.next_generation == 0 {
+            inner.next_generation = 1;
+        }
+        inner.next_generation
     }
 
     pub fn on_init_shell(&self, pane_id: &str, session_id: SessionId) -> Option<ShellType> {
@@ -477,9 +489,13 @@ impl TmuxRuntime {
             return None;
         }
         let shell_type = inner.shell_type?;
-        inner
-            .pane_bootstrap
-            .insert(pane_id.to_owned(), PaneBootstrapEntry::Ready { generation });
+        inner.pane_bootstrap.insert(
+            pane_id.to_owned(),
+            PaneBootstrapEntry::Ready {
+                generation,
+                session_id,
+            },
+        );
         *inner
             .bootstrap_script_count
             .entry(pane_id.to_owned())
@@ -523,11 +539,14 @@ impl TmuxRuntime {
         if retried {
             inner.pane_bootstrap.insert(
                 pane_id.to_owned(),
-                PaneBootstrapEntry::Failed { generation },
+                PaneBootstrapEntry::Failed {
+                    generation,
+                    session_id,
+                },
             );
             return BootstrapTimeoutResult::Failed;
         }
-        let next_gen = Self::next_bootstrap_generation(&mut inner, pane_id);
+        let next_gen = Self::next_bootstrap_generation(&mut inner);
         let next_session = warp_terminal::bootstrap::generate_session_id();
         inner.pane_bootstrap.insert(
             pane_id.to_owned(),
@@ -589,17 +608,31 @@ impl TmuxRuntime {
     pub fn pane_bootstrap_generation(&self, pane_id: &str) -> Option<u64> {
         match self.inner.lock().pane_bootstrap.get(pane_id) {
             Some(PaneBootstrapEntry::Staging { generation, .. })
-            | Some(PaneBootstrapEntry::Ready { generation })
-            | Some(PaneBootstrapEntry::Failed { generation }) => Some(*generation),
+            | Some(PaneBootstrapEntry::Ready { generation, .. })
+            | Some(PaneBootstrapEntry::Failed { generation, .. }) => Some(*generation),
             None => None,
         }
     }
 
     pub fn pane_bootstrap_session_id(&self, pane_id: &str) -> Option<SessionId> {
         match self.inner.lock().pane_bootstrap.get(pane_id) {
-            Some(PaneBootstrapEntry::Staging { session_id, .. }) => Some(*session_id),
-            _ => None,
+            Some(PaneBootstrapEntry::Staging { session_id, .. })
+            | Some(PaneBootstrapEntry::Ready { session_id, .. })
+            | Some(PaneBootstrapEntry::Failed { session_id, .. }) => Some(*session_id),
+            None => None,
         }
+    }
+
+    pub fn note_tracked_control_pane(&self, pane_id: &str) {
+        self.inner.lock().tracked_control_pane = Some(pane_id.to_owned());
+    }
+
+    pub fn tracked_control_pane(&self) -> Option<String> {
+        self.inner.lock().tracked_control_pane.clone()
+    }
+
+    pub fn bootstrap_failed_client_event() -> TmuxClientEvent {
+        TmuxClientEvent::PresentationUnready
     }
 
     pub fn note_early_init_shell(&self, pane_id: &str, session_id: SessionId) {

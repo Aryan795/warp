@@ -12923,7 +12923,9 @@ impl TerminalView {
                         if let Some(id) = self.model.lock().tmux_instance_id()
                             && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
                         {
-                            if let Some(pane) = self.model.lock().tmux_pane_id() {
+                            if let Some(pane) = runtime.tracked_control_pane() {
+                                runtime.note_early_init_shell(&pane, session_id);
+                            } else if let Some(pane) = self.model.lock().tmux_pane_id() {
                                 runtime.note_early_init_shell(pane, session_id);
                             }
                             runtime.note_shell_type(shell_type);
@@ -15354,7 +15356,12 @@ impl TerminalView {
                 }
                 Self::schedule_tmux_pane_bootstrap_timeout(&runtime, &pane_id, ctx);
             }
-            BootstrapTimeoutResult::Failed | BootstrapTimeoutResult::Stale => {}
+            BootstrapTimeoutResult::Failed => {
+                ctx.emit(Event::TmuxClientEvents(vec![
+                    TmuxRuntime::bootstrap_failed_client_event(),
+                ]));
+            }
+            BootstrapTimeoutResult::Stale => {}
         }
     }
 
