@@ -685,12 +685,24 @@ fn split_stage_complete_strips_osc_and_returns_session() {
     let mut bytes = b"keep-before".to_vec();
     bytes.extend_from_slice(b"\x1b]9278;t;42\x07");
     bytes.extend_from_slice(b"keep-after");
-    let (kept, session) = split_stage_complete(&bytes);
+    let (kept, sessions) = split_stage_complete(&bytes);
     assert_eq!(kept, b"keep-beforekeep-after");
-    assert_eq!(session, Some(SessionId::from(42)));
-    let (kept, session) = split_stage_complete(b"no-ack-here");
+    assert_eq!(sessions, vec![SessionId::from(42)]);
+    let (kept, sessions) = split_stage_complete(b"no-ack-here");
     assert_eq!(kept, b"no-ack-here");
-    assert_eq!(session, None);
+    assert!(sessions.is_empty());
+}
+
+#[test]
+fn split_stage_complete_strips_coalesced_stale_and_live_markers() {
+    let mut bytes = b"pre".to_vec();
+    bytes.extend_from_slice(b"\x1b]9278;t;1\x07");
+    bytes.extend_from_slice(b"mid");
+    bytes.extend_from_slice(b"\x1b]9278;t;2\x07");
+    bytes.extend_from_slice(b"post");
+    let (kept, sessions) = split_stage_complete(&bytes);
+    assert_eq!(kept, b"premidpost");
+    assert_eq!(sessions, vec![SessionId::from(1), SessionId::from(2)]);
 }
 
 #[test]
@@ -1367,10 +1379,16 @@ fn in_band_init_saves_and_restores_history_around_injected_body() {
     assert!(text[history_off..stty].contains("HISTCONTROL=ignorespace"));
     assert!(text[..history_off + setup_newline].contains("__warp_histfile"));
     assert!(stty < restore);
+    let ack = text.find("9278;t;3").expect("stage ack");
+    assert!(stty < ack);
+    assert!(ack < restore);
     let zsh = in_band_init_bytes(ShellType::Zsh, SessionId::from(3)).expect("zsh init");
     let zsh_text = String::from_utf8_lossy(&zsh);
     let push = zsh_text.find("fc -p /dev/null").expect("zsh hist push");
     let pop = zsh_text.rfind("fc -P").expect("zsh hist pop");
+    let zsh_ack = zsh_text.find("9278;t;3").expect("zsh stage ack");
+    assert!(push < zsh_ack);
+    assert!(zsh_ack < pop);
     assert!(push < pop);
     let fish = in_band_init_bytes(ShellType::Fish, SessionId::from(3)).expect("fish init");
     let fish_text = String::from_utf8_lossy(&fish);
@@ -1380,6 +1398,9 @@ fn in_band_init_saves_and_restores_history_around_injected_body() {
     let enable = fish_text
         .rfind("set -g fish_history $__warp_fish_history")
         .expect("fish hist restore");
+    let fish_ack = fish_text.find("9278;t;3").expect("fish stage ack");
+    assert!(disable < fish_ack);
+    assert!(fish_ack < enable);
     assert!(disable < enable);
 }
 
@@ -1451,7 +1472,9 @@ fn bash_in_band_init_does_not_persist_bootstrap_in_history() {
     std::fs::create_dir_all(&home).expect("bash hist home");
     let hist = home.join(".bash_history");
     std::fs::write(&hist, b"").expect("create bash histfile");
-    let init = super::history_isolated_script(ShellType::Bash, b":");
+    let Some(init) = in_band_init_bytes(ShellType::Bash, SessionId::from(3)) else {
+        return;
+    };
     let script = write_history_script(&init, "echo warp-tmux-user-cmd", "history -a");
     if !run_shell_history_script(
         bash,
@@ -1465,7 +1488,9 @@ fn bash_in_band_init_does_not_persist_bootstrap_in_history() {
     let entries = ShellType::Bash.parse_history(&hist_bytes);
     let joined = entries.join("\n");
     assert!(
-        !joined.contains("__warp_histfile") && !joined.contains("InitShell"),
+        !joined.contains("__warp_histfile")
+            && !joined.contains("InitShell")
+            && !joined.contains("9278;t;"),
         "bootstrap must not be saved: {joined:?}"
     );
     assert!(
@@ -1485,7 +1510,9 @@ fn zsh_in_band_init_does_not_persist_bootstrap_in_history() {
     std::fs::create_dir_all(&home).expect("zsh hist home");
     let hist = home.join(".zsh_history");
     std::fs::write(&hist, b"").expect("create zsh histfile");
-    let init_bytes = super::history_isolated_script(ShellType::Zsh, b":");
+    let Some(init_bytes) = in_band_init_bytes(ShellType::Zsh, SessionId::from(3)) else {
+        return;
+    };
     let init = String::from_utf8_lossy(&init_bytes);
     let command = format!(
         "HISTFILE={hist};SAVEHIST=1000;{init}echo warp-tmux-user-cmd;fc -W",
@@ -1510,7 +1537,9 @@ fn zsh_in_band_init_does_not_persist_bootstrap_in_history() {
     let entries = ShellType::Zsh.parse_history(&hist_bytes);
     let joined = entries.join("\n");
     assert!(
-        !joined.contains("__warp_histfile") && !joined.contains("InitShell"),
+        !joined.contains("__warp_histfile")
+            && !joined.contains("InitShell")
+            && !joined.contains("9278;t;"),
         "bootstrap must not be saved: {joined:?}"
     );
     assert!(
@@ -1529,7 +1558,9 @@ fn fish_in_band_init_does_not_persist_bootstrap_in_history() {
     let home = unique_temp_path("warp-tmux-fish-hist-home");
     let data = home.join("data");
     std::fs::create_dir_all(data.join("fish")).expect("fish hist home");
-    let init_bytes = super::history_isolated_script(ShellType::Fish, b"true");
+    let Some(init_bytes) = in_band_init_bytes(ShellType::Fish, SessionId::from(3)) else {
+        return;
+    };
     let init = String::from_utf8_lossy(&init_bytes);
     let command = format!("{init}; echo warp-tmux-user-cmd; history save");
     let status = Command::new(&fish)
@@ -1550,7 +1581,9 @@ fn fish_in_band_init_does_not_persist_bootstrap_in_history() {
     let entries = ShellType::Fish.parse_history(&hist_bytes);
     let joined = entries.join("\n");
     assert!(
-        !joined.contains("__warp_fish_history") && !joined.contains("InitShell"),
+        !joined.contains("__warp_fish_history")
+            && !joined.contains("InitShell")
+            && !joined.contains("9278;t;"),
         "bootstrap must not be saved: {joined:?}"
     );
     assert!(

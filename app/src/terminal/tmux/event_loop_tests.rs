@@ -447,6 +447,10 @@ fn init_shell_before_remaining_staged_bytes_does_not_write_bootstrap() {
     runtime
         .begin_pane_bootstrap("%0", SessionId::from(7))
         .expect("stage");
+    assert_eq!(
+        runtime.note_early_init_shell("%0", SessionId::from(7), ShellType::Zsh),
+        Some(ShellType::Zsh)
+    );
 
     let script = "WARP_ZSH_INIT_MARKER".to_owned();
     let mut ack = STAGE_COMPLETE_OSC_PREFIX.to_vec();

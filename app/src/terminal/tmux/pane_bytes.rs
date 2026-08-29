@@ -31,7 +31,7 @@ where
             }
             ControlEvent::PaneOutput { pane_id, bytes } => {
                 let (bytes, complete) = split_stage_complete(&bytes);
-                if let Some(session_id) = complete {
+                for session_id in complete {
                     result.stage_complete.push((pane_id.clone(), session_id));
                 }
                 if tracked_pane.as_ref() == Some(&pane_id) {

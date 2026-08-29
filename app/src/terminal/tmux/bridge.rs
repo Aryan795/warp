@@ -71,6 +71,8 @@ pub enum BootstrapTimeoutResult {
     Stale,
 }
 
+type ReadyComplete = (ShellType, SessionId, Option<Arc<FairMutex<TerminalModel>>>);
+
 enum PaneBootstrapEntry {
     Staging {
         generation: u64,
@@ -330,7 +332,7 @@ impl TmuxRuntime {
 
     pub fn deliver_output(&self, pane_id: &PaneId, bytes: &[u8]) -> bool {
         let (bytes, stage_complete) = super::protocol::split_stage_complete(bytes);
-        if let Some(session_id) = stage_complete {
+        for session_id in stage_complete {
             let _ = self.on_stage_complete(pane_id.as_str(), session_id);
         }
         let bytes = bytes.as_slice();
@@ -514,7 +516,9 @@ impl TmuxRuntime {
             .bootstrap_stage_count
             .entry(pane_id.to_owned())
             .or_insert(0) += 1;
-        if inner.early_stage_complete.get(pane_id).copied() == Some(session_id) {
+        if Self::init_shell_accepted(inner, pane_id, session_id)
+            && inner.early_stage_complete.get(pane_id).copied() == Some(session_id)
+        {
             let _ = Self::complete_staging_to_ready_locked(inner, pane_id, session_id, true);
         }
         Some(PaneBootstrapClaim {
@@ -535,48 +539,107 @@ impl TmuxRuntime {
     }
 
     pub fn on_init_shell(&self, pane_id: &str, session_id: SessionId) -> Option<ShellType> {
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
         match inner.pane_bootstrap.get(pane_id) {
             Some(PaneBootstrapEntry::Staging {
                 session_id: staged_id,
                 ..
-            }) if *staged_id == session_id => inner.shell_type,
-            _ => None,
+            }) if *staged_id == session_id => {}
+            _ => return None,
         }
+        let shell_type = inner.shell_type?;
+        let incarnation = inner.control_incarnation;
+        inner
+            .early_init_shell
+            .insert(pane_id.to_owned(), (session_id, incarnation));
+        let completed = Self::complete_if_init_and_ack_locked(&mut inner, pane_id, session_id);
+        drop(inner);
+        if let Some((_, staged_id, model)) = completed {
+            Self::apply_ready_session(model, staged_id, session_id);
+        }
+        Some(shell_type)
     }
 
     pub fn on_stage_complete(&self, pane_id: &str, session_id: SessionId) -> Option<ShellType> {
         let (shell_type, staged_id, model) = {
             let mut inner = self.inner.lock();
-            let matches_expected = inner.tracked_control_pane.as_deref() == Some(pane_id)
-                && inner.tracked_expected_session == Some(session_id);
-            if !inner.pane_bootstrap.contains_key(pane_id) {
-                if matches_expected {
-                    inner
-                        .early_stage_complete
-                        .insert(pane_id.to_owned(), session_id);
-                }
+            if !Self::ack_is_admissible(&inner, pane_id, session_id) {
                 return None;
             }
-            let (shell_type, staged_id) = Self::complete_staging_to_ready_locked(
-                &mut inner,
-                pane_id,
-                session_id,
-                matches_expected,
-            )?;
-            inner.early_init_shell.remove(pane_id);
-            inner.early_stage_complete.remove(pane_id);
-            let model = inner.panes.get(pane_id).map(|sink| sink.model.clone());
-            (shell_type, staged_id, model)
+            inner
+                .early_stage_complete
+                .insert(pane_id.to_owned(), session_id);
+            Self::complete_if_init_and_ack_locked(&mut inner, pane_id, session_id)?
         };
-        if let Some(model) = model {
-            let mut locked = model.lock();
-            if staged_id != session_id {
-                locked.unregister_session_id(staged_id);
-            }
-            locked.register_session_id(session_id);
-        }
+        Self::apply_ready_session(model, staged_id, session_id);
         Some(shell_type)
+    }
+
+    fn ack_is_admissible(inner: &Inner, pane_id: &str, session_id: SessionId) -> bool {
+        let matches_expected = inner.tracked_control_pane.as_deref() == Some(pane_id)
+            && inner.tracked_expected_session == Some(session_id);
+        if !inner.pane_bootstrap.contains_key(pane_id) {
+            return matches_expected;
+        }
+        let matches_staging = matches!(
+            inner.pane_bootstrap.get(pane_id),
+            Some(PaneBootstrapEntry::Staging {
+                session_id: staged_id,
+                ..
+            }) if *staged_id == session_id
+        );
+        matches_expected || matches_staging
+    }
+
+    fn init_shell_accepted(inner: &Inner, pane_id: &str, session_id: SessionId) -> bool {
+        inner
+            .early_init_shell
+            .get(pane_id)
+            .is_some_and(|(sid, inc)| *sid == session_id && *inc == inner.control_incarnation)
+    }
+
+    fn complete_if_init_and_ack_locked(
+        inner: &mut Inner,
+        pane_id: &str,
+        session_id: SessionId,
+    ) -> Option<ReadyComplete> {
+        if !Self::init_shell_accepted(inner, pane_id, session_id) {
+            return None;
+        }
+        if inner.early_stage_complete.get(pane_id).copied() != Some(session_id) {
+            return None;
+        }
+        let matches_expected = inner.tracked_control_pane.as_deref() == Some(pane_id)
+            && inner.tracked_expected_session == Some(session_id);
+        let retried = matches!(
+            inner.pane_bootstrap.get(pane_id),
+            Some(PaneBootstrapEntry::Staging { retried: true, .. })
+        );
+        let (shell_type, staged_id) = Self::complete_staging_to_ready_locked(
+            inner,
+            pane_id,
+            session_id,
+            matches_expected && !retried,
+        )?;
+        inner.early_init_shell.remove(pane_id);
+        inner.early_stage_complete.remove(pane_id);
+        let model = inner.panes.get(pane_id).map(|sink| sink.model.clone());
+        Some((shell_type, staged_id, model))
+    }
+
+    fn apply_ready_session(
+        model: Option<Arc<FairMutex<TerminalModel>>>,
+        staged_id: SessionId,
+        session_id: SessionId,
+    ) {
+        let Some(model) = model else {
+            return;
+        };
+        let mut locked = model.lock();
+        if staged_id != session_id {
+            locked.unregister_session_id(staged_id);
+        }
+        locked.register_session_id(session_id);
     }
 
     fn complete_staging_to_ready_locked(
@@ -653,6 +716,8 @@ impl TmuxRuntime {
         let Some(shell_type) = inner.shell_type else {
             return BootstrapTimeoutResult::Stale;
         };
+        inner.tracked_expected_session = None;
+        inner.early_stage_complete.remove(pane_id);
         if retried {
             inner.pane_bootstrap.insert(
                 pane_id.to_owned(),
@@ -742,6 +807,9 @@ impl TmuxRuntime {
 
     pub fn note_tracked_control_pane(&self, pane_id: &str) {
         let mut inner = self.inner.lock();
+        if inner.tracked_control_pane.as_deref() == Some(pane_id) {
+            return;
+        }
         inner.tracked_control_pane = Some(pane_id.to_owned());
         inner.control_incarnation = next_control_incarnation(inner.control_incarnation);
     }
@@ -797,6 +865,11 @@ impl TmuxRuntime {
         inner
             .early_init_shell
             .insert(pane_id.to_owned(), (session_id, incarnation));
+        let completed = Self::complete_if_init_and_ack_locked(&mut inner, pane_id, session_id);
+        drop(inner);
+        if let Some((_, staged_id, model)) = completed {
+            Self::apply_ready_session(model, staged_id, session_id);
+        }
         Some(shell_type)
     }
 
