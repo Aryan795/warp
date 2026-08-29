@@ -379,7 +379,6 @@ fn replace_task_credentials(credentials: &[GitCredential]) -> Result<Vec<GitCred
     Ok(credentials)
 }
 
-
 fn select_credential_for_repository<'a>(
     credentials: &'a [GitCredential],
     repo: &SourceRepo,
@@ -940,10 +939,7 @@ fn apply_refreshed_credentials_at_home(
     replace_task_credentials(&credentials)?;
     if !credentials.is_empty() {
         std::fs::create_dir_all(task_credentials_root(home)).with_context(|| {
-            format!(
-                "Failed to create {}",
-                task_credentials_root(home).display()
-            )
+            format!("Failed to create {}", task_credentials_root(home).display())
         })?;
         install_glab_wrapper(&credentials, home)?;
     }
@@ -1017,8 +1013,7 @@ fn ipv6_address_is_public(address: Ipv6Addr) -> bool {
     }
     let segments = address.segments();
     (segments[0] & 0xe000) == 0x2000
-        && !(segments[0] == 0x2001
-            && (segments[1] <= 0x01ff || segments[1] == 0x0db8))
+        && !(segments[0] == 0x2001 && (segments[1] <= 0x01ff || segments[1] == 0x0db8))
         && segments[0] != 0x2002
         && !(segments[0] == 0x3fff && segments[1] & 0xf000 == 0)
 }
@@ -1060,9 +1055,7 @@ async fn resolve_public_addresses(
 }
 
 #[cfg(not(target_family = "wasm"))]
-async fn check_tcp_connectivity(
-    addresses: &[SocketAddr],
-) -> Result<(), GitLabPreflightError> {
+async fn check_tcp_connectivity(addresses: &[SocketAddr]) -> Result<(), GitLabPreflightError> {
     tokio::time::timeout(NETWORK_CONNECT_TIMEOUT, async {
         for address in addresses {
             if tokio::net::TcpStream::connect(address).await.is_ok() {
