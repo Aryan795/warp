@@ -668,6 +668,11 @@ fn zsh_pane_bootstrap_keeps_init_script_for_send_keys() {
     let init_at = text.find("InitShell").expect("InitShell");
     let ack_at = text.rfind("9278;t;").expect("stage-complete ack");
     assert!(init_at < ack_at);
+    assert_eq!(text.matches('\n').count(), 1);
+    assert!(
+        !text[..ack_at].contains('\n'),
+        "stage ack must run on the same line as init: {text}"
+    );
 }
 
 #[cfg(unix)]
@@ -721,7 +726,7 @@ while time.time() < deadline:
         saw_eof = True
         break
     out += chunk
-    if b"\x1bP$d" in out:
+    if b"\x1bP$d" in out and b"9278;t;" in out:
         saw_dcs = True
         break
 if saw_dcs:

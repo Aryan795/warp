@@ -724,7 +724,12 @@ pub const STAGE_COMPLETE_OSC_PREFIX: &[u8] = b"\x1b]9278;t;";
 
 pub fn zsh_init_bytes(init_script: &str, shell_type: ShellType, session_id: SessionId) -> Vec<u8> {
     let mut bytes = init_script.as_bytes().to_vec();
-    bytes.extend_from_slice(shell_type.execute_command_bytes());
+    while matches!(bytes.last(), Some(b'\n' | b';')) {
+        bytes.pop();
+    }
+    if !bytes.is_empty() {
+        bytes.push(b';');
+    }
     bytes.extend_from_slice(&stage_complete_script(shell_type, session_id));
     bytes
 }
