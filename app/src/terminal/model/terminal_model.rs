@@ -515,6 +515,7 @@ pub struct TerminalModel {
     tmux_events: Vec<TmuxClientEvent>,
     last_init_shell_type: Option<ShellType>,
     tmux_expected_session_id: Option<SessionId>,
+    tmux_retained_zsh_init: Option<String>,
 
     /// The shell type of the login shell for this session.
     shell_launch_state: ShellLaunchState,
@@ -1139,6 +1140,7 @@ impl TerminalModel {
             tmux_events: Vec::new(),
             last_init_shell_type: None,
             tmux_expected_session_id: None,
+            tmux_retained_zsh_init: None,
             env_var_collection_name: None,
             shell_launch_state: shell_state,
             obfuscate_secrets,
@@ -1567,6 +1569,8 @@ impl TerminalModel {
         } else if !active {
             self.tmux_focused_pane = None;
             self.tmux_open_presentation = false;
+            self.tmux_expected_session_id = None;
+            self.tmux_retained_zsh_init = None;
             if !self.tmux_presentation {
                 self.tmux_close_presentation = true;
             }
@@ -1616,6 +1620,18 @@ impl TerminalModel {
 
     pub fn set_tmux_expected_session_id(&mut self, session_id: Option<SessionId>) {
         self.tmux_expected_session_id = session_id;
+    }
+
+    pub fn take_tmux_expected_session_id(&mut self) -> Option<SessionId> {
+        self.tmux_expected_session_id.take()
+    }
+
+    pub fn set_tmux_retained_zsh_init(&mut self, init: Option<String>) {
+        self.tmux_retained_zsh_init = init;
+    }
+
+    pub fn take_tmux_retained_zsh_init(&mut self) -> Option<String> {
+        self.tmux_retained_zsh_init.take()
     }
 
     pub fn set_tmux_instance_id(&mut self, id: Option<u64>) {

@@ -51,8 +51,54 @@ pub fn is_managed_isolated_tmux_cc(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(trimmed) else {
         return false;
     };
-    text.contains(&format!("-L {WARP_CONTROL_SOCKET_NAME}"))
-        || text.contains(&format!("-L{WARP_CONTROL_SOCKET_NAME}"))
+    managed_socket_in_tmux_globals(&tokenize_tmux_cc_args(text.trim_end()))
+}
+
+fn tokenize_tmux_cc_args(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for ch in input.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => current.push(ch),
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn managed_socket_in_tmux_globals(tokens: &[String]) -> bool {
+    let compact = format!("-L{WARP_CONTROL_SOCKET_NAME}");
+    let mut i = 0;
+    if tokens.first().is_some_and(|token| token == "tmux") {
+        i = 1;
+    }
+    while i < tokens.len() {
+        let token = &tokens[i];
+        if token == "--" {
+            return false;
+        }
+        if token == &compact {
+            return true;
+        }
+        if token == "-L" {
+            return tokens
+                .get(i + 1)
+                .is_some_and(|value| value == WARP_CONTROL_SOCKET_NAME);
+        }
+        i += 1;
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

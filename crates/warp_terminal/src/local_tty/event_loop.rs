@@ -44,7 +44,9 @@ pub trait ActiveTerminal: ansi::Handler + Send {
     fn exit(&mut self, reason: ExitReason);
 
     fn on_tmux_control_mode(&mut self, _active: bool) {}
-    fn on_tmux_pane_output(&mut self, _pane_id: &PaneId, _bytes: &[u8]) {}
+    fn on_tmux_pane_output(&mut self, _pane_id: &PaneId, _bytes: &[u8]) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
     fn on_tmux_focus(&mut self, _pane_id: &PaneId) {}
     fn on_tmux_layout(
         &mut self,
@@ -219,7 +221,9 @@ fn apply_tmux_feed_items<M: ActiveTerminal, W: io::Write>(
                 }
             }
             TmuxFeedItem::PaneOutput { pane_id, bytes } => {
-                terminal.on_tmux_pane_output(&pane_id, &bytes);
+                for command in terminal.on_tmux_pane_output(&pane_id, &bytes) {
+                    state.write_list.push_back(Cow::Owned(command));
+                }
             }
             TmuxFeedItem::Focused(pane_id) => {
                 terminal.on_tmux_focus(&pane_id);

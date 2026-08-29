@@ -4231,6 +4231,12 @@ impl PaneGroup {
             locked.tmux_instance_id()
         };
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+        if let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), &model) {
+            for command in runtime.take_retained_init_send_keys(tmux_pane_id) {
+                self.write_tmux_command(command, instance_id, ctx);
+            }
+        }
+        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         self.start_tmux_pane_bootstrap(&model, tmux_pane_id, ctx);
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         if let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), &model) {

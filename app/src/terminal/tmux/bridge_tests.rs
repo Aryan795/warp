@@ -20,6 +20,7 @@ fn runtime() -> TmuxRuntime {
             control_incarnation: 0,
             tracked_expected_session: None,
             spawned_expected_session: None,
+            pending_retained_zsh_init: None,
             retained_zsh_init: None,
             early_init_shell: HashMap::new(),
             early_stage_complete: HashMap::new(),

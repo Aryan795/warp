@@ -10,7 +10,8 @@ use crate::terminal::tmux::protocol::pane_bootstrap_for_shell;
 
 #[test]
 fn in_place_command_attaches_existing_session_on_warp_socket() {
-    let (command, session_id) = in_place_tmux_cc_command("warp-host-1", 80, 24, ShellType::Zsh);
+    let (command, session_id, zsh_init) =
+        in_place_tmux_cc_command("warp-host-1", 80, 24, ShellType::Zsh);
     assert!(command.starts_with("tmux -CC -L warp-control-v1 new-session -A -s warp-host-1"));
     assert!(command.contains("-x 80"));
     assert!(command.contains("-y 24"));
@@ -18,16 +19,21 @@ fn in_place_command_attaches_existing_session_on_warp_socket() {
     assert!(command.contains("--no-rcs"));
     assert!(!command.contains(" -S "));
     assert_ne!(session_id.as_u64(), 0);
+    let zsh_init = zsh_init.expect("zsh no-rcs pane keeps retained init");
+    assert!(zsh_init.contains(&session_id.as_u64().to_string()));
+    assert!(zsh_init.contains("InitShell"));
 }
 
 #[test]
 fn attach_uses_dedicated_socket_not_the_default_server() {
-    let (command, session_id) = tmux_cc_shell_command("attach -t api", None, 80, 24, None).unwrap();
+    let (command, session_id, zsh_init) =
+        tmux_cc_shell_command("attach -t api", None, 80, 24, None).unwrap();
     assert_eq!(
         command,
         "tmux -CC -L warp-control-v1 attach-session -t api\n"
     );
     assert!(session_id.is_none());
+    assert!(zsh_init.is_none());
 }
 
 #[test]
@@ -60,13 +66,13 @@ fn user_socket_flags_are_rejected() {
         tmux_cc_shell_command("--socket=/tmp/foo attach", None, 80, 24, None),
         Err(TmuxCommandError::IsolatedSocketOverride)
     );
-    let (command, _) = tmux_cc_shell_command("attach -t api", None, 80, 24, None).unwrap();
+    let (command, _, _) = tmux_cc_shell_command("attach -t api", None, 80, 24, None).unwrap();
     assert!(command.contains("-L warp-control-v1"));
 }
 
 #[test]
 fn new_session_gets_size_and_quotes_unsafe_names() {
-    let (argv, session_id) = tmux_cc_argv(
+    let (argv, session_id, zsh_init) = tmux_cc_argv(
         &["new-session".into(), "-s".into(), "api prod".into()],
         "warp",
         120,
@@ -91,7 +97,8 @@ fn new_session_gets_size_and_quotes_unsafe_names() {
         ]
     );
     assert!(session_id.is_none());
-    let (command, _) =
+    assert!(zsh_init.is_none());
+    let (command, _, _) =
         tmux_cc_shell_command("new-session -s 'api prod'", None, 120, 40, None).unwrap();
     assert!(command.contains("-L warp-control-v1"));
     assert!(command.contains("'api prod'"));

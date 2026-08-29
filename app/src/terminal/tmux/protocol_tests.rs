@@ -682,8 +682,19 @@ fn in_place_pane_spawn_uses_path_name_and_no_rcs() {
     assert!(argv.iter().any(|arg| arg.contains("--no-rcs")));
     assert!(!argv[0].starts_with('/'));
     assert_ne!(session_id.as_u64(), 0);
+    let zsh = super::in_place_pane_spawn(ShellType::Zsh);
+    let init_script = zsh
+        .init_script
+        .expect("zsh no-rcs pane keeps retained init");
+    assert!(init_script.contains(&zsh.session_id.as_u64().to_string()));
+    assert!(init_script.contains("InitShell"));
     let (bash_argv, _) = in_place_pane_spawn_argv(ShellType::Bash);
     assert_eq!(bash_argv[0], "bash");
+    assert!(
+        super::in_place_pane_spawn(ShellType::Bash)
+            .init_script
+            .is_none()
+    );
 }
 
 #[cfg(unix)]
@@ -701,22 +712,15 @@ fn product_path_tmux_cc_no_rcs_pane_survives_init_ack_bootstrap_and_detach() {
     if !python.success() {
         return;
     }
-    let (mut argv, session_id) =
+    let (mut argv, session_id, zsh_init) =
         crate::terminal::tmux::transport::tmux_cc_argv(&[], "warp", 80, 24, Some(ShellType::Zsh))
             .expect("bare /tmux argv");
     let session_id = session_id.expect("bare /tmux always includes a pane spawn");
+    let zsh_init = zsh_init.expect("zsh no-rcs pane keeps retained init");
     argv[0] = tmux.display().to_string();
     argv.insert(1, "-f".to_owned());
     argv.insert(2, "/dev/null".to_owned());
-    let init = zsh_init_bytes(
-        &warp_terminal::bootstrap::raw_init_shell_script_for_shell(
-            ShellType::Zsh,
-            &crate::ASSETS,
-            session_id,
-        ),
-        ShellType::Zsh,
-        session_id,
-    );
+    let init = zsh_init_bytes(&zsh_init, ShellType::Zsh, session_id);
     let bootstrap_bytes = silent_bootstrap_bytes(ShellType::Zsh);
     let socket_name = warp_terminal::tmux::WARP_CONTROL_SOCKET_NAME;
     let home = unique_temp_path("warp-tmux-cc-home");

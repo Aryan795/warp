@@ -36,6 +36,21 @@ fn tmux_cc_start_is_detected() {
     assert!(!super::is_managed_isolated_tmux_cc(
         b"tmux -CC new-session -A -s warp\n"
     ));
+    assert!(!super::is_managed_isolated_tmux_cc(
+        b"tmux -CC -L warp-control-v1x new-session\n"
+    ));
+    assert!(!super::is_managed_isolated_tmux_cc(
+        b"tmux -CC -Lwarp-control-v1x new-session\n"
+    ));
+    assert!(!super::is_managed_isolated_tmux_cc(
+        b"tmux -CC -L xwarp-control-v1 new-session\n"
+    ));
+    assert!(!super::is_managed_isolated_tmux_cc(
+        b"tmux -CC -Lxwarp-control-v1 new-session\n"
+    ));
+    assert!(!super::is_managed_isolated_tmux_cc(
+        b"tmux -CC new-session -- 'tmux -CC -L warp-control-v1'\n"
+    ));
 }
 
 #[test]

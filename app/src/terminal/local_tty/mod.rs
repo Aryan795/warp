@@ -43,28 +43,41 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
                 if let Some(shell_type) = self.last_init_shell_type() {
                     runtime.set_authoritative_shell_type(shell_type);
                 }
-                if let Some(session_id) = self.tmux_expected_session_id() {
+                if let Some(session_id) = self.take_tmux_expected_session_id() {
                     runtime.set_spawned_expected_session(session_id);
+                    if let Some(script) = self.take_tmux_retained_zsh_init() {
+                        runtime.set_pending_retained_zsh_init(script, session_id);
+                    }
                 }
                 self.set_tmux_instance_id(Some(runtime.id().as_u64()));
             }
         }
     }
 
-    fn on_tmux_pane_output(&mut self, pane_id: &warp_terminal::tmux::PaneId, bytes: &[u8]) {
+    fn on_tmux_pane_output(
+        &mut self,
+        pane_id: &warp_terminal::tmux::PaneId,
+        bytes: &[u8],
+    ) -> Vec<Vec<u8>> {
         #[cfg(all(unix, not(feature = "remote_tty")))]
         {
             use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
-            if let Some(id) = self.tmux_instance_id()
-                && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
-                && !runtime.deliver_output(pane_id, bytes)
-            {
+            let Some(id) = self.tmux_instance_id() else {
+                return Vec::new();
+            };
+            let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)) else {
+                return Vec::new();
+            };
+            let writes = runtime.take_retained_init_send_keys(pane_id.as_str());
+            if !runtime.deliver_output(pane_id, bytes) {
                 self.on_tmux_presentation_unready();
             }
+            writes
         }
         #[cfg(not(all(unix, not(feature = "remote_tty"))))]
         {
             let _ = (pane_id, bytes);
+            Vec::new()
         }
     }
 

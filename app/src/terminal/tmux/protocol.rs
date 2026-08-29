@@ -155,9 +155,14 @@ pub fn pane_bootstrap_for_shell(shell_path: PathBuf, shell_type: ShellType) -> P
     }
 }
 
+/// PATH-based pane spawn for in-place `/tmux`, valid locally and on an already-remote shell.
+pub fn in_place_pane_spawn(shell_type: ShellType) -> PaneBootstrap {
+    pane_bootstrap_for_shell(PathBuf::from(shell_type.name()), shell_type)
+}
+
 /// PATH-based pane argv for in-place `/tmux`, valid locally and on an already-remote shell.
 pub fn in_place_pane_spawn_argv(shell_type: ShellType) -> (Vec<String>, SessionId) {
-    let bootstrap = pane_bootstrap_for_shell(PathBuf::from(shell_type.name()), shell_type);
+    let bootstrap = in_place_pane_spawn(shell_type);
     let argv = bootstrap
         .command_argv()
         .into_iter()

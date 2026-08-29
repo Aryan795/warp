@@ -26,7 +26,7 @@ impl TerminalView {
                 .last_init_shell_type()
                 .unwrap_or(ShellType::Zsh)
         });
-        let (command, expected_session_id) = match tmux_cc_shell_command(
+        let (command, expected_session_id, zsh_init) = match tmux_cc_shell_command(
             args,
             Some(IN_PLACE_TMUX_SESSION),
             size.columns(),
@@ -45,6 +45,7 @@ impl TerminalView {
             let mut model = self.model.lock();
             model.set_tmux_expected_session_id(Some(session_id));
             model.register_session_id(session_id);
+            model.set_tmux_retained_zsh_init(zsh_init);
         }
         self.write_to_pty(command.into_bytes(), ctx);
         ctx.notify();

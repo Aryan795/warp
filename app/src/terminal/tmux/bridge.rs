@@ -117,6 +117,7 @@ struct Inner {
     control_incarnation: u64,
     tracked_expected_session: Option<SessionId>,
     spawned_expected_session: Option<SessionId>,
+    pending_retained_zsh_init: Option<(String, SessionId)>,
     retained_zsh_init: Option<(String, SessionId)>,
     early_init_shell: HashMap<String, (SessionId, u64)>,
     early_stage_complete: HashMap<String, SessionId>,
@@ -174,6 +175,7 @@ impl TmuxRuntime {
                 control_incarnation: 0,
                 tracked_expected_session: None,
                 spawned_expected_session: None,
+                pending_retained_zsh_init: None,
                 retained_zsh_init: None,
                 early_init_shell: HashMap::new(),
                 early_stage_complete: HashMap::new(),
@@ -269,6 +271,7 @@ impl TmuxRuntime {
             inner.control_incarnation = 0;
             inner.tracked_expected_session = None;
             inner.spawned_expected_session = None;
+            inner.pending_retained_zsh_init = None;
             Self::clear_retained_zsh_init_locked(&mut inner, None);
             inner.early_init_shell.clear();
             inner.early_stage_complete.clear();
@@ -734,6 +737,7 @@ impl TmuxRuntime {
         };
         inner.tracked_expected_session = None;
         inner.spawned_expected_session = None;
+        inner.pending_retained_zsh_init = None;
         Self::clear_retained_zsh_init_locked(&mut inner, Some(pane_id));
         inner.early_stage_complete.remove(pane_id);
         inner.early_init_shell.remove(pane_id);
@@ -850,6 +854,24 @@ impl TmuxRuntime {
 
     pub fn set_spawned_expected_session(&self, session_id: SessionId) {
         self.inner.lock().spawned_expected_session = Some(session_id);
+    }
+
+    pub fn set_pending_retained_zsh_init(&self, script: String, session_id: SessionId) {
+        self.inner.lock().pending_retained_zsh_init = Some((script, session_id));
+    }
+
+    pub fn take_retained_init_send_keys(&self, pane_id: &str) -> Vec<Vec<u8>> {
+        let Some((script, session_id)) = self.inner.lock().pending_retained_zsh_init.take() else {
+            return Vec::new();
+        };
+        self.note_tracked_control_pane(pane_id);
+        self.set_tracked_expected_session(session_id);
+        self.note_retained_zsh_init(pane_id, session_id);
+        let bytes = super::protocol::zsh_init_bytes(&script, ShellType::Zsh, session_id);
+        super::protocol::send_keys_commands(&PaneId::from(pane_id), &bytes)
+            .into_iter()
+            .map(String::into_bytes)
+            .collect()
     }
 
     pub fn spawned_expected_session(&self) -> Option<SessionId> {
