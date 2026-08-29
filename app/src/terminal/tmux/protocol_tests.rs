@@ -672,3 +672,18 @@ fn in_band_init_bytes_are_remote_safe_and_session_scoped() {
     let bash = in_band_init_bytes(ShellType::Bash, session_id).expect("bash init");
     assert_ne!(bytes, bash);
 }
+
+#[test]
+fn bash_in_band_init_disables_history_before_interactive_body() {
+    let bytes = in_band_init_bytes(ShellType::Bash, SessionId::from(3)).expect("bash init");
+    let text = String::from_utf8_lossy(&bytes);
+    let history_off = text.find("set +o history").expect("history off");
+    let stty = text.find("stty raw").expect("stty");
+    assert!(history_off < stty);
+    assert!(text[history_off..stty].contains("HISTCONTROL=ignorespace"));
+    let zsh = in_band_init_bytes(ShellType::Zsh, SessionId::from(3)).expect("zsh init");
+    let zsh_text = String::from_utf8_lossy(&zsh);
+    assert!(zsh_text.contains("hist_ignore_space"));
+    let fish = in_band_init_bytes(ShellType::Fish, SessionId::from(3)).expect("fish init");
+    assert!(String::from_utf8_lossy(&fish).contains("fish_history"));
+}

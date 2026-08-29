@@ -15,6 +15,7 @@ use crate::terminal::tmux::pane_bytes::sink_writer;
 
 const MAX_BUFFERED_PANE_BYTES: usize = 64 * 1024;
 const MAX_PENDING_CLIENT_EVENT_BYTES: usize = 8 * 1024;
+const PENDING_CLIENT_EVENT_OVERHEAD: usize = 64;
 pub const APP_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,6 +51,7 @@ struct Inner {
     pending_client_events: Vec<TmuxClientEvent>,
     pending_client_event_bytes: usize,
     bootstrapped_panes: HashSet<String>,
+    pending_bootstrap_panes: VecDeque<String>,
     shell_type: Option<ShellType>,
     app_bind_deadline: Option<instant::Instant>,
     presentation_ready: bool,
@@ -94,6 +96,7 @@ impl TmuxRuntime {
                 pending_client_events: Vec::new(),
                 pending_client_event_bytes: 0,
                 bootstrapped_panes: HashSet::new(),
+                pending_bootstrap_panes: VecDeque::new(),
                 shell_type: None,
                 app_bind_deadline: None,
                 presentation_ready: false,
@@ -167,6 +170,7 @@ impl TmuxRuntime {
         inner.pending_client_events.clear();
         inner.pending_client_event_bytes = 0;
         inner.bootstrapped_panes.clear();
+        inner.pending_bootstrap_panes.clear();
         inner.app_bind_deadline = None;
         inner.presentation_ready = false;
     }
@@ -209,11 +213,12 @@ impl TmuxRuntime {
             .buffers
             .entry(pane_id.as_str().to_owned())
             .or_default();
-        let overflow = (buffer.len() + bytes.len()).saturating_sub(MAX_BUFFERED_PANE_BYTES);
-        if overflow > 0 {
-            buffer.drain(..overflow);
+        let room = MAX_BUFFERED_PANE_BYTES.saturating_sub(buffer.len());
+        if room == 0 {
+            return;
         }
-        buffer.extend_from_slice(bytes);
+        let take = bytes.len().min(room);
+        buffer.extend_from_slice(&bytes[..take]);
     }
 
     pub fn note_capture(&self, pane_id: &str) {
@@ -292,19 +297,44 @@ impl TmuxRuntime {
         std::mem::take(&mut inner.pending_client_events)
     }
 
-    pub fn set_shell_type(&self, shell_type: ShellType) {
-        self.inner.lock().shell_type = Some(shell_type);
+    pub fn set_authoritative_shell_type(&self, shell_type: ShellType) -> Vec<String> {
+        let mut inner = self.inner.lock();
+        inner.shell_type = Some(shell_type);
+        let pending = std::mem::take(&mut inner.pending_bootstrap_panes);
+        let mut ready = Vec::new();
+        for pane_id in pending {
+            if inner.bootstrapped_panes.insert(pane_id.clone()) {
+                ready.push(pane_id);
+            }
+        }
+        ready
     }
 
     pub fn shell_type(&self) -> Option<ShellType> {
         self.inner.lock().shell_type
     }
 
-    pub fn try_begin_pane_bootstrap(&self, pane_id: &str) -> bool {
+    pub fn begin_pane_bootstrap(&self, pane_id: &str) -> Option<ShellType> {
+        let mut inner = self.inner.lock();
+        if inner.bootstrapped_panes.contains(pane_id) {
+            return None;
+        }
+        if let Some(shell_type) = inner.shell_type {
+            inner.bootstrapped_panes.insert(pane_id.to_owned());
+            return Some(shell_type);
+        }
+        if !inner.pending_bootstrap_panes.iter().any(|id| id == pane_id) {
+            inner.pending_bootstrap_panes.push_back(pane_id.to_owned());
+        }
+        None
+    }
+
+    pub fn pane_model(&self, pane_id: &str) -> Option<Arc<FairMutex<TerminalModel>>> {
         self.inner
             .lock()
-            .bootstrapped_panes
-            .insert(pane_id.to_owned())
+            .panes
+            .get(pane_id)
+            .map(|sink| sink.model.clone())
     }
 
     pub fn start_app_bind_deadline(&self) {
@@ -340,7 +370,7 @@ impl TmuxRuntime {
 }
 
 fn client_event_retained_bytes(event: &TmuxClientEvent) -> usize {
-    match event {
+    let payload = match event {
         TmuxClientEvent::LayoutChange {
             window_id,
             layout,
@@ -365,7 +395,8 @@ fn client_event_retained_bytes(event: &TmuxClientEvent) -> usize {
                 + capture_pane.as_ref().map(String::len).unwrap_or(0)
         }
         TmuxClientEvent::PresentationUnready => 0,
-    }
+    };
+    PENDING_CLIENT_EVENT_OVERHEAD.saturating_add(payload)
 }
 
 fn feed_sink(sink: &mut PaneSink, bytes: &[u8]) {
@@ -392,6 +423,7 @@ mod tests {
                 pending_client_events: Vec::new(),
                 pending_client_event_bytes: 0,
                 bootstrapped_panes: HashSet::new(),
+                pending_bootstrap_panes: VecDeque::new(),
                 shell_type: None,
                 app_bind_deadline: None,
                 presentation_ready: false,
@@ -420,6 +452,16 @@ mod tests {
         assert_eq!(runtime.take_capture().as_deref(), Some("%4"));
         assert_eq!(runtime.take_capture().as_deref(), Some("%7"));
         assert_eq!(runtime.take_capture(), None);
+    }
+
+    #[test]
+    fn unregistered_pane_output_keeps_leading_bootstrap_bytes() {
+        let runtime = runtime();
+        runtime.deliver_output(&PaneId::from("%0"), b"HOOK");
+        runtime.deliver_output(&PaneId::from("%0"), &vec![b'x'; MAX_BUFFERED_PANE_BYTES]);
+        let buffered = runtime.buffered_output("%0").expect("buffered");
+        assert!(buffered.starts_with(b"HOOK"));
+        assert_eq!(buffered.len(), MAX_BUFFERED_PANE_BYTES);
     }
 
     #[test]
@@ -497,11 +539,38 @@ mod tests {
     }
 
     #[test]
-    fn pane_bootstrap_is_once_per_pane() {
+    fn repeated_zero_payload_events_overflow_the_pending_queue() {
         let runtime = runtime();
-        assert!(runtime.try_begin_pane_bootstrap("%0"));
-        assert!(!runtime.try_begin_pane_bootstrap("%0"));
-        assert!(runtime.try_begin_pane_bootstrap("%1"));
+        let event = TmuxClientEvent::PresentationUnready;
+        let fit = MAX_PENDING_CLIENT_EVENT_BYTES / PENDING_CLIENT_EVENT_OVERHEAD;
+        let batch: Vec<_> = (0..fit).map(|_| event.clone()).collect();
+        assert!(runtime.buffer_client_events(&batch));
+        assert!(!runtime.buffer_client_events(&[event]));
+        assert!(runtime.take_client_events().is_empty());
+    }
+
+    #[test]
+    fn pane_bootstrap_queues_until_authoritative_shell_type() {
+        let runtime = runtime();
+        assert_eq!(runtime.begin_pane_bootstrap("%0"), None);
+        assert_eq!(runtime.shell_type(), None);
+        let ready = runtime.set_authoritative_shell_type(ShellType::Bash);
+        assert_eq!(ready, vec!["%0".to_owned()]);
+        assert_eq!(runtime.shell_type(), Some(ShellType::Bash));
+        assert_eq!(runtime.begin_pane_bootstrap("%0"), None);
+        assert_eq!(runtime.begin_pane_bootstrap("%1"), Some(ShellType::Bash));
+        assert_eq!(runtime.begin_pane_bootstrap("%1"), None);
+    }
+
+    #[test]
+    fn local_launch_shell_is_not_used_when_remote_init_shell_differs() {
+        let runtime = runtime();
+        runtime.set_authoritative_shell_type(ShellType::Zsh);
+        let ready = runtime.set_authoritative_shell_type(ShellType::Bash);
+        assert!(ready.is_empty());
+        assert_eq!(runtime.begin_pane_bootstrap("%0"), Some(ShellType::Bash));
+        assert_eq!(runtime.begin_pane_bootstrap("%1"), Some(ShellType::Bash));
+        assert_ne!(ShellType::Zsh, ShellType::Bash);
     }
 
     #[test]

@@ -203,6 +203,39 @@ fn presentation_pane_id_is_explicit() {
 }
 
 #[test]
+fn init_shell_remote_bash_is_authoritative_over_local_zsh_launch() {
+    use crate::terminal::ShellLaunchState;
+    use crate::terminal::model::ansi::{Handler, InitShellValue};
+    use crate::terminal::model::session::get_local_hostname;
+    use crate::terminal::shell::ShellType;
+
+    let mut model = TerminalModel::mock(None, None);
+    assert_eq!(model.last_init_shell_type(), Some(ShellType::Zsh));
+    match model.shell_launch_state() {
+        ShellLaunchState::ShellSpawned { shell_type, .. } => {
+            assert_eq!(*shell_type, ShellType::Zsh);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    let session_id = 77.into();
+    model.register_session_id(session_id);
+    let hostname = get_local_hostname().unwrap_or_else(|_| "localhost".to_string());
+    model.init_shell(InitShellValue {
+        session_id,
+        shell: "bash".to_owned(),
+        hostname,
+        ..Default::default()
+    });
+    assert_eq!(model.last_init_shell_type(), Some(ShellType::Bash));
+    match model.shell_launch_state() {
+        ShellLaunchState::ShellSpawned { shell_type, .. } => {
+            assert_eq!(*shell_type, ShellType::Zsh);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
 fn presentation_init_shell_hook_does_not_bypass_readiness() {
     use crate::terminal::model::ansi::{Handler, InitShellValue};
     use crate::terminal::model::session::get_local_hostname;

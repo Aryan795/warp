@@ -12871,10 +12871,12 @@ impl TerminalView {
             ModelEvent::Handler(AnsiHandlerEvent::InitShell {
                 pending_session_info,
             }) => {
-                self.write_tmux_presentation_bootstrap_script(
-                    pending_session_info.shell.shell_type(),
-                    ctx,
-                );
+                let shell_type = pending_session_info.shell.shell_type();
+                if self.model.lock().is_tmux_presentation() {
+                    self.write_tmux_presentation_bootstrap_script(shell_type, ctx);
+                } else {
+                    self.flush_queued_tmux_pane_bootstrap(shell_type, ctx);
+                }
                 // The remote confirmed a subshell bootstrap is starting. Hide the
                 // original long-running block now so the user doesn't see the
                 // bootstrap payload echoed into it.
@@ -15204,6 +15206,48 @@ impl TerminalView {
                 &session_metadata,
                 DEFAULT_IGNORED_RULES_FOR_COMMAND_CORRECTIONS.into_iter(),
             )
+        }
+    }
+
+    fn flush_queued_tmux_pane_bootstrap(
+        &mut self,
+        shell_type: ShellType,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+        {
+            use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+            let Some(id) = self.model.lock().tmux_instance_id() else {
+                return;
+            };
+            let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)) else {
+                return;
+            };
+            let panes = runtime.set_authoritative_shell_type(shell_type);
+            for pane_id in panes {
+                let Some(model) = runtime.pane_model(&pane_id) else {
+                    continue;
+                };
+                let session_id = warp_terminal::bootstrap::generate_session_id();
+                {
+                    let mut locked = model.lock();
+                    locked.register_session_id(session_id);
+                    locked.set_login_shell_spawned(shell_type);
+                }
+                let Some(bytes) =
+                    crate::terminal::tmux::protocol::in_band_init_bytes(shell_type, session_id)
+                else {
+                    continue;
+                };
+                let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
+                for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bytes) {
+                    self.write_to_pty(command.into_bytes(), ctx);
+                }
+            }
+        }
+        #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+        {
+            let _ = (shell_type, ctx);
         }
     }
 

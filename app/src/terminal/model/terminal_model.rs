@@ -511,6 +511,7 @@ pub struct TerminalModel {
     tmux_open_presentation: bool,
     tmux_close_presentation: bool,
     tmux_events: Vec<TmuxClientEvent>,
+    last_init_shell_type: Option<ShellType>,
 
     /// The shell type of the login shell for this session.
     shell_launch_state: ShellLaunchState,
@@ -1132,6 +1133,7 @@ impl TerminalModel {
             tmux_open_presentation: false,
             tmux_close_presentation: false,
             tmux_events: Vec::new(),
+            last_init_shell_type: None,
             env_var_collection_name: None,
             shell_launch_state: shell_state,
             obfuscate_secrets,
@@ -1594,6 +1596,10 @@ impl TerminalModel {
 
     pub fn tmux_instance_id(&self) -> Option<u64> {
         self.tmux_instance_id
+    }
+
+    pub fn last_init_shell_type(&self) -> Option<ShellType> {
+        self.last_init_shell_type
     }
 
     pub fn set_tmux_instance_id(&mut self, id: Option<u64>) {
@@ -3263,6 +3269,9 @@ impl ansi::Handler for TerminalModel {
 
             let shell_type = ShellType::from_name(&data.shell)
                 .unwrap_or_else(|| panic!("invalid shell name: {}", data.shell));
+            if !self.tmux_presentation {
+                self.last_init_shell_type = Some(shell_type);
+            }
 
             let pending_session_info = SessionInfo::create_pending(
                 shell_type,

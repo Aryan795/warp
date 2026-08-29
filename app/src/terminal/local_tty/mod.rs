@@ -40,10 +40,8 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
                     .is_none()
             {
                 let runtime = TmuxRuntime::new();
-                if let crate::terminal::ShellLaunchState::ShellSpawned { shell_type, .. } =
-                    self.shell_launch_state()
-                {
-                    runtime.set_shell_type(*shell_type);
+                if let Some(shell_type) = self.last_init_shell_type() {
+                    runtime.set_authoritative_shell_type(shell_type);
                 }
                 self.set_tmux_instance_id(Some(runtime.id().as_u64()));
             }

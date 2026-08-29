@@ -11715,73 +11715,76 @@ impl Workspace {
         } else {
             None
         };
-        let tabs: Vec<TabSnapshot> = self
-            .tab_views()
-            .enumerate()
-            .filter(|(tab_index, _)| Some(*tab_index) != transferred_tab_index)
-            .map(|(tab_index, pane_group_view)| {
-                let resizable_data = ResizableData::handle(app);
-                let modal_sizes = resizable_data.as_ref(app).get_all_handles(window_id);
+        let tabs: Vec<TabSnapshot> = if self.is_tmux_owned_window(app) {
+            Vec::new()
+        } else {
+            self.tab_views()
+                .enumerate()
+                .filter(|(tab_index, _)| Some(*tab_index) != transferred_tab_index)
+                .map(|(tab_index, pane_group_view)| {
+                    let resizable_data = ResizableData::handle(app);
+                    let modal_sizes = resizable_data.as_ref(app).get_all_handles(window_id);
 
-                let left_panel_width = modal_sizes.map(|ms| {
-                    ms.left_panel_width
-                        .lock()
-                        .expect("should be able to lock left panel handle")
-                        .size()
-                });
+                    let left_panel_width = modal_sizes.map(|ms| {
+                        ms.left_panel_width
+                            .lock()
+                            .expect("should be able to lock left panel handle")
+                            .size()
+                    });
 
-                let right_panel_width = modal_sizes.map(|ms| {
-                    ms.right_panel_width
-                        .lock()
-                        .expect("should be able to lock right panel handle")
-                        .size()
-                });
+                    let right_panel_width = modal_sizes.map(|ms| {
+                        ms.right_panel_width
+                            .lock()
+                            .expect("should be able to lock right panel handle")
+                            .size()
+                    });
 
-                let pane_group = pane_group_view.as_ref(app);
-                let root = pane_group.snapshot(app);
-                let left_panel =
-                    self.compute_left_panel_snapshot(pane_group_view, left_panel_width, app);
-                let right_panel =
-                    self.compute_right_panel_snapshot(pane_group_view, right_panel_width, app);
-                TabSnapshot {
-                    root,
-                    custom_title: pane_group.custom_title(app),
-                    default_directory_color: self
-                        .tabs
-                        .get(tab_index)
-                        .and_then(|tab| tab.default_directory_color),
-                    selected_color: self
-                        .tabs
-                        .get(tab_index)
-                        .map(|tab| tab.selected_color)
-                        .unwrap_or_default(),
-                    left_panel,
-                    right_panel,
-                    group_id: if FeatureFlag::GroupedTabs.is_enabled() {
-                        self.tabs.get(tab_index).and_then(|tab| tab.group_id)
-                    } else {
-                        None
-                    },
-                    // Only persist pinned state when the Pinned Tabs feature is
-                    // enabled.
-                    pinned: FeatureFlag::PinnedTabs.is_enabled()
-                        && self.tabs.get(tab_index).is_some_and(|tab| tab.pinned),
-                }
-            })
-            .filter(|tab| {
-                // Filter out any tab that contains a single, read-only session.
-                !matches!(
-                    tab.root,
-                    PaneNodeSnapshot::Leaf(LeafSnapshot {
-                        contents: LeafContents::Terminal(TerminalPaneSnapshot {
-                            is_read_only: true,
+                    let pane_group = pane_group_view.as_ref(app);
+                    let root = pane_group.snapshot(app);
+                    let left_panel =
+                        self.compute_left_panel_snapshot(pane_group_view, left_panel_width, app);
+                    let right_panel =
+                        self.compute_right_panel_snapshot(pane_group_view, right_panel_width, app);
+                    TabSnapshot {
+                        root,
+                        custom_title: pane_group.custom_title(app),
+                        default_directory_color: self
+                            .tabs
+                            .get(tab_index)
+                            .and_then(|tab| tab.default_directory_color),
+                        selected_color: self
+                            .tabs
+                            .get(tab_index)
+                            .map(|tab| tab.selected_color)
+                            .unwrap_or_default(),
+                        left_panel,
+                        right_panel,
+                        group_id: if FeatureFlag::GroupedTabs.is_enabled() {
+                            self.tabs.get(tab_index).and_then(|tab| tab.group_id)
+                        } else {
+                            None
+                        },
+                        // Only persist pinned state when the Pinned Tabs feature is
+                        // enabled.
+                        pinned: FeatureFlag::PinnedTabs.is_enabled()
+                            && self.tabs.get(tab_index).is_some_and(|tab| tab.pinned),
+                    }
+                })
+                .filter(|tab| {
+                    // Filter out any tab that contains a single, read-only session.
+                    !matches!(
+                        tab.root,
+                        PaneNodeSnapshot::Leaf(LeafSnapshot {
+                            contents: LeafContents::Terminal(TerminalPaneSnapshot {
+                                is_read_only: true,
+                                ..
+                            }),
                             ..
-                        }),
-                        ..
-                    })
-                )
-            })
-            .collect();
+                        })
+                    )
+                })
+                .collect()
+        };
 
         // Skip orphan groups whose members were all filtered out above.
         // This is a safety net and ensures empty groups are not saved/restored.
@@ -12900,10 +12903,11 @@ impl Workspace {
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         {
             use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
-            let Some(runtime) = instance_id
-                .and_then(|id| TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)))
-                .or_else(|| self.tmux_runtime(ctx.window_id()))
-            else {
+            let runtime = match instance_id {
+                Some(id) => TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)),
+                None => self.tmux_runtime(ctx.window_id()),
+            };
+            let Some(runtime) = runtime else {
                 if let Some(id) = instance_id {
                     self.clear_gateway_tmux_instance_id(id, None, ctx);
                 }
@@ -13444,6 +13448,15 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         self.open_tmux_presentation_window(instance_id, ctx);
+    }
+
+    #[cfg(all(test, unix, feature = "local_tty", not(feature = "remote_tty")))]
+    pub(crate) fn close_tmux_presentation_windows_for_tests(
+        &self,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.close_tmux_presentation_windows(instance_id, ctx);
     }
 
     #[cfg(all(test, unix, feature = "local_tty", not(feature = "remote_tty")))]

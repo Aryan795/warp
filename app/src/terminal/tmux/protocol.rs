@@ -724,12 +724,24 @@ pub fn zsh_init_bytes(init_script: &str, shell_type: ShellType) -> Vec<u8> {
     bytes
 }
 
+fn in_band_history_prefix(shell_type: ShellType) -> &'static [u8] {
+    match shell_type {
+        ShellType::Bash => b" set +o history;HISTCONTROL=ignorespace;HISTIGNORE=' *';",
+        ShellType::Zsh => b" setopt hist_ignore_space;HISTFILE=/dev/null;",
+        ShellType::Fish => b" set -g fish_history '';",
+        ShellType::PowerShell => b"",
+    }
+}
+
 pub fn in_band_init_bytes(shell_type: ShellType, session_id: SessionId) -> Option<Vec<u8>> {
     match shell_type {
         ShellType::PowerShell => None,
         shell_type => {
             let script = init_shell_script_for_shell(shell_type, &ASSETS, session_id);
-            Some(zsh_init_bytes(&script, shell_type))
+            let mut bytes = in_band_history_prefix(shell_type).to_vec();
+            bytes.extend_from_slice(script.as_bytes());
+            bytes.extend_from_slice(shell_type.execute_command_bytes());
+            Some(bytes)
         }
     }
 }

@@ -4196,11 +4196,11 @@ impl PaneGroup {
             locked.tmux_instance_id()
         };
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-        self.inject_tmux_pane_bootstrap(&model, tmux_pane_id, instance_id, ctx);
-        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         if let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), &model) {
-            runtime.register_pane(tmux_pane_id, model);
+            runtime.register_pane(tmux_pane_id, model.clone());
         }
+        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+        self.inject_tmux_pane_bootstrap(&model, tmux_pane_id, instance_id, ctx);
         self.write_tmux_command(
             crate::terminal::tmux::protocol::capture_pane_command(
                 &crate::terminal::tmux::parser::PaneId::from(tmux_pane_id),
@@ -4222,12 +4222,9 @@ impl PaneGroup {
         let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), model) else {
             return;
         };
-        if !runtime.try_begin_pane_bootstrap(tmux_pane_id) {
+        let Some(shell_type) = runtime.begin_pane_bootstrap(tmux_pane_id) else {
             return;
-        }
-        let shell_type = runtime
-            .shell_type()
-            .unwrap_or(crate::terminal::shell::ShellType::Zsh);
+        };
         let session_id = warp_terminal::bootstrap::generate_session_id();
         {
             let mut locked = model.lock();
