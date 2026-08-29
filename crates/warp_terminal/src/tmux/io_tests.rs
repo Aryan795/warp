@@ -233,7 +233,7 @@ fn client_commands_stay_raw_in_control_mode() {
     io.enqueue_input(start_command());
     io.feed(CONTROL_MODE_DCS);
     io.feed(b"%window-pane-changed @0 %1\n");
-    let written = io.enqueue_input(Cow::Borrowed(b"split-window -h -t %1\n"));
+    let written = io.enqueue_control_command(Cow::Borrowed(b"split-window -h -t %1\n"));
     assert_eq!(
         written,
         vec![Cow::Borrowed(&b"split-window -h -t %1\n"[..])]
@@ -277,9 +277,9 @@ fn interleaved_split_does_not_consume_capture_reply() {
     let mut io = TmuxIoState::new();
     enter_control_after_snapshot(&mut io);
     io.feed(b"%window-pane-changed @0 %4\n");
-    io.enqueue_input(Cow::Borrowed(b"capture-pane -p -t %4\n"));
-    io.enqueue_input(Cow::Borrowed(b"split-window -h -t %4 -P -F '#{pane_id}'\n"));
-    io.enqueue_input(Cow::Borrowed(b"select-pane -t %4\n"));
+    io.enqueue_control_command(Cow::Borrowed(b"capture-pane -p -t %4\n"));
+    io.enqueue_control_command(Cow::Borrowed(b"split-window -h -t %4 -P -F '#{pane_id}'\n"));
+    io.enqueue_control_command(Cow::Borrowed(b"select-pane -t %4\n"));
     let capture_end = io.feed(b"%begin 1 1\nsnapshot-line\n%end 1 1\n");
     assert!(capture_end.iter().any(|item| matches!(
         item,
@@ -454,7 +454,7 @@ fn presentation_timeout_holds_input_and_ignores_late_snapshot_until_exit() {
 fn superseded_snapshot_reply_is_ignored() {
     let mut io = TmuxIoState::new();
     enter_control(&mut io);
-    io.enqueue_input(Cow::Borrowed(
+    io.enqueue_control_command(Cow::Borrowed(
         crate::tmux::encode::LIST_WINDOWS_LAYOUT_COMMAND.as_bytes(),
     ));
     let stale = io.feed(b"%begin 1 1\n@0 80x24,0,0,0\n%end 1 1\n");
@@ -503,7 +503,7 @@ fn snapshot_error_then_capture_does_not_steal_capture_reply() {
         err.iter()
             .any(|item| matches!(item, TmuxFeedItem::CommandEnd { error: true, .. }))
     );
-    io.enqueue_input(Cow::Borrowed(b"capture-pane -p -t %0\n"));
+    io.enqueue_control_command(Cow::Borrowed(b"capture-pane -p -t %0\n"));
     let capture = io.feed(b"%begin 1 2\npane-bytes\n%end 1 2\n");
     assert!(capture.iter().any(|item| matches!(
         item,
@@ -559,8 +559,8 @@ fn multi_window_add_then_percent0_output_waits_for_snapshot() {
 fn capture_then_snapshot_does_not_treat_layout_shaped_capture_as_snapshot() {
     let mut io = TmuxIoState::new();
     enter_control_after_snapshot(&mut io);
-    io.enqueue_input(Cow::Borrowed(b"capture-pane -p -t %0\n"));
-    io.enqueue_input(Cow::Borrowed(
+    io.enqueue_control_command(Cow::Borrowed(b"capture-pane -p -t %0\n"));
+    io.enqueue_control_command(Cow::Borrowed(
         crate::tmux::encode::LIST_WINDOWS_LAYOUT_COMMAND.as_bytes(),
     ));
     let capture = io.feed(b"%begin 1 2\n@0 80x24,0,0,0\n%end 1 2\n");
@@ -601,7 +601,7 @@ fn empty_snapshot_then_capture_keeps_capture_reply() {
             ..
         }
     )));
-    io.enqueue_input(Cow::Borrowed(b"capture-pane -p -t %3\n"));
+    io.enqueue_control_command(Cow::Borrowed(b"capture-pane -p -t %3\n"));
     let capture = io.feed(b"%begin 1 2\npane-bytes\n%end 1 2\n");
     assert!(capture.iter().any(|item| matches!(
         item,
@@ -617,8 +617,8 @@ fn empty_snapshot_then_capture_keeps_capture_reply() {
 fn other_then_snapshot_does_not_apply_layout_shaped_other_payload() {
     let mut io = TmuxIoState::new();
     enter_control_after_snapshot(&mut io);
-    io.enqueue_input(Cow::Borrowed(b"select-pane -t %0\n"));
-    io.enqueue_input(Cow::Borrowed(
+    io.enqueue_control_command(Cow::Borrowed(b"select-pane -t %0\n"));
+    io.enqueue_control_command(Cow::Borrowed(
         crate::tmux::encode::LIST_WINDOWS_LAYOUT_COMMAND.as_bytes(),
     ));
     let other = io.feed(b"%begin 1 2\n@0 80x24,0,0,0\n%end 1 2\n");
@@ -684,7 +684,7 @@ fn startup_end_then_refresh_error_does_not_drop_snapshot() {
 fn detach_client_holds_raw_input_until_exit_then_replays() {
     let mut io = TmuxIoState::new();
     enter_control(&mut io);
-    let written = io.enqueue_input(Cow::Borrowed(b"detach-client\n"));
+    let written = io.enqueue_control_command(Cow::Borrowed(b"detach-client\n"));
     assert_eq!(written, vec![Cow::Borrowed(&b"detach-client\n"[..])]);
     assert_eq!(io.phase(), TmuxPhaseKind::PresentationRecovering);
     assert!(
@@ -707,4 +707,53 @@ fn detach_client_holds_raw_input_until_exit_then_replays() {
         Some(vec![Cow::Borrowed(&b"typed-after-detach"[..])])
     );
     assert_eq!(io.phase(), TmuxPhaseKind::Inactive);
+}
+
+#[test]
+fn internal_send_keys_command_is_emitted_exactly_once() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    io.feed(b"%window-pane-changed @0 %0\n");
+    let command = Cow::Borrowed(&b"send-keys -t %0 -H 41\n"[..]);
+    let written = io.enqueue_control_command(command.clone());
+    assert_eq!(written, vec![command]);
+}
+
+#[test]
+fn user_key_a_becomes_one_send_keys_command() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    io.feed(b"%window-pane-changed @0 %0\n");
+    let written = io.enqueue_pane_input(&PaneId::from("%0"), Cow::Borrowed(b"A"));
+    assert_eq!(written.len(), 1);
+    assert_eq!(&written[0][..], b"send-keys -t %0 -H 41\n");
+}
+
+#[test]
+fn bootstrap_and_split_control_commands_are_not_double_encoded() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    io.feed(b"%window-pane-changed @0 %0\n");
+    let bootstrap = crate::tmux::encode::send_keys_command(&PaneId::from("%0"), b":\n");
+    let written = io.enqueue_control_command(Cow::Owned(bootstrap.clone()));
+    assert_eq!(written.len(), 1);
+    assert_eq!(&written[0][..], bootstrap.as_slice());
+    let split = io.enqueue_control_command(Cow::Borrowed(b"split-window -h -t %0\n"));
+    assert_eq!(split, vec![Cow::Borrowed(&b"split-window -h -t %0\n"[..])]);
+}
+
+#[test]
+fn raw_control_is_rejected_outside_control_mode() {
+    let mut io = TmuxIoState::new();
+    assert!(
+        io.enqueue_control_command(Cow::Borrowed(b"split-window -h\n"))
+            .is_empty()
+    );
+    assert!(
+        io.enqueue_pane_input(&PaneId::from("%0"), Cow::Borrowed(b"A"))
+            .is_empty()
+    );
 }

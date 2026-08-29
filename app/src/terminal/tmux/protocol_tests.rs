@@ -877,3 +877,130 @@ fn fish_in_band_init_does_not_persist_bootstrap_in_history() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[cfg(unix)]
+fn run_shell_capture(
+    program: &Path,
+    args: &[&str],
+    env: &[(&str, String)],
+    script: &[u8],
+) -> Option<String> {
+    let mut command = Command::new(program);
+    command.args(args);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = std::io::Write::write_all(&mut stdin, script);
+    }
+    let output = child.wait_with_output().ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_history_restore_preserves_enabled_and_disabled_state() {
+    let bash = Path::new("/bin/bash");
+    if !bash.exists() {
+        return;
+    }
+    let init = super::history_isolated_script(ShellType::Bash, b":");
+    let dump = b"if shopt -qo history; then echo hist_on=1; else echo hist_on=0; fi; if [ \"${HISTFILE+x}\" ]; then echo histfile_set=1 histfile=$HISTFILE; else echo histfile_set=0; fi\n";
+    let mut enabled = b"set -o history\nHISTFILE=/tmp/warp-tmux-hist-enabled\n".to_vec();
+    enabled.extend_from_slice(&init);
+    enabled.extend_from_slice(dump);
+    let out =
+        run_shell_capture(bash, &["--noprofile", "--norc"], &[], &enabled).unwrap_or_default();
+    assert!(
+        out.contains("hist_on=1"),
+        "enabled history must be restored: {out:?}"
+    );
+    assert!(
+        out.contains("histfile_set=1"),
+        "HISTFILE set must be restored: {out:?}"
+    );
+    assert!(
+        out.contains("histfile=/tmp/warp-tmux-hist-enabled"),
+        "{out:?}"
+    );
+
+    let mut disabled = b"set +o history\nunset HISTFILE\n".to_vec();
+    disabled.extend_from_slice(&init);
+    disabled.extend_from_slice(dump);
+    let out =
+        run_shell_capture(bash, &["--noprofile", "--norc"], &[], &disabled).unwrap_or_default();
+    assert!(
+        out.contains("hist_on=0"),
+        "disabled history must stay off: {out:?}"
+    );
+    assert!(
+        out.contains("histfile_set=0"),
+        "unset HISTFILE must stay unset: {out:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_history_restore_preserves_histfile_and_savehist() {
+    let Some(zsh) = optional_shell("zsh") else {
+        return;
+    };
+    let init =
+        String::from_utf8_lossy(&super::history_isolated_script(ShellType::Zsh, b":")).into_owned();
+    let dump = "if (( ${+HISTFILE} )); then echo histfile_set=1 histfile=$HISTFILE; else echo histfile_set=0; fi; if (( ${+SAVEHIST} )); then echo savehist_set=1 savehist=$SAVEHIST; else echo savehist_set=0; fi\n";
+    let set_cmd = format!("HISTFILE=/tmp/warp-tmux-zsh-hist; SAVEHIST=42; {init}{dump}");
+    let out = run_shell_capture(&zsh, &["--no-rcs", "-c", &set_cmd], &[], b"").unwrap_or_default();
+    assert!(
+        out.contains("histfile_set=1"),
+        "HISTFILE set must be restored: {out:?}"
+    );
+    assert!(out.contains("histfile=/tmp/warp-tmux-zsh-hist"), "{out:?}");
+    assert!(
+        out.contains("savehist_set=1"),
+        "SAVEHIST set must be restored: {out:?}"
+    );
+    assert!(out.contains("savehist=42"), "{out:?}");
+
+    let unset_cmd = format!("unset HISTFILE; unset SAVEHIST; {init}{dump}");
+    let out =
+        run_shell_capture(&zsh, &["--no-rcs", "-c", &unset_cmd], &[], b"").unwrap_or_default();
+    assert!(
+        out.contains("histfile_set=0"),
+        "unset HISTFILE must stay unset: {out:?}"
+    );
+    assert!(
+        out.contains("savehist_set=0"),
+        "unset SAVEHIST must stay unset: {out:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fish_history_restore_preserves_unset_and_global_set() {
+    let Some(fish) = optional_shell("fish") else {
+        return;
+    };
+    let init = String::from_utf8_lossy(&super::history_isolated_script(ShellType::Fish, b"true"))
+        .into_owned();
+    let dump = "if set -q fish_history; echo fish_history_set=1 fish_history=$fish_history; else; echo fish_history_set=0; end\n";
+    let set_cmd = format!("set -g fish_history default; {init}; {dump}");
+    let out =
+        run_shell_capture(&fish, &["--no-config", "-c", &set_cmd], &[], b"").unwrap_or_default();
+    assert!(
+        out.contains("fish_history_set=1"),
+        "set fish_history must be restored: {out:?}"
+    );
+    assert!(out.contains("fish_history=default"), "{out:?}");
+
+    let unset_cmd = format!("set -e fish_history; {init}; {dump}");
+    let out =
+        run_shell_capture(&fish, &["--no-config", "-c", &unset_cmd], &[], b"").unwrap_or_default();
+    assert!(
+        out.contains("fish_history_set=0"),
+        "unset fish_history must stay unset: {out:?}"
+    );
+}

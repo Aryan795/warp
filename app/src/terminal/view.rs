@@ -1741,6 +1741,13 @@ pub enum Event {
     WriteBytesToPty {
         bytes: Cow<'static, [u8]>,
     },
+    TmuxControlCommand {
+        bytes: Cow<'static, [u8]>,
+    },
+    TmuxPaneInput {
+        pane_id: String,
+        bytes: Cow<'static, [u8]>,
+    },
     OpenTmuxPresentationWindow {
         instance_id: Option<u64>,
     },
@@ -9433,6 +9440,26 @@ impl TerminalView {
         ctx.emit(Event::WriteBytesToPty { bytes: data.into() });
     }
 
+    pub(crate) fn write_tmux_control_command<B: Into<Cow<'static, [u8]>>>(
+        &mut self,
+        data: B,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        ctx.emit(Event::TmuxControlCommand { bytes: data.into() });
+    }
+
+    pub(crate) fn write_tmux_pane_input<B: Into<Cow<'static, [u8]>>>(
+        &mut self,
+        pane_id: String,
+        data: B,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        ctx.emit(Event::TmuxPaneInput {
+            pane_id,
+            bytes: data.into(),
+        });
+    }
+
     fn write_agent_bytes_to_pty<B: Into<Cow<'static, [u8]>>>(
         &mut self,
         data: B,
@@ -15241,7 +15268,7 @@ impl TerminalView {
                 };
                 let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
                 for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bytes) {
-                    self.write_to_pty(command.into_bytes(), ctx);
+                    self.write_tmux_control_command(command.into_bytes(), ctx);
                 }
             }
         }
@@ -15269,10 +15296,18 @@ impl TerminalView {
         let Some(pane_id) = pane_id else {
             return;
         };
-        let bootstrap = crate::terminal::bootstrap::script_for_shell(shell_type, &crate::ASSETS);
-        let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
-        for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bootstrap) {
-            self.write_to_pty(command.into_bytes(), ctx);
+        #[cfg(all(unix, feature = "local_tty"))]
+        {
+            let bootstrap =
+                crate::terminal::bootstrap::script_for_shell(shell_type, &crate::ASSETS);
+            let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
+            for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bootstrap) {
+                self.write_tmux_control_command(command.into_bytes(), ctx);
+            }
+        }
+        #[cfg(not(all(unix, feature = "local_tty")))]
+        {
+            let _ = (pane_id, shell_type, ctx);
         }
     }
 
@@ -26541,6 +26576,13 @@ impl PtyIntentEvent for Event {
             Event::CtrlD => Some(PtyIntent::CtrlD),
             Event::ShutdownPty => Some(PtyIntent::ShutdownPty),
             Event::WriteBytesToPty { bytes } => Some(PtyIntent::WriteBytes(bytes.clone())),
+            Event::TmuxControlCommand { bytes } => {
+                Some(PtyIntent::TmuxControlCommand(bytes.clone()))
+            }
+            Event::TmuxPaneInput { pane_id, bytes } => Some(PtyIntent::TmuxPaneInput {
+                pane_id: pane_id.clone(),
+                bytes: bytes.clone(),
+            }),
             Event::WriteAgentInputToPty { bytes, mode } => Some(PtyIntent::WriteAgentInput {
                 bytes: bytes.clone(),
                 mode: *mode,

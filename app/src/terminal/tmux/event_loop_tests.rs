@@ -10,7 +10,8 @@ use parking_lot::FairMutex;
 use super::{ControlClientEventLoop, SharedControlState, TmuxControlSender};
 use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::local_tty::{ChildEvent, EventedPty, EventedReadWrite, mio_channel};
-use crate::terminal::tmux::protocol::kill_server_command;
+use crate::terminal::tmux::parser::PaneId;
+use crate::terminal::tmux::protocol::{kill_server_command, send_keys_commands};
 use crate::terminal::writeable_pty::Message;
 use crate::terminal::writeable_pty::pty_controller::EventLoopSender as _;
 use crate::terminal::{SizeInfo, TerminalModel};
@@ -135,6 +136,7 @@ impl EventedPty for FakePty {
 struct Harness {
     handle: JoinHandle<()>,
     sender: TmuxControlSender,
+    shared: Arc<SharedControlState>,
     model: Arc<FairMutex<TerminalModel>>,
     wakeups_rx: async_channel::Receiver<()>,
     written: Arc<Mutex<Vec<u8>>>,
@@ -151,10 +153,12 @@ fn start_loop(reader_error: Option<io::ErrorKind>, writer_error: Option<io::Erro
     let (tx, rx) = mio_channel::channel();
     let shared = Arc::new(SharedControlState::new());
     let sender = TmuxControlSender::new(tx, shared.clone());
-    let event_loop = ControlClientEventLoop::new(model.clone(), listener, pty, rx, shared, None);
+    let event_loop =
+        ControlClientEventLoop::new(model.clone(), listener, pty, rx, shared.clone(), None);
     Harness {
         handle: event_loop.spawn(),
         sender,
+        shared,
         model,
         wakeups_rx,
         written,
@@ -199,6 +203,7 @@ fn read_error_exits_terminal_and_wakes_view() {
 #[test]
 fn write_error_exits_terminal_and_wakes_view() {
     let harness = start_loop(None, Some(io::ErrorKind::BrokenPipe));
+    harness.shared.bind_pane(PaneId::from("%0"));
     harness
         .sender
         .send(Message::Resize(SizeInfo::new_without_font_metrics(24, 80)))
@@ -215,4 +220,92 @@ fn closed_pty_exits_terminal_and_wakes_view() {
     join_loop(harness.handle);
     assert!(harness.model.lock().is_read_only());
     assert!(harness.wakeups_rx.try_recv().is_ok());
+}
+
+#[test]
+fn internal_send_keys_command_is_written_exactly() {
+    let harness = start_loop(None, None);
+    harness.shared.bind_pane(PaneId::from("%0"));
+    let command = b"send-keys -t %0 -H 41\n".to_vec();
+    harness
+        .sender
+        .send(Message::TmuxControlCommand(command.clone().into()))
+        .expect("send control");
+    harness
+        .sender
+        .send(Message::Shutdown)
+        .expect("send shutdown");
+    join_loop(harness.handle);
+    let written = harness.written.lock().expect("written lock").clone();
+    assert_eq!(&written[..command.len()], command.as_slice());
+    assert!(
+        !written
+            .windows(command.len() * 2)
+            .any(|w| { w[..command.len()] == command && w[command.len()..] == command })
+    );
+}
+
+#[test]
+fn user_key_a_becomes_one_send_keys_command() {
+    let harness = start_loop(None, None);
+    harness.shared.bind_pane(PaneId::from("%0"));
+    harness
+        .sender
+        .send(Message::TmuxPaneInput {
+            pane_id: PaneId::from("%0"),
+            bytes: std::borrow::Cow::Borrowed(b"A"),
+        })
+        .expect("send pane input");
+    harness
+        .sender
+        .send(Message::Shutdown)
+        .expect("send shutdown");
+    join_loop(harness.handle);
+    let written = harness.written.lock().expect("written lock").clone();
+    let encoded = send_keys_commands(&PaneId::from("%0"), b"A");
+    assert_eq!(encoded.len(), 1);
+    assert!(written.starts_with(encoded[0].as_bytes()));
+    assert_eq!(
+        written
+            .windows(encoded[0].len())
+            .filter(|w| *w == encoded[0].as_bytes())
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn bootstrap_and_split_are_not_double_encoded() {
+    let harness = start_loop(None, None);
+    harness.shared.bind_pane(PaneId::from("%0"));
+    let bootstrap = send_keys_commands(&PaneId::from("%0"), b":\n");
+    harness
+        .sender
+        .send(Message::TmuxControlCommand(
+            bootstrap[0].clone().into_bytes().into(),
+        ))
+        .expect("send bootstrap");
+    harness
+        .sender
+        .send(Message::TmuxControlCommand(std::borrow::Cow::Borrowed(
+            b"split-window -h -t %0\n",
+        )))
+        .expect("send split");
+    harness
+        .sender
+        .send(Message::Shutdown)
+        .expect("send shutdown");
+    join_loop(harness.handle);
+    let written =
+        String::from_utf8(harness.written.lock().expect("written lock").clone()).expect("utf8");
+    assert!(written.contains(&bootstrap[0]));
+    assert!(written.contains("split-window -h -t %0\n"));
+    assert!(
+        !written.contains("send-keys -t %0 -H 73 65 6e 64"),
+        "bootstrap send-keys must not be hex-encoded again: {written}"
+    );
+    assert!(
+        !written.contains("send-keys -t %0 -H 73 70 6c 69 74"),
+        "split-window must not be hex-encoded: {written}"
+    );
 }

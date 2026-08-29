@@ -724,17 +724,19 @@ pub fn zsh_init_bytes(init_script: &str, shell_type: ShellType) -> Vec<u8> {
     bytes
 }
 
-// Bash records a line before running it, so history is disabled by a preceding
-// command; restore deletes that setup line before re-enabling.
+// Snapshot history options, suppress only this injected setup/body, then restore
+// the prior enabled/disabled and set/unset state before the user prompt.
 fn in_band_history_setup(shell_type: ShellType) -> &'static [u8] {
     match shell_type {
         ShellType::Bash => {
-            b"__warp_histfile=${HISTFILE-};__warp_histcontrol=${HISTCONTROL-};__warp_histignore=${HISTIGNORE-};__warp_histcmd=${HISTCMD};set +o history;HISTFILE=/dev/null;HISTCONTROL=ignorespace;HISTIGNORE='*'\n"
+            b"if shopt -qo history; then __warp_hist_on=1; else __warp_hist_on=0; fi; if [ \"${HISTFILE+x}\" ]; then __warp_histfile=$HISTFILE; __warp_histfile_set=1; else __warp_histfile_set=0; fi; if [ \"${HISTCONTROL+x}\" ]; then __warp_histcontrol=$HISTCONTROL; __warp_histcontrol_set=1; else __warp_histcontrol_set=0; fi; if [ \"${HISTIGNORE+x}\" ]; then __warp_histignore=$HISTIGNORE; __warp_histignore_set=1; else __warp_histignore_set=0; fi; __warp_histcmd=${HISTCMD-}; set +o history; HISTFILE=/dev/null; HISTCONTROL=ignorespace; HISTIGNORE='*'\n"
         }
         ShellType::Zsh => {
-            b"typeset __warp_histfile=$HISTFILE;typeset __warp_savehist=$SAVEHIST;fc -p /dev/null\n"
+            b"if (( ${+HISTFILE} )); then typeset __warp_histfile=$HISTFILE; typeset __warp_histfile_set=1; else typeset __warp_histfile_set=0; fi; if (( ${+SAVEHIST} )); then typeset __warp_savehist=$SAVEHIST; typeset __warp_savehist_set=1; else typeset __warp_savehist_set=0; fi; fc -p /dev/null\n"
         }
-        ShellType::Fish => b"set -g __warp_fish_history $fish_history; set -g fish_history ''\n",
+        ShellType::Fish => {
+            b"if set -q fish_history; set -g __warp_fish_history $fish_history; set -g __warp_fish_history_set 1; else; set -g __warp_fish_history_set 0; end; set -g fish_history ''\n"
+        }
         ShellType::PowerShell => b"",
     }
 }
@@ -742,13 +744,13 @@ fn in_band_history_setup(shell_type: ShellType) -> &'static [u8] {
 fn in_band_history_restore(shell_type: ShellType) -> &'static [u8] {
     match shell_type {
         ShellType::Bash => {
-            br#"[ -n "${__warp_histcmd}" ] && history -d "${__warp_histcmd}" 2>/dev/null;HISTFILE=${__warp_histfile-};HISTCONTROL=${__warp_histcontrol-};HISTIGNORE=${__warp_histignore-};unset __warp_histfile __warp_histcontrol __warp_histignore __warp_histcmd;set -o history"#
+            br#"[ -n "${__warp_histcmd}" ] && history -d "${__warp_histcmd}" 2>/dev/null; if [ "${__warp_histfile_set}" = 1 ]; then HISTFILE=$__warp_histfile; else unset HISTFILE; fi; if [ "${__warp_histcontrol_set}" = 1 ]; then HISTCONTROL=$__warp_histcontrol; else unset HISTCONTROL; fi; if [ "${__warp_histignore_set}" = 1 ]; then HISTIGNORE=$__warp_histignore; else unset HISTIGNORE; fi; if [ "${__warp_hist_on}" = 1 ]; then set -o history; else set +o history; fi; unset __warp_histfile __warp_histfile_set __warp_histcontrol __warp_histcontrol_set __warp_histignore __warp_histignore_set __warp_histcmd __warp_hist_on"#
         }
         ShellType::Zsh => {
-            b"fc -P;HISTFILE=$__warp_histfile;SAVEHIST=$__warp_savehist;unset __warp_histfile __warp_savehist"
+            b"fc -P; if (( __warp_histfile_set )); then HISTFILE=$__warp_histfile; else unset HISTFILE; fi; if (( __warp_savehist_set )); then SAVEHIST=$__warp_savehist; else unset SAVEHIST; fi; unset __warp_histfile __warp_histfile_set __warp_savehist __warp_savehist_set"
         }
         ShellType::Fish => {
-            b"if set -q __warp_fish_history; set -g fish_history $__warp_fish_history; else; set -e fish_history; end; set -e __warp_fish_history"
+            b"if test \"$__warp_fish_history_set\" = 1; set -g fish_history $__warp_fish_history; else; set -e fish_history; end; set -e __warp_fish_history __warp_fish_history_set"
         }
         ShellType::PowerShell => b"",
     }

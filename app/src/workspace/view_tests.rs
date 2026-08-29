@@ -664,11 +664,9 @@ fn tmux_presentation_second_window_is_ready_after_bind_and_flush() {
 
 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
 #[test]
-fn open_tmux_presentation_window_binds_owned_view_and_encodes_send_keys() {
+fn open_tmux_presentation_window_binds_owned_view_and_routes_pane_input() {
     use crate::terminal::model::terminal_model::TmuxClientEvent;
     use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
-    use crate::terminal::tmux::parser::PaneId;
-    use crate::terminal::tmux::protocol::send_keys_commands;
 
     let _tmux = FeatureFlag::TmuxControlPrototype.override_enabled(true);
     App::test((), |mut app| async move {
@@ -711,14 +709,11 @@ fn open_tmux_presentation_window_binds_owned_view_and_encodes_send_keys() {
                 workspace.tmux_active_window_and_pane(ctx),
                 (Some("@0".to_owned()), Some("%0".to_owned()))
             );
-            let commands = workspace
+            let input = workspace
                 .active_tab_pane_group()
                 .as_ref(ctx)
-                .tmux_presentation_input_commands(b"hi", ctx);
-            assert_eq!(
-                commands,
-                Some(send_keys_commands(&PaneId::from("%0"), b"hi"))
-            );
+                .tmux_presentation_pane_input(b"hi", ctx);
+            assert_eq!(input, Some(("%0".to_owned(), b"hi".to_vec())));
         });
         assert!(runtime.is_presentation_ready());
         assert!(TmuxRuntime::for_id(TmuxInstanceId::from_u64(instance_id)).is_some());

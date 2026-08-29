@@ -150,6 +150,25 @@ fn enqueue_input(state: &mut State, input: Cow<'static, [u8]>) {
     }
 }
 
+fn enqueue_tmux_control(state: &mut State, input: Cow<'static, [u8]>) {
+    if !FeatureFlag::TmuxControlPrototype.is_enabled() {
+        return;
+    }
+    for item in state.tmux.enqueue_control_command(input) {
+        state.write_list.push_back(item);
+    }
+}
+
+fn enqueue_tmux_pane_input(state: &mut State, pane_id: PaneId, input: Cow<'static, [u8]>) {
+    if !FeatureFlag::TmuxControlPrototype.is_enabled() {
+        state.write_list.push_back(input);
+        return;
+    }
+    for item in state.tmux.enqueue_pane_input(&pane_id, input) {
+        state.write_list.push_back(item);
+    }
+}
+
 fn feed_decoded_pty_bytes<M: ActiveTerminal, W: io::Write>(
     state: &mut State,
     terminal: &mut M,
@@ -316,6 +335,10 @@ where
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Message::Input(input) => enqueue_input(state, input),
+                Message::TmuxControlCommand(input) => enqueue_tmux_control(state, input),
+                Message::TmuxPaneInput { pane_id, bytes } => {
+                    enqueue_tmux_pane_input(state, pane_id, bytes)
+                }
                 Message::Shutdown => {
                     return ChannelResult::TerminateLoop {
                         child_exited: false,

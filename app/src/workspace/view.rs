@@ -13002,7 +13002,20 @@ impl Workspace {
     ) {
         if let Some(view) = Self::gateway_view_for_tmux_control_write(instance_id, ctx) {
             view.update(ctx, |view, ctx| {
-                view.write_to_pty(bytes, ctx);
+                view.write_tmux_control_command(bytes, ctx);
+            });
+        }
+    }
+
+    fn write_tmux_pane_input_to_gateway(
+        pane_id: String,
+        bytes: std::borrow::Cow<'static, [u8]>,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(view) = Self::gateway_view_for_tmux_control_write(instance_id, ctx) {
+            view.update(ctx, |view, ctx| {
+                view.write_tmux_pane_input(pane_id, bytes, ctx);
             });
         }
     }
@@ -17475,6 +17488,18 @@ impl Workspace {
             }
             pane_group::Event::TmuxControlWrite { bytes, instance_id } => {
                 Self::write_tmux_to_gateway(bytes.clone(), *instance_id, ctx);
+            }
+            pane_group::Event::TmuxPaneInput {
+                pane_id,
+                bytes,
+                instance_id,
+            } => {
+                Self::write_tmux_pane_input_to_gateway(
+                    pane_id.clone(),
+                    bytes.clone(),
+                    *instance_id,
+                    ctx,
+                );
             }
             pane_group::Event::TmuxClientEvents(events) => {
                 self.apply_tmux_client_events(events, ctx);

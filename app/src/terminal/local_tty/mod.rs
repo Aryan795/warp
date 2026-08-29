@@ -29,7 +29,7 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
 
     fn on_tmux_control_mode(&mut self, active: bool) {
         self.set_tmux_control_mode(active);
-        #[cfg(not(feature = "remote_tty"))]
+        #[cfg(all(unix, not(feature = "remote_tty")))]
         {
             use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
             if active
@@ -48,12 +48,8 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
         }
     }
 
-    fn on_tmux_pane_output(
-        &mut self,
-        pane_id: &crate::terminal::tmux::parser::PaneId,
-        bytes: &[u8],
-    ) {
-        #[cfg(not(feature = "remote_tty"))]
+    fn on_tmux_pane_output(&mut self, pane_id: &warp_terminal::tmux::PaneId, bytes: &[u8]) {
+        #[cfg(all(unix, not(feature = "remote_tty")))]
         {
             use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
             if let Some(id) = self.tmux_instance_id()
@@ -63,19 +59,19 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
                 self.on_tmux_presentation_unready();
             }
         }
-        #[cfg(feature = "remote_tty")]
+        #[cfg(not(all(unix, not(feature = "remote_tty"))))]
         {
             let _ = (pane_id, bytes);
         }
     }
 
-    fn on_tmux_focus(&mut self, pane_id: &crate::terminal::tmux::parser::PaneId) {
+    fn on_tmux_focus(&mut self, pane_id: &warp_terminal::tmux::PaneId) {
         self.set_tmux_focused_pane(Some(pane_id.as_str().to_owned()));
     }
 
     fn on_tmux_layout(
         &mut self,
-        window_id: &crate::terminal::tmux::parser::WindowId,
+        window_id: &warp_terminal::tmux::WindowId,
         layout: &str,
         visible_layout: Option<&str>,
         flags: Option<&str>,
@@ -90,7 +86,7 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
         );
     }
 
-    fn on_tmux_window_add(&mut self, window_id: &crate::terminal::tmux::parser::WindowId) {
+    fn on_tmux_window_add(&mut self, window_id: &warp_terminal::tmux::WindowId) {
         self.push_tmux_event(
             crate::terminal::model::terminal_model::TmuxClientEvent::WindowAdd {
                 window_id: window_id.as_str().to_owned(),
@@ -98,7 +94,7 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
         );
     }
 
-    fn on_tmux_window_close(&mut self, window_id: &crate::terminal::tmux::parser::WindowId) {
+    fn on_tmux_window_close(&mut self, window_id: &warp_terminal::tmux::WindowId) {
         self.push_tmux_event(
             crate::terminal::model::terminal_model::TmuxClientEvent::WindowClose {
                 window_id: window_id.as_str().to_owned(),
@@ -106,11 +102,7 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
         );
     }
 
-    fn on_tmux_window_renamed(
-        &mut self,
-        window_id: &crate::terminal::tmux::parser::WindowId,
-        name: &str,
-    ) {
+    fn on_tmux_window_renamed(&mut self, window_id: &warp_terminal::tmux::WindowId, name: &str) {
         self.push_tmux_event(
             crate::terminal::model::terminal_model::TmuxClientEvent::WindowRenamed {
                 window_id: window_id.as_str().to_owned(),
@@ -119,10 +111,7 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
         );
     }
 
-    fn on_tmux_session_window_changed(
-        &mut self,
-        window_id: &crate::terminal::tmux::parser::WindowId,
-    ) {
+    fn on_tmux_session_window_changed(&mut self, window_id: &warp_terminal::tmux::WindowId) {
         self.push_tmux_event(
             crate::terminal::model::terminal_model::TmuxClientEvent::SessionWindowChanged {
                 window_id: window_id.as_str().to_owned(),
@@ -135,7 +124,7 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
         number: u64,
         error: bool,
         payload: &[String],
-        capture_pane: Option<&crate::terminal::tmux::parser::PaneId>,
+        capture_pane: Option<&warp_terminal::tmux::PaneId>,
     ) {
         self.push_tmux_event(
             crate::terminal::model::terminal_model::TmuxClientEvent::CommandEnd {

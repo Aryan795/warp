@@ -604,6 +604,29 @@ impl<T: EventLoopSender> PtyController<T> {
         );
     }
 
+    pub fn write_tmux_control_command<B: Into<Cow<'static, [u8]>>>(
+        &self,
+        bytes: B,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.send_message_to_event_loop(Message::TmuxControlCommand(bytes.into()), ctx);
+    }
+
+    pub fn write_tmux_pane_input<B: Into<Cow<'static, [u8]>>>(
+        &self,
+        pane_id: String,
+        bytes: B,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.send_message_to_event_loop(
+            Message::TmuxPaneInput {
+                pane_id: warp_terminal::tmux::PaneId::from(pane_id.as_str()),
+                bytes: bytes.into(),
+            },
+            ctx,
+        );
+    }
+
     /// Shuts down the pty and event loop.
     pub fn shutdown_pty(&mut self, ctx: &mut ModelContext<Self>) {
         self.send_message_to_event_loop(Message::Shutdown, ctx);

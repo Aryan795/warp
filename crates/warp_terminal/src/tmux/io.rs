@@ -59,6 +59,7 @@ enum TmuxPhase {
     Inactive,
     StartPending {
         pending_writes: Vec<Cow<'static, [u8]>>,
+        pending_control: Vec<Cow<'static, [u8]>>,
         pending_resize: Option<(usize, usize)>,
         started_at: Instant,
     },
@@ -131,6 +132,7 @@ impl TmuxIoState {
                 if is_start {
                     self.phase = TmuxPhase::StartPending {
                         pending_writes: Vec::new(),
+                        pending_control: Vec::new(),
                         pending_resize: None,
                         started_at: Instant::now(),
                     };
@@ -147,13 +149,6 @@ impl TmuxIoState {
                 Vec::new()
             }
             TmuxPhase::InControl { .. } => {
-                if is_detach_client_command(&input) {
-                    return self.begin_detach_recovery();
-                }
-                if is_tmux_client_command(&input) {
-                    self.note_outgoing_command(&input);
-                    return vec![input];
-                }
                 let focused = match &self.phase {
                     TmuxPhase::InControl { focused, .. } => focused.clone(),
                     _ => None,
@@ -173,6 +168,58 @@ impl TmuxIoState {
                     Vec::new()
                 }
             }
+        }
+    }
+
+    pub fn enqueue_control_command(
+        &mut self,
+        input: Cow<'static, [u8]>,
+    ) -> Vec<Cow<'static, [u8]>> {
+        let input = command_line(input);
+        match &mut self.phase {
+            TmuxPhase::StartPending {
+                pending_control, ..
+            } => {
+                pending_control.push(input);
+                Vec::new()
+            }
+            TmuxPhase::InControl { .. } => {
+                if is_detach_client_command(&input) {
+                    return self.begin_detach_recovery();
+                }
+                self.note_outgoing_command(&input);
+                vec![input]
+            }
+            TmuxPhase::Inactive
+            | TmuxPhase::OverflowRecovering { .. }
+            | TmuxPhase::PresentationRecovering { .. } => Vec::new(),
+        }
+    }
+
+    pub fn enqueue_pane_input(
+        &mut self,
+        pane_id: &PaneId,
+        input: Cow<'static, [u8]>,
+    ) -> Vec<Cow<'static, [u8]>> {
+        match &mut self.phase {
+            TmuxPhase::StartPending { pending_writes, .. }
+            | TmuxPhase::OverflowRecovering { pending_writes }
+            | TmuxPhase::PresentationRecovering { pending_writes } => {
+                pending_writes.push(input);
+                Vec::new()
+            }
+            TmuxPhase::InControl { .. } => self.encode_pane_bytes(pane_id, &input),
+            TmuxPhase::Inactive => Vec::new(),
+        }
+    }
+
+    fn encode_pane_bytes(&mut self, pane_id: &PaneId, input: &[u8]) -> Vec<Cow<'static, [u8]>> {
+        let encoded = send_keys_command(pane_id, input);
+        if encoded.is_empty() {
+            Vec::new()
+        } else {
+            self.note_outgoing_command(&encoded);
+            vec![Cow::Owned(encoded)]
         }
     }
 
@@ -344,15 +391,22 @@ impl TmuxIoState {
         }
         match event {
             ControlEvent::EnteredControlMode => {
-                let (pending_writes, pending_resize, from_start) = match &mut self.phase {
-                    TmuxPhase::StartPending {
-                        pending_writes,
-                        pending_resize,
-                        ..
-                    } => (std::mem::take(pending_writes), pending_resize.take(), true),
-                    TmuxPhase::Inactive => (Vec::new(), None, false),
-                    _ => (Vec::new(), None, false),
-                };
+                let (pending_writes, pending_control, pending_resize, from_start) =
+                    match &mut self.phase {
+                        TmuxPhase::StartPending {
+                            pending_writes,
+                            pending_control,
+                            pending_resize,
+                            ..
+                        } => (
+                            std::mem::take(pending_writes),
+                            std::mem::take(pending_control),
+                            pending_resize.take(),
+                            true,
+                        ),
+                        TmuxPhase::Inactive => (Vec::new(), Vec::new(), None, false),
+                        _ => (Vec::new(), Vec::new(), None, false),
+                    };
                 self.phase = TmuxPhase::InControl {
                     focused: None,
                     known_panes: HashSet::new(),
@@ -380,6 +434,10 @@ impl TmuxIoState {
                 items.push(TmuxFeedItem::EncodedPending(
                     LIST_WINDOWS_LAYOUT_COMMAND.as_bytes().to_vec(),
                 ));
+                for command in pending_control {
+                    self.note_outgoing_command(&command);
+                    items.push(TmuxFeedItem::EncodedPending(command.into_owned()));
+                }
                 items
             }
             ControlEvent::PaneOutput { pane_id, bytes } => {
@@ -813,6 +871,16 @@ fn is_canonical_bootstrap_window(window_id: &WindowId) -> bool {
 
 fn is_canonical_bootstrap_pane(pane_id: &PaneId) -> bool {
     pane_id.as_str() == "%0"
+}
+
+fn command_line(input: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
+    if input.ends_with(b"\n") {
+        input
+    } else {
+        let mut bytes = input.into_owned();
+        bytes.push(b'\n');
+        Cow::Owned(bytes)
+    }
 }
 
 #[cfg(test)]

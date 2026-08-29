@@ -29,6 +29,7 @@ const MAX_LOCKED_READ: usize = 0x1_0000;
 pub struct SharedControlState {
     pane_id: Mutex<Option<PaneId>>,
     pending_pane_writes: Mutex<Vec<Cow<'static, [u8]>>>,
+    pending_control: Mutex<Vec<Cow<'static, [u8]>>>,
 }
 
 impl SharedControlState {
@@ -36,7 +37,13 @@ impl SharedControlState {
         Self {
             pane_id: Mutex::new(None),
             pending_pane_writes: Mutex::new(Vec::new()),
+            pending_control: Mutex::new(Vec::new()),
         }
+    }
+
+    #[cfg(test)]
+    fn bind_pane(&self, pane_id: PaneId) {
+        *self.pane_id.lock() = Some(pane_id);
     }
 }
 
@@ -63,35 +70,54 @@ impl TmuxControlSender {
             .send(message)
             .map_err(|_| EventLoopSendError::Disconnected)
     }
+
+    fn send_control(&self, bytes: Cow<'static, [u8]>) -> Result<(), EventLoopSendError> {
+        let in_control = self.shared.pane_id.lock().is_some();
+        if in_control {
+            self.send_inner(Message::TmuxControlCommand(bytes))
+        } else {
+            self.shared.pending_control.lock().push(bytes);
+            Ok(())
+        }
+    }
+
+    fn send_pane_bytes(
+        &self,
+        pane_id: Option<PaneId>,
+        bytes: Cow<'static, [u8]>,
+    ) -> Result<(), EventLoopSendError> {
+        let encoded = {
+            let stored = self.shared.pane_id.lock();
+            let target = pane_id.as_ref().or(stored.as_ref());
+            if let Some(target) = target {
+                send_keys_commands(target, &bytes)
+                    .into_iter()
+                    .map(|command| Cow::Owned(command.into_bytes()))
+                    .collect::<Vec<_>>()
+            } else {
+                self.shared.pending_pane_writes.lock().push(bytes);
+                Vec::new()
+            }
+        };
+        for command in encoded {
+            self.send_inner(Message::TmuxControlCommand(command))?;
+        }
+        Ok(())
+    }
 }
 
 impl EventLoopSender for TmuxControlSender {
     fn send(&self, message: Message) -> Result<(), EventLoopSendError> {
         match message {
-            Message::Input(bytes) => {
-                let encoded = {
-                    let pane = self.shared.pane_id.lock();
-                    if let Some(pane_id) = pane.as_ref() {
-                        send_keys_commands(pane_id, &bytes)
-                            .into_iter()
-                            .map(|command| Cow::Owned(command.into_bytes()))
-                            .collect::<Vec<_>>()
-                    } else {
-                        self.shared.pending_pane_writes.lock().push(bytes);
-                        Vec::new()
-                    }
-                };
-                for command in encoded {
-                    self.send_inner(Message::Input(command))?;
-                }
-                Ok(())
-            }
+            Message::Input(bytes) => self.send_pane_bytes(None, bytes),
+            Message::TmuxPaneInput { pane_id, bytes } => self.send_pane_bytes(Some(pane_id), bytes),
+            Message::TmuxControlCommand(bytes) => self.send_control(bytes),
             Message::Resize(size) => {
                 let command = refresh_client_command(size.columns(), size.rows());
-                self.send_inner(Message::Input(Cow::Owned(command.into_bytes())))
+                self.send_control(Cow::Owned(command.into_bytes()))
             }
             Message::Shutdown => {
-                let _ = self.send_inner(Message::Input(Cow::Borrowed(
+                let _ = self.send_inner(Message::TmuxControlCommand(Cow::Borrowed(
                     kill_server_command().as_bytes(),
                 )));
                 self.send_inner(Message::Shutdown)
@@ -335,7 +361,14 @@ where
     fn drain_recv_channel(&mut self, state: &mut LoopState) -> ChannelResult {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Message::Input(input) => state.write_list.push_back(input),
+                Message::Input(input) | Message::TmuxControlCommand(input) => {
+                    state.write_list.push_back(input)
+                }
+                Message::TmuxPaneInput { pane_id, bytes } => {
+                    for command in send_keys_commands(&pane_id, &bytes) {
+                        state.write_list.push_back(Cow::Owned(command.into_bytes()));
+                    }
+                }
                 Message::Shutdown => {
                     return ChannelResult::TerminateLoop {
                         child_exited: false,
@@ -434,6 +467,7 @@ where
         drop(stored);
 
         let pending = std::mem::take(&mut *shared.pending_pane_writes.lock());
+        let pending_control = std::mem::take(&mut *shared.pending_control.lock());
         let mut to_send = Vec::new();
         if let Some((init_script, shell_type)) = zsh_init.take() {
             to_send.push(zsh_init_bytes(&init_script, shell_type));
@@ -444,6 +478,7 @@ where
                 state.write_list.push_back(Cow::Owned(command.into_bytes()));
             }
         }
+        state.write_list.extend(pending_control);
     }
 
     fn pty_write(&mut self, state: &mut LoopState, can_write: &mut bool) -> io::Result<()> {
