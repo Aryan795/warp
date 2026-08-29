@@ -19,17 +19,15 @@ fn request_context() -> RequestContext {
 }
 
 #[test]
-fn current_query_selects_partial_refresh_fields() {
+fn current_query_selects_authority_fields() {
     let operation = TaskGitCredentials::build(TaskGitCredentialsVariables {
         input: TaskGitCredentialsInput {
             task_id: cynic::Id::new("task"),
             workload_token: "token".to_string(),
-            accepts_partial_refresh: Some(true),
         },
         request_context: request_context(),
     });
 
-    assert!(operation.query.contains("failedHosts"));
     assert!(operation.query.contains("credentials"));
     for field in [
         "id",
@@ -52,21 +50,7 @@ fn current_query_selects_partial_refresh_fields() {
 }
 
 #[test]
-fn bootstrap_query_still_selects_failed_hosts() {
-    let operation = TaskGitCredentials::build(TaskGitCredentialsVariables {
-        input: TaskGitCredentialsInput {
-            task_id: cynic::Id::new("task"),
-            workload_token: "token".to_string(),
-            accepts_partial_refresh: Some(false),
-        },
-        request_context: request_context(),
-    });
-
-    assert!(operation.query.contains("failedHosts"));
-}
-
-#[test]
-fn legacy_query_omits_partial_refresh_fields() {
+fn legacy_query_omits_authority_fields() {
     let operation = TaskGitCredentialsLegacy::build(TaskGitCredentialsLegacyVariables {
         input: TaskGitCredentialsLegacyInput {
             task_id: cynic::Id::new("task"),
@@ -75,8 +59,6 @@ fn legacy_query_omits_partial_refresh_fields() {
         request_context: request_context(),
     });
 
-    assert!(!operation.query.contains("acceptsPartialRefresh"));
-    assert!(!operation.query.contains("failedHosts"));
     assert!(operation.query.contains("credentials"));
     for field in [
         "id",

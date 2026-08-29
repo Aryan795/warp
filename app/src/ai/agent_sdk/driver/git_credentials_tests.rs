@@ -1,9 +1,11 @@
 use std::io::Write as _;
 use std::process::Stdio;
+use std::sync::Mutex;
 
 use command::blocking::Command;
 
 use super::*;
+static CREDENTIAL_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn gitlab_credential(id: &str, project_path: &str, token: &str) -> GitCredential {
     GitCredential {
@@ -82,13 +84,14 @@ fn explicit_clone_url_preserves_port_prefix_and_has_no_token() {
     let credential = gitlab_credential("one", "platform/backend.git", "secret-token");
 
     let clone_url = clone_url_for_path(&credential, "platform/backend").unwrap();
+    let parsed = Url::parse(&clone_url).unwrap();
 
-    assert_eq!(
-        clone_url,
-        "https://gitlab.example.com:8443/gitlab/platform/backend.git"
-    );
-    assert!(!clone_url.contains("secret-token"));
-    assert!(!clone_url.contains('@'));
+    assert_eq!(parsed.scheme(), "https");
+    assert_eq!(parsed.host_str(), Some("gitlab.example.com"));
+    assert_eq!(parsed.port(), Some(8443));
+    assert_eq!(parsed.path(), "/gitlab/platform/backend.git");
+    assert_eq!(parsed.username(), "");
+    assert_eq!(parsed.password(), None);
 }
 
 #[test]
@@ -261,52 +264,34 @@ fn ordinary_glab_wrapper_discovers_each_checkout_config() {
     assert_eq!(selected_tokens, ["token-one", "token-two"]);
 }
 
-#[test]
-fn refresh_merges_by_credential_id_instead_of_host() {
-    let credentials = merged_credentials_by_id(
-        &[
-            gitlab_credential("one", "group/one", "old-one"),
-            gitlab_credential("two", "group/two", "old-two"),
-        ],
-        &[gitlab_credential("two", "group/two", "new-two")],
-    )
-    .unwrap();
-
-    assert_eq!(credentials[0].token, "old-one");
-    assert_eq!(credentials[1].token, "new-two");
-}
 
 #[test]
 fn diagnostics_do_not_expose_tokens_hosts_or_identity() {
-    let diagnostics = credential_diagnostics(
-        &[gitlab_credential(
-            "credential-one",
-            "group/one",
-            "secret-token",
-        )],
-        &["gitlab.example.com".to_string()],
-    );
+    let diagnostics = credential_diagnostics(&[gitlab_credential(
+        "credential-one",
+        "group/one",
+        "secret-token",
+    )]);
 
     assert!(diagnostics.contains("credential-one"));
-    assert!(diagnostics.contains("failed_credential_count=1"));
     assert!(!diagnostics.contains("secret-token"));
     assert!(!diagnostics.contains("gitlab.example.com"));
     assert!(!diagnostics.contains("oauth2"));
 }
 
 #[test]
-fn bootstrap_rejects_any_partial_failure_without_naming_hosts() {
-    let error = credentials_for_bootstrap(TaskGitCredentialsResponse {
+fn bootstrap_accepts_the_authoritative_credential_set() {
+    let credentials = credentials_for_bootstrap(TaskGitCredentialsResponse {
         credentials: vec![github_credential()],
-        failed_hosts: vec!["customer-gitlab.example.com".to_string()],
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(!error.to_string().contains("customer-gitlab.example.com"));
+    assert_eq!(credentials.len(), 1);
+    assert_eq!(credentials[0].id, "github");
 }
 
 #[test]
-fn git_preflight_command_has_no_tokens() {
+fn git_preflight_script_checks_exact_remote_urls_without_local_checkouts() {
     let repositories = [
         SourceRepo::new(CodeForge::GitLab, "group".to_string(), "one".to_string()),
         SourceRepo::new(CodeForge::GitLab, "group".to_string(), "two".to_string()),
@@ -324,16 +309,172 @@ fn git_preflight_command_has_no_tokens() {
         })
         .collect::<Vec<_>>();
 
-    let command = git_access_check_command(&repositories, Path::new("/workspace")).unwrap();
+    let script = git_access_check_script(&repositories);
 
-    assert!(command.contains("/workspace/one"));
-    assert!(command.contains("/workspace/two"));
-    assert!(command.contains(
-        "ls-remote --exit-code 'https://gitlab.example.com:8443/gitlab/group/one.git' HEAD"
-    ));
-    assert!(!command.contains("token-one"));
-    assert!(!command.contains("token-two"));
-    assert!(!command.contains("GITLAB_TOKEN"));
+    assert_eq!(
+        script,
+        "git ls-remote --exit-code 'https://gitlab.example.com:8443/gitlab/group/one.git' HEAD >/dev/null 2>&1 || exit 1\n\
+         git ls-remote --exit-code 'https://gitlab.example.com:8443/gitlab/group/two.git' HEAD >/dev/null 2>&1 || exit 1\n"
+    );
+}
+
+#[test]
+fn task_git_configuration_is_environment_scoped_and_path_aware() {
+    let home = Path::new("/home/agent");
+    let entries = task_git_config_entries(
+        &[gitlab_credential("one", "group/one", "token-one")],
+        home,
+    )
+    .unwrap();
+
+    assert_eq!(
+        entries,
+        vec![
+            ("credential.helper".to_string(), String::new()),
+            (
+                "credential.helper".to_string(),
+                "store --file=/home/agent/.warp/task-git/credentials".to_string(),
+            ),
+            ("credential.useHttpPath".to_string(), "true".to_string()),
+            (
+                "url.https://gitlab.example.com:8443/gitlab/.insteadOf".to_string(),
+                "ssh://git@gitlab.example.com/".to_string(),
+            ),
+            (
+                "url.https://gitlab.example.com:8443/gitlab/.insteadOf".to_string(),
+                "git@gitlab.example.com:".to_string(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn task_environment_keeps_github_cli_configuration_task_local() {
+    let home = Path::new("/home/agent");
+    let variables = task_environment_variables_for(&[github_credential()], home)
+        .unwrap()
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    assert_eq!(
+        variables.get(&OsString::from("GH_CONFIG_DIR")),
+        Some(&OsString::from("/home/agent/.warp/task-git/gh"))
+    );
+    assert_eq!(
+        variables.get(&OsString::from("GIT_CONFIG_COUNT")),
+        Some(&OsString::from("5"))
+    );
+}
+
+#[test]
+fn task_cleanup_removes_all_memory_and_filesystem_state() {
+    let _guard = CREDENTIAL_STATE_TEST_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let credentials = vec![gitlab_credential("one", "group/one", "token-one")];
+    replace_task_credentials(&credentials).unwrap();
+    REPOSITORY_BINDINGS.write().unwrap().insert(
+        (CodeForge::GitLab, "group/one".to_string()),
+        "one".to_string(),
+    );
+    GLAB_CONFIGS.write().unwrap().push(RegisteredGlabConfig {
+        credential_id: "one".to_string(),
+        config_dir: home.join("repository-glab"),
+    });
+    std::fs::create_dir_all(home.join("repository-glab")).unwrap();
+    std::fs::write(home.join("repository-glab/config.yml"), "stale-token").unwrap();
+    let task_root = task_credentials_root(home);
+    std::fs::create_dir_all(task_root.join("bin")).unwrap();
+    std::fs::write(task_root.join("bin/glab"), "stale").unwrap();
+
+    clear_task_credential_state(home).unwrap();
+
+    assert!(task_credentials_snapshot().unwrap().is_empty());
+    assert!(REPOSITORY_BINDINGS.read().unwrap().is_empty());
+    assert!(GLAB_CONFIGS.read().unwrap().is_empty());
+    assert!(!task_root.exists());
+    assert!(!home.join("repository-glab").exists());
+}
+
+#[test]
+fn refresh_replaces_the_complete_credential_set_and_revokes_omitted_tokens() {
+    let _guard = CREDENTIAL_STATE_TEST_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    replace_task_credentials(&[gitlab_credential(
+        "gitlab",
+        "group/one",
+        "old-gitlab-token",
+    )])
+    .unwrap();
+    let glab_dir = home.join("repository-glab");
+    std::fs::create_dir_all(&glab_dir).unwrap();
+    std::fs::write(glab_dir.join("config.yml"), "old-gitlab-token").unwrap();
+    GLAB_CONFIGS.write().unwrap().push(RegisteredGlabConfig {
+        credential_id: "gitlab".to_string(),
+        config_dir: glab_dir.clone(),
+    });
+    let task_root = task_credentials_root(home);
+    std::fs::create_dir_all(task_root.join("bin")).unwrap();
+    std::fs::write(task_root.join("bin/glab"), "old-gitlab-token").unwrap();
+
+    apply_refreshed_credentials_at_home(
+        TaskGitCredentialsResponse {
+            credentials: vec![github_credential()],
+        },
+        home,
+    )
+    .unwrap();
+
+    let credentials = task_credentials_snapshot().unwrap();
+    assert_eq!(credentials.len(), 1);
+    assert_eq!(credentials[0].id, "github");
+    assert!(!glab_dir.exists());
+    assert!(!task_root.join("bin/glab").exists());
+    let store = std::fs::read_to_string(task_credentials_file(home)).unwrap();
+    assert!(store.contains("github-token"));
+    assert!(!store.contains("old-gitlab-token"));
+    let gh_config = std::fs::read_to_string(task_gh_config_dir(home).join(GH_HOSTS_FILENAME)).unwrap();
+    assert!(gh_config.contains("github-token"));
+    assert!(!gh_config.contains("old-gitlab-token"));
+
+    clear_task_credential_state(home).unwrap();
+}
+#[test]
+fn public_address_policy_rejects_private_reserved_and_mixed_dns_members() {
+    for address in [
+        IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1)),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+        IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+        IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1)),
+        IpAddr::V6(Ipv6Addr::LOCALHOST),
+        IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)),
+        IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1)),
+        IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x0a00, 1)),
+    ] {
+        assert!(!ip_address_is_public(address), "{address}");
+    }
+    for address in [
+        IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+        IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)),
+    ] {
+        assert!(ip_address_is_public(address), "{address}");
+    }
+
+    let mixed = [
+        IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+    ];
+    assert!(!mixed.into_iter().all(ip_address_is_public));
 }
 
 #[test]

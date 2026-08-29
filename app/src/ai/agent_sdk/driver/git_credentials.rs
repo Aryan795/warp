@@ -4,7 +4,9 @@
 //! complete HTTPS repository path, and each GitLab checkout receives a private
 //! `glab` configuration selected by a task-local wrapper.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ffi::OsString;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -26,6 +28,7 @@ const DEFAULT_GIT_NAME: &str = "Warp";
 const DEFAULT_GIT_EMAIL: &str = "agent@warp.dev";
 const GITHUB_HOST: &str = "github.com";
 const GITLAB_HOST: &str = "gitlab.com";
+const GH_CONFIG_DIRNAME: &str = "gh";
 const GH_HOSTS_FILENAME: &str = "hosts.yml";
 const GLAB_CONFIG_FILENAME: &str = "config.yml";
 const TASK_CREDENTIALS_DIR: &str = ".warp/task-git";
@@ -47,23 +50,50 @@ struct RegisteredGlabConfig {
     config_dir: PathBuf,
 }
 
-fn merged_credentials_by_id(
-    existing: &[GitCredential],
-    refreshed: &[GitCredential],
-) -> Result<Vec<GitCredential>> {
-    let refreshed = unique_credentials_by_id(refreshed)?;
-    let mut merged = existing.to_vec();
-    for credential in refreshed {
-        if let Some(existing) = merged
-            .iter_mut()
-            .find(|existing| existing.id == credential.id)
+fn remove_owned_directory(path: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("Failed to remove {}", path.display())),
+    }
+}
+
+fn remove_glab_config_directories(configs: &[RegisteredGlabConfig]) -> Result<()> {
+    let mut cleanup_error = None;
+    for config in configs {
+        if let Err(error) = remove_owned_directory(&config.config_dir)
+            && cleanup_error.is_none()
         {
-            *existing = credential;
-        } else {
-            merged.push(credential);
+            cleanup_error = Some(error);
         }
     }
-    Ok(merged)
+    match cleanup_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+fn clear_task_credential_state(home: &Path) -> Result<()> {
+    replace_task_credentials(&[])?;
+    REPOSITORY_BINDINGS
+        .write()
+        .map_err(|_| anyhow::anyhow!("Task repository credential state is unavailable"))?
+        .clear();
+    let glab_configs = {
+        let mut configs = GLAB_CONFIGS
+            .write()
+            .map_err(|_| anyhow::anyhow!("Repository-local glab state is unavailable"))?;
+        std::mem::take(&mut *configs)
+    };
+    let mut cleanup_error = remove_owned_directory(&task_credentials_root(home)).err();
+    if let Err(error) = remove_glab_config_directories(&glab_configs)
+        && cleanup_error.is_none()
+    {
+        cleanup_error = Some(error);
+    }
+    match cleanup_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +124,19 @@ fn task_bin_dir_for_home(home: &Path) -> PathBuf {
     task_credentials_root(home).join(TASK_BIN_DIRNAME)
 }
 
+fn task_gh_config_dir(home: &Path) -> PathBuf {
+    task_credentials_root(home).join(GH_CONFIG_DIRNAME)
+}
+
 pub(crate) fn task_bin_dir() -> Option<PathBuf> {
+    let has_gitlab_credential = TASK_CREDENTIALS
+        .read()
+        .ok()?
+        .iter()
+        .any(is_gitlab_credential);
+    if !has_gitlab_credential {
+        return None;
+    }
     let home = home_dir().ok()?;
     let bin_dir = task_bin_dir_for_home(&home);
     bin_dir
@@ -336,13 +378,6 @@ fn replace_task_credentials(credentials: &[GitCredential]) -> Result<Vec<GitCred
     Ok(credentials)
 }
 
-fn merge_task_credentials(credentials: &[GitCredential]) -> Result<Vec<GitCredential>> {
-    let mut stored = TASK_CREDENTIALS
-        .write()
-        .map_err(|_| anyhow::anyhow!("Task Git credential state is unavailable"))?;
-    *stored = merged_credentials_by_id(&stored, credentials)?;
-    Ok(stored.clone())
-}
 
 fn select_credential_for_repository<'a>(
     credentials: &'a [GitCredential],
@@ -527,7 +562,7 @@ fn write_gh_hosts_yml(credentials: &[GitCredential], home: &Path) -> Result<()> 
         bail!("Multiple GitHub task credentials cannot share the gh host configuration");
     }
 
-    let gh_config_dir = home.join(".config").join("gh");
+    let gh_config_dir = task_gh_config_dir(home);
     std::fs::create_dir_all(&gh_config_dir)
         .with_context(|| format!("Failed to create {}", gh_config_dir.display()))?;
     let path = gh_config_dir.join(GH_HOSTS_FILENAME);
@@ -702,16 +737,17 @@ fn register_glab_config(credential_id: &str, config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_registered_glab_configs(credentials: &[GitCredential]) -> Result<()> {
+fn sync_registered_glab_configs(credentials: &[GitCredential]) -> Result<()> {
     let configs = GLAB_CONFIGS
         .read()
         .map_err(|_| anyhow::anyhow!("Repository-local glab state is unavailable"))?
         .clone();
     for config in configs {
-        let credential = credentials
-            .iter()
-            .find(|credential| credential.id == config.credential_id)
-            .ok_or_else(|| anyhow::anyhow!("Repository-local glab credential is unavailable"))?;
+        let Some(credential) = credentials.iter().find(|credential| {
+            credential.id == config.credential_id && is_gitlab_credential(credential)
+        }) else {
+            continue;
+        };
         write_glab_config_for_credential(credential, &config.config_dir)?;
     }
     Ok(())
@@ -760,41 +796,21 @@ pub(crate) fn configure_repository_credentials(
     register_glab_config(&credential.id, &config_dir)
 }
 
-fn run_git_config(args: &[&str]) -> Result<()> {
-    let output = BlockingCommand::new("git")
-        .arg("config")
-        .arg("--global")
-        .args(args)
-        .output()
-        .context("Failed to run global Git configuration")?;
-    if !output.status.success() {
-        bail!("Failed to run global Git configuration");
-    }
-    Ok(())
-}
-
-fn clear_git_credential_helpers() -> Result<()> {
-    let output = BlockingCommand::new("git")
-        .args(["config", "--global", "--unset-all", "credential.helper"])
-        .output()
-        .context("Failed to clear global Git credential helpers")?;
-    if output.status.success() || output.status.code() == Some(5) {
-        Ok(())
-    } else {
-        bail!("Failed to clear global Git credential helpers")
-    }
-}
-
-fn setup_git_config(credentials: &[GitCredential], home: &Path) -> Result<()> {
-    clear_git_credential_helpers()?;
+fn task_git_config_entries(
+    credentials: &[GitCredential],
+    home: &Path,
+) -> Result<Vec<(String, String)>> {
     let helper = format!(
         "store --file={}",
         task_credentials_file(home).to_string_lossy()
     );
-    run_git_config(&["credential.helper", &helper])?;
-    run_git_config(&["credential.useHttpPath", "true"])?;
+    let mut entries = vec![
+        ("credential.helper".to_string(), String::new()),
+        ("credential.helper".to_string(), helper),
+        ("credential.useHttpPath".to_string(), "true".to_string()),
+    ];
 
-    let mut configured_origins = HashSet::new();
+    let mut configured_origins = BTreeSet::new();
     for credential in credentials {
         let origin = credential_origin(credential)?;
         let rewrite_base = origin.as_str().to_string();
@@ -803,37 +819,64 @@ fn setup_git_config(credentials: &[GitCredential], home: &Path) -> Result<()> {
         }
         let key = format!("url.{rewrite_base}.insteadOf");
         let ssh_url = format!("ssh://git@{}/", credential.host);
-        run_git_config(&["--add", &key, &ssh_url])?;
+        entries.push((key.clone(), ssh_url));
         let scp_url = format!("git@{}:", credential.host);
-        run_git_config(&["--add", &key, &scp_url])?;
+        entries.push((key, scp_url));
     }
-    Ok(())
+    Ok(entries)
 }
 
-fn configure_global_git_identity(credentials: &[GitCredential]) -> Result<()> {
-    let (name, email) = identity_of(credentials.first());
-    run_git_config(&["user.name", &name])?;
-    run_git_config(&["user.email", &email])
+fn task_environment_variables_for(
+    credentials: &[GitCredential],
+    home: &Path,
+) -> Result<Vec<(OsString, OsString)>> {
+    if credentials.is_empty() {
+        return Ok(Vec::new());
+    }
+    let entries = task_git_config_entries(credentials, home)?;
+    let mut variables = Vec::with_capacity(entries.len() * 2 + 2);
+    variables.push((
+        OsString::from("GIT_CONFIG_COUNT"),
+        OsString::from(entries.len().to_string()),
+    ));
+    for (index, (key, value)) in entries.into_iter().enumerate() {
+        variables.push((
+            OsString::from(format!("GIT_CONFIG_KEY_{index}")),
+            OsString::from(key),
+        ));
+        variables.push((
+            OsString::from(format!("GIT_CONFIG_VALUE_{index}")),
+            OsString::from(value),
+        ));
+    }
+    if credentials
+        .iter()
+        .any(|credential| credential.host.eq_ignore_ascii_case(GITHUB_HOST))
+    {
+        variables.push((
+            OsString::from("GH_CONFIG_DIR"),
+            task_gh_config_dir(home).into_os_string(),
+        ));
+    }
+    Ok(variables)
+}
+pub(crate) fn task_environment_variables() -> Result<Vec<(OsString, OsString)>> {
+    let credentials = task_credentials_snapshot()?;
+    if credentials.is_empty() {
+        return Ok(Vec::new());
+    }
+    task_environment_variables_for(&credentials, &home_dir()?)
 }
 
-/// Bootstrap has no previous store, so partial failure cannot safely proceed.
 pub(crate) fn credentials_for_bootstrap(
     response: TaskGitCredentialsResponse,
 ) -> Result<Vec<GitCredential>> {
-    if !response.failed_hosts.is_empty() {
-        bail!(
-            "Git credential bootstrap cannot proceed because one or more credentials failed to refresh"
-        );
-    }
     unique_credentials_by_id(&response.credentials)
 }
 
 /// Formats non-sensitive metadata for local credential diagnostics.
-pub(crate) fn credential_diagnostics(
-    credentials: &[GitCredential],
-    failed_hosts: &[String],
-) -> String {
-    let refreshed = credentials
+pub(crate) fn credential_diagnostics(credentials: &[GitCredential]) -> String {
+    credentials
         .iter()
         .map(|credential| {
             format!(
@@ -844,27 +887,16 @@ pub(crate) fn credential_diagnostics(
             )
         })
         .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "{refreshed}; failed_credential_count={}",
-        failed_hosts.len()
-    )
+        .join(", ")
 }
 
 pub(crate) fn configure_git_credentials(credentials: &[GitCredential]) -> Result<()> {
+    let home = home_dir()?;
+    clear_task_credential_state(&home)?;
     let credentials = replace_task_credentials(credentials)?;
-    REPOSITORY_BINDINGS
-        .write()
-        .map_err(|_| anyhow::anyhow!("Task repository credential state is unavailable"))?
-        .clear();
-    GLAB_CONFIGS
-        .write()
-        .map_err(|_| anyhow::anyhow!("Repository-local glab state is unavailable"))?
-        .clear();
     if credentials.is_empty() {
         return Ok(());
     }
-    let home = home_dir()?;
     std::fs::create_dir_all(task_credentials_root(&home)).with_context(|| {
         format!(
             "Failed to create {}",
@@ -872,37 +904,59 @@ pub(crate) fn configure_git_credentials(credentials: &[GitCredential]) -> Result
         )
     })?;
     install_glab_wrapper(&credentials, &home)?;
-    setup_git_config(&credentials, &home)?;
-    configure_global_git_identity(&credentials)?;
     write_task_credentials_file(&credentials, &home)?;
     write_gh_hosts_yml(&credentials, &home)?;
     log::info!(
         "Configured {} task Git credential(s): {}",
         credentials.len(),
-        credential_diagnostics(&credentials, &[])
+        credential_diagnostics(&credentials)
     );
     Ok(())
 }
 
-fn apply_refreshed_credentials(response: TaskGitCredentialsResponse) -> Result<bool> {
-    if response.credentials.is_empty() && response.failed_hosts.is_empty() {
-        log::debug!("No Git credentials returned during refresh; skipping file write");
-        return Ok(true);
-    }
+fn apply_refreshed_credentials(response: TaskGitCredentialsResponse) -> Result<()> {
+    apply_refreshed_credentials_at_home(response, &home_dir()?)
+}
 
-    let credentials = merge_task_credentials(&response.credentials)?;
-    let home = home_dir()?;
-    write_task_credentials_file(&credentials, &home)
+fn apply_refreshed_credentials_at_home(
+    response: TaskGitCredentialsResponse,
+    home: &Path,
+) -> Result<()> {
+    let credentials = unique_credentials_by_id(&response.credentials)?;
+    let glab_configs = GLAB_CONFIGS
+        .read()
+        .map_err(|_| anyhow::anyhow!("Repository-local glab state is unavailable"))?
+        .clone();
+    let mut cleanup_error = remove_owned_directory(&task_credentials_root(home)).err();
+    if let Err(error) = remove_glab_config_directories(&glab_configs)
+        && cleanup_error.is_none()
+    {
+        cleanup_error = Some(error);
+    }
+    if let Some(error) = cleanup_error {
+        return Err(error).context("Failed to clear task Git credential files before refresh");
+    }
+    replace_task_credentials(&credentials)?;
+    if !credentials.is_empty() {
+        std::fs::create_dir_all(task_credentials_root(home)).with_context(|| {
+            format!(
+                "Failed to create {}",
+                task_credentials_root(home).display()
+            )
+        })?;
+        install_glab_wrapper(&credentials, home)?;
+    }
+    write_task_credentials_file(&credentials, home)
         .context("Failed to write refreshed task Git credentials")?;
-    write_gh_hosts_yml(&credentials, &home)
+    write_gh_hosts_yml(&credentials, home)
         .context("Failed to write refreshed GitHub CLI credentials")?;
-    write_registered_glab_configs(&credentials)
+    sync_registered_glab_configs(&credentials)
         .context("Failed to write refreshed repository-local glab credentials")?;
     log::info!(
         "Refreshed task Git credentials: {}",
-        credential_diagnostics(&response.credentials, &response.failed_hosts)
+        credential_diagnostics(&credentials)
     );
-    Ok(response.failed_hosts.is_empty())
+    Ok(())
 }
 
 fn self_hosted_gitlab_credentials_for_repositories(
@@ -939,9 +993,42 @@ fn transport_error_is_tls(error: &reqwest::Error) -> bool {
     .iter()
     .any(|needle| message.contains(needle))
 }
+fn ipv4_address_is_public(address: Ipv4Addr) -> bool {
+    let [first, second, third, _] = address.octets();
+    !(first == 0
+        || first == 10
+        || first == 127
+        || first >= 224
+        || (first == 100 && (64..=127).contains(&second))
+        || (first == 169 && second == 254)
+        || (first == 172 && (16..=31).contains(&second))
+        || (first == 192 && second == 0 && matches!(third, 0 | 2))
+        || (first == 192 && second == 88 && third == 99)
+        || (first == 192 && second == 168)
+        || (first == 198 && matches!(second, 18 | 19))
+        || (first == 198 && second == 51 && third == 100)
+        || (first == 203 && second == 0 && third == 113))
+}
+
+fn ipv6_address_is_public(address: Ipv6Addr) -> bool {
+    if let Some(address) = address.to_ipv4_mapped() {
+        return ipv4_address_is_public(address);
+    }
+    let segments = address.segments();
+    (segments[0] & 0xe000) == 0x2000 && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+}
+
+fn ip_address_is_public(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => ipv4_address_is_public(address),
+        IpAddr::V6(address) => ipv6_address_is_public(address),
+    }
+}
 
 #[cfg(not(target_family = "wasm"))]
-async fn check_tcp_connectivity(credential: &GitCredential) -> Result<(), GitLabPreflightError> {
+async fn resolve_public_addresses(
+    credential: &GitCredential,
+) -> Result<Vec<SocketAddr>, GitLabPreflightError> {
     let port = credential
         .port
         .map(u16::try_from)
@@ -949,10 +1036,29 @@ async fn check_tcp_connectivity(credential: &GitCredential) -> Result<(), GitLab
         .map_err(|_| GitLabPreflightError::Connectivity)?
         .unwrap_or(443);
     let host = credential.host.clone();
-    tokio::time::timeout(NETWORK_CONNECT_TIMEOUT, async move {
-        let addresses = tokio::net::lookup_host((host.as_str(), port))
+    let addresses = tokio::time::timeout(NETWORK_CONNECT_TIMEOUT, async move {
+        tokio::net::lookup_host((host.as_str(), port))
             .await
-            .map_err(|_| GitLabPreflightError::Connectivity)?;
+            .map(|addresses| addresses.collect::<BTreeSet<_>>())
+            .map_err(|_| GitLabPreflightError::Connectivity)
+    })
+    .await
+    .map_err(|_| GitLabPreflightError::Connectivity)??;
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|address| !ip_address_is_public(address.ip()))
+    {
+        return Err(GitLabPreflightError::Connectivity);
+    }
+    Ok(addresses.into_iter().collect())
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn check_tcp_connectivity(
+    addresses: &[SocketAddr],
+) -> Result<(), GitLabPreflightError> {
+    tokio::time::timeout(NETWORK_CONNECT_TIMEOUT, async {
         for address in addresses {
             if tokio::net::TcpStream::connect(address).await.is_ok() {
                 return Ok(());
@@ -990,13 +1096,15 @@ async fn preflight_gitlab_credential(
     project_paths: &[String],
 ) -> Result<(), GitLabPreflightError> {
     Compat::new(async {
-        check_tcp_connectivity(credential).await?;
+        let addresses = resolve_public_addresses(credential).await?;
+        check_tcp_connectivity(&addresses).await?;
 
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(NETWORK_CONNECT_TIMEOUT)
             .timeout(NETWORK_REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(&credential.host, &addresses)
             .build()
             .map_err(|_| GitLabPreflightError::Tls)?;
 
@@ -1080,7 +1188,6 @@ pub(crate) async fn preflight_gitlab_network(
 /// Build a token-free Git remote check for every self-hosted GitLab checkout.
 pub(crate) fn gitlab_git_access_check_command(
     repositories: &[SourceRepo],
-    working_dir: &Path,
 ) -> Result<Option<String>> {
     let credentials = task_credentials_snapshot()?;
     let mut repositories_to_check = Vec::new();
@@ -1095,36 +1202,33 @@ pub(crate) fn gitlab_git_access_check_command(
             ));
         }
     }
-    Ok(git_access_check_command(
-        &repositories_to_check,
-        working_dir,
-    ))
+    Ok(git_access_check_command(&repositories_to_check))
 }
 
-fn git_access_check_command(
-    repositories: &[(&SourceRepo, String)],
-    working_dir: &Path,
-) -> Option<String> {
-    let mut script = String::new();
-    for (repository, clone_url) in repositories {
-        let repository_dir = working_dir.join(&repository.repo);
-        let repository_dir = shell_single_quote(&repository_dir.to_string_lossy());
-        let clone_url = shell_single_quote(clone_url);
-        script.push_str(&format!(
-            "git -C '{repository_dir}' ls-remote --exit-code '{clone_url}' HEAD >/dev/null 2>&1 || exit 1\n"
-        ));
-    }
+fn git_access_check_command(repositories: &[(&SourceRepo, String)]) -> Option<String> {
+    let script = git_access_check_script(repositories);
     if script.is_empty() {
         return None;
     }
     Some(format!("sh -c '{}'", shell_single_quote(&script)))
 }
 
+fn git_access_check_script(repositories: &[(&SourceRepo, String)]) -> String {
+    let mut script = String::new();
+    for (_, clone_url) in repositories {
+        let clone_url = shell_single_quote(clone_url);
+        script.push_str(&format!(
+            "git ls-remote --exit-code '{clone_url}' HEAD >/dev/null 2>&1 || exit 1\n"
+        ));
+    }
+    script
+}
+
 #[tracing::instrument(name = "git_credentials::try_refresh", skip_all, err, fields(
     tags.cloud_agent = true,
     task_id,
 ))]
-async fn try_refresh(task_id: &str, ai_client: &Arc<dyn AIClient>) -> Result<bool> {
+async fn try_refresh(task_id: &str, ai_client: &Arc<dyn AIClient>) -> Result<()> {
     let workload_token =
         warp_isolation_platform::issue_workload_token(Some(Duration::from_secs(5 * 60)))
             .await
@@ -1132,7 +1236,7 @@ async fn try_refresh(task_id: &str, ai_client: &Arc<dyn AIClient>) -> Result<boo
             .token;
 
     let response = ai_client
-        .get_task_git_credentials(task_id.to_string(), workload_token, true)
+        .get_task_git_credentials(task_id.to_string(), workload_token)
         .await
         .context("Failed to fetch Git credentials from server")?;
 
@@ -1154,24 +1258,7 @@ pub(crate) async fn refresh_loop(task_id: String, ai_client: Arc<dyn AIClient>) 
         let mut attempt = 0usize;
         loop {
             match try_refresh(&task_id, &ai_client).await {
-                Ok(true) => break,
-                Ok(false) if attempt < backoff_delays.len() => {
-                    let delay = backoff_delays[attempt];
-                    log::warn!(
-                        "Git credentials refreshed partially (attempt {}); retrying in {}s",
-                        attempt + 1,
-                        delay.as_secs()
-                    );
-                    warpui::r#async::Timer::after(delay).await;
-                    attempt += 1;
-                }
-                Ok(false) => {
-                    log::warn!(
-                        "Some Git credentials remain stale after {} attempts",
-                        attempt + 1
-                    );
-                    break;
-                }
+                Ok(()) => break,
                 Err(error) if attempt < backoff_delays.len() => {
                     let delay = backoff_delays[attempt];
                     log::warn!(

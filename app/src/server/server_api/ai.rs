@@ -763,10 +763,9 @@ impl std::fmt::Debug for GitCredential {
 }
 
 /// One credential-retrieval cycle's outcome.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct TaskGitCredentialsResponse {
     pub credentials: Vec<GitCredential>,
-    pub failed_hosts: Vec<String>,
 }
 
 /// Filter parameters for listing ambient agent tasks.
@@ -1486,7 +1485,6 @@ pub trait AIClient: 'static + Send + Sync {
         &self,
         task_id: String,
         workload_token: String,
-        accepts_partial_refresh: bool,
     ) -> anyhow::Result<TaskGitCredentialsResponse, anyhow::Error>;
 
     async fn get_task_attachments(
@@ -1676,13 +1674,11 @@ impl ServerApi {
         &self,
         task_id: String,
         workload_token: String,
-        accepts_partial_refresh: bool,
     ) -> anyhow::Result<TaskGitCredentialsResponse, anyhow::Error> {
         let variables = TaskGitCredentialsVariables {
             input: TaskGitCredentialsInput {
                 task_id: cynic::Id::new(task_id),
                 workload_token,
-                accepts_partial_refresh: Some(accepts_partial_refresh),
             },
             request_context: get_request_context(),
         };
@@ -1697,7 +1693,6 @@ impl ServerApi {
                         .into_iter()
                         .map(into_git_credential)
                         .collect(),
-                    failed_hosts: output.failed_hosts,
                 })
             }
             TaskGitCredentialsResult::UserFacingError(error) => {
@@ -1732,7 +1727,6 @@ impl ServerApi {
                         .into_iter()
                         .map(into_legacy_git_credential)
                         .collect(),
-                    failed_hosts: Vec::new(),
                 })
             }
             TaskGitCredentialsLegacyResult::UserFacingError(error) => {
@@ -1784,8 +1778,6 @@ fn into_legacy_git_credential(
 fn is_unknown_git_credential_schema_error(error: &anyhow::Error) -> bool {
     let message = error.to_string();
     let names_compatibility_field = [
-        "failedHosts",
-        "acceptsPartialRefresh",
         "instanceUid",
         "installationUid",
         "scheme",
@@ -2845,11 +2837,7 @@ impl AIClient for ServerApi {
         accepts_partial_refresh: bool,
     ) -> anyhow::Result<TaskGitCredentialsResponse, anyhow::Error> {
         match self
-            .get_task_git_credentials_current(
-                task_id.clone(),
-                workload_token.clone(),
-                accepts_partial_refresh,
-            )
+            .get_task_git_credentials_current(task_id.clone(), workload_token.clone())
             .await
         {
             Ok(response) => Ok(response),

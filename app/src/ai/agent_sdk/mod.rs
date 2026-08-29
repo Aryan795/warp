@@ -855,11 +855,8 @@ impl AgentDriverRunner {
         ))
         .await?
         .token;
-        // Bootstrap has no prior credential store, so a one-host success would
-        // leave the other host unauthenticated for the first clone. Partial
-        // refresh is reserved for later cycles after stores exist.
         let response = ai_client
-            .get_task_git_credentials(task_id_str, workload_token, false)
+            .get_task_git_credentials(task_id_str, workload_token)
             .await?;
         driver::git_credentials::credentials_for_bootstrap(response)
     }
@@ -869,6 +866,11 @@ impl AgentDriverRunner {
         task_id_str: &str,
         args: &RunAgentArgs,
     ) -> Result<(), AgentDriverError> {
+        driver::git_credentials::configure_git_credentials(&[]).map_err(|err| {
+            AgentDriverError::SkillResolutionFailed(format!(
+                "Failed to clear task Git credentials before skill resolution: {err:#}"
+            ))
+        })?;
         if warp_isolation_platform::detect().is_none() && args.configure_git_credentials_with_github
         {
             foreground
@@ -986,10 +988,12 @@ impl AgentDriverRunner {
                     "Failed to configure task Git credentials for skill resolution: {error:#}"
                 ))
             })?;
+            let task_environment = driver::git_credentials::task_environment_variables()
+                .map_err(AgentDriverError::ConfigBuildFailed)?;
             log::info!("Cloning {org}/{repo_name} for skill resolution in sandboxed mode");
             setup_events
                 .record_result(SetupStep::SkillRepoClone, async {
-                    clone_repo_for_skill(org, repo_name, working_dir)
+                    clone_repo_for_skill(org, repo_name, working_dir, &task_environment)
                         .await
                         .map_err(|err| {
                             AgentDriverError::SkillResolutionFailed(format_skill_resolution_error(

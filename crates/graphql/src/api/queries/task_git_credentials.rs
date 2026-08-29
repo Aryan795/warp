@@ -28,8 +28,6 @@ pub struct TaskGitCredentialsVariables {
 pub struct TaskGitCredentialsInput {
     pub task_id: cynic::Id,
     pub workload_token: String,
-    #[cynic(skip_serializing_if = "Option::is_none")]
-    pub accepts_partial_refresh: Option<bool>,
 }
 
 #[derive(cynic::InlineFragments, Debug)]
@@ -43,11 +41,9 @@ pub enum TaskGitCredentialsResult {
 #[derive(cynic::QueryFragment, Debug)]
 pub struct TaskGitCredentialsOutput {
     pub credentials: Vec<TaskGitCredential>,
-    pub failed_hosts: Vec<String>,
 }
 
-/// Pre-#16215 operation: omits `acceptsPartialRefresh` and `failedHosts` so a
-/// server that has not deployed those fields can still validate the query.
+/// Legacy operation for a server that has not deployed the authority fields.
 pub mod legacy {
     use crate::error::UserFacingError;
     use crate::request_context::RequestContext;

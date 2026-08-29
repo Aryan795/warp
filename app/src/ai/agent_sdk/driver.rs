@@ -1002,6 +1002,10 @@ impl AgentDriver {
                 });
 
         let mut env_vars = build_secret_env_vars(&secrets);
+        env_vars.extend(
+            git_credentials::task_environment_variables()
+                .map_err(AgentDriverError::ConfigBuildFailed)?,
+        );
         if let Some(task_bin_dir) = git_credentials::task_bin_dir() {
             let mut paths = vec![task_bin_dir];
             if let Some(path) = std::env::var_os("PATH") {
@@ -3044,6 +3048,14 @@ impl AgentDriver {
                 .unwrap_or_default(),
             additional_source_repos,
         )?;
+        if !source_repos.is_empty() {
+            setup_events
+                .record_result(
+                    SetupStep::GitLabPreflight,
+                    Self::run_gitlab_preflight_checks(&source_repos, &foreground),
+                )
+                .await?;
+        }
 
         if environment_opt.is_some() || !source_repos.is_empty() || !setup_commands.is_empty() {
             log::info!("Loading environment...");
@@ -3104,12 +3116,6 @@ impl AgentDriver {
                 Self::linger_after_failure(&foreground, "environment_setup", &error).await;
                 return Err(error);
             }
-            setup_events
-                .record_result(
-                    SetupStep::GitLabPreflight,
-                    Self::run_gitlab_preflight_checks(&source_repos, &foreground),
-                )
-                .await?;
 
             if let Some(file_based_discovery_rx) = file_based_discovery_rx {
                 // Await discovery: collect UUIDs of file-based MCP servers that were auto-started
@@ -3511,10 +3517,8 @@ impl AgentDriver {
                 }
             })?;
 
-        let working_dir = foreground.spawn(|me, _| me.working_dir.clone()).await?;
-        let Some(command) =
-            git_credentials::gitlab_git_access_check_command(repositories, &working_dir)
-                .map_err(|_| AgentDriverError::GitLabWorkerRepositoryAccessDenied)?
+        let Some(command) = git_credentials::gitlab_git_access_check_command(repositories)
+            .map_err(|_| AgentDriverError::GitLabWorkerRepositoryAccessDenied)?
         else {
             return Ok(());
         };

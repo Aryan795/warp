@@ -1307,13 +1307,7 @@ fn upload_url_fallback_is_uploaded_as_a_put_with_its_content_type() {
 }
 
 #[test]
-fn unknown_git_credential_schema_error_matches_undeployed_partial_refresh_fields() {
-    assert!(is_unknown_git_credential_schema_error(&anyhow::anyhow!(
-        "Cannot query field \"failedHosts\" on type \"TaskGitCredentialsOutput\""
-    )));
-    assert!(is_unknown_git_credential_schema_error(&anyhow::anyhow!(
-        "Unknown argument \"acceptsPartialRefresh\" on field \"taskGitCredentials\""
-    )));
+fn unknown_git_credential_schema_error_matches_undeployed_authority_fields() {
     assert!(is_unknown_git_credential_schema_error(&anyhow::anyhow!(
         "Cannot query field \"instanceUid\" on type \"TaskGitCredential\""
     )));
