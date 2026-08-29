@@ -740,7 +740,7 @@ clone_repo() {
         let repo_name = format!("{}/{}", request.repo.owner, request.repo.repo);
         let repo_url = &request.clone_url;
         let escaped_repo_name = shell_escape_single_quotes(&repo_name, ShellType::Bash);
-        let escaped_repo_url = shell_escape_single_quotes(&repo_url, ShellType::Bash);
+        let escaped_repo_url = shell_escape_single_quotes(repo_url, ShellType::Bash);
         let escaped_target = shell_escape_single_quotes(&request.repo.repo, ShellType::Bash);
         let checkout_ref = request
             .checkout
@@ -868,7 +868,7 @@ async fn clone_repo(
         })
         .await
         .unwrap_or(ShellType::Bash);
-    let escaped_url = shell_escape_single_quotes(&repo_url, shell_type);
+    let escaped_url = shell_escape_single_quotes(repo_url, shell_type);
     let repo_dir = working_dir.join(&repo.repo);
     let commit_sha = match &request.checkout {
         Some(RepositoryHeadRef::CommitSha(commit_sha)) => Some(commit_sha.as_str()),
