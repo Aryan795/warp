@@ -1823,7 +1823,7 @@ impl TerminalModel {
     }
 
     pub fn start_commandless_output_block(&mut self) {
-        self.block_list.active_block_mut().start_background(None);
+        self.block_list.start_commandless_output_block();
     }
 
     pub fn reset_commandless_output_block(&mut self) {

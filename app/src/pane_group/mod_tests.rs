@@ -4049,7 +4049,9 @@ fn devcontainer_build_opens_focused_right_split() {
 fn devcontainer_build_pane_renders_streamed_output() {
     use warp_terminal::model::ansi::Processor;
     use warpui::View;
+    use warpui::units::Lines;
 
+    use crate::terminal::model::block::TranscriptScope;
     use crate::terminal::view::dev_container::operation::DevContainerBuildPhase;
 
     App::test((), |mut app| async move {
@@ -4071,6 +4073,19 @@ fn devcontainer_build_pane_renders_streamed_output() {
                 let mut processor = Processor::new();
                 processor.parse_bytes(&mut *model, b"step-one\r\n", &mut std::io::sink());
                 event_proxy.send_wakeup_event();
+                let visible_height = model.block_list().block_heights().summary().height;
+                assert!(
+                    visible_height > Lines::zero(),
+                    "build output must have nonzero block-list height after a streamed batch, \
+                     got {visible_height:?}"
+                );
+                assert!(
+                    model
+                        .block_list()
+                        .active_block()
+                        .is_visible(&TranscriptScope::Terminal),
+                    "build output block must be visible after a streamed batch"
+                );
             });
 
             let rendered_text = build_view

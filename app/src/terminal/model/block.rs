@@ -1114,6 +1114,10 @@ impl Block {
         self.output_grid.enable_full_grid_clear_behavior();
     }
 
+    pub(in crate::terminal) fn set_bootstrap_stage(&mut self, stage: BootstrapStage) {
+        self.bootstrap_stage = stage;
+    }
+
     pub fn set_restored_block_was_local(&mut self, was_local: bool) {
         debug_assert!(
             self.bootstrap_stage == BootstrapStage::RestoreBlocks,

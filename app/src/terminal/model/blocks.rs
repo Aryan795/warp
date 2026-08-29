@@ -3087,6 +3087,19 @@ impl BlockList {
         self.bootstrap_stage = BootstrapStage::Bootstrapped;
     }
 
+    /// Starts a commandless output grid that is visible in the block list.
+    ///
+    /// A freshly initialized list's active block is `WarpInput`, which
+    /// `should_hide_block` always hides. Commandless output has to leave that
+    /// bootstrap stage or painted height stays zero even with bytes in the grid.
+    pub fn start_commandless_output_block(&mut self) {
+        self.bootstrap_stage = BootstrapStage::PostBootstrapPrecmd;
+        self.active_block_mut()
+            .set_bootstrap_stage(BootstrapStage::PostBootstrapPrecmd);
+        self.active_block_mut().start_background(None);
+        self.update_active_block_height();
+    }
+
     pub fn is_empty(&self) -> bool {
         self.block_heights().summary().height.as_f64() < f64::EPSILON
     }
