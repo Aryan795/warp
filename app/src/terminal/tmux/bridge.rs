@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -112,7 +112,9 @@ struct Inner {
     bootstrap_script_count: HashMap<String, u32>,
     next_generation: u64,
     tracked_control_pane: Option<String>,
-    early_init_shell: HashMap<String, SessionId>,
+    control_incarnation: u64,
+    early_init_shell: HashMap<String, (SessionId, u64)>,
+    retired_session_ids: HashSet<SessionId>,
     shell_type: Option<ShellType>,
     app_bind_deadline: Option<instant::Instant>,
     presentation_ready: bool,
@@ -163,7 +165,9 @@ impl TmuxRuntime {
                 bootstrap_script_count: HashMap::new(),
                 next_generation: 0,
                 tracked_control_pane: None,
+                control_incarnation: 0,
                 early_init_shell: HashMap::new(),
+                retired_session_ids: HashSet::new(),
                 shell_type: None,
                 app_bind_deadline: None,
                 presentation_ready: false,
@@ -252,7 +256,9 @@ impl TmuxRuntime {
             inner.bootstrap_script_count.clear();
             inner.next_generation = 0;
             inner.tracked_control_pane = None;
+            inner.control_incarnation = 0;
             inner.early_init_shell.clear();
+            inner.retired_session_ids.clear();
             inner.app_bind_deadline = None;
             inner.presentation_ready = false;
             inner.unregistered_bytes = 0;
@@ -295,11 +301,20 @@ impl TmuxRuntime {
                 .pane_bootstrap
                 .remove(pane_id)
                 .map(|entry| entry.session_id());
+            if let Some(session_id) = session_id {
+                inner.retired_session_ids.insert(session_id);
+            }
+            if let Some((session_id, _)) = inner.early_init_shell.remove(pane_id) {
+                inner.retired_session_ids.insert(session_id);
+            }
+            if inner.tracked_control_pane.as_deref() == Some(pane_id) {
+                inner.tracked_control_pane = None;
+                inner.control_incarnation = next_control_incarnation(inner.control_incarnation);
+            }
             let model = inner.panes.remove(pane_id).map(|sink| sink.model);
             inner.pending_bootstrap_panes.retain(|id| id != pane_id);
             inner.bootstrap_stage_count.remove(pane_id);
             inner.bootstrap_script_count.remove(pane_id);
-            inner.early_init_shell.remove(pane_id);
             session_id.zip(model)
         };
         if let Some((session_id, model)) = retire {
@@ -470,7 +485,10 @@ impl TmuxRuntime {
         let session_id = inner
             .early_init_shell
             .get(pane_id)
-            .copied()
+            .and_then(|(sid, incarnation)| {
+                (*incarnation == inner.control_incarnation).then_some(*sid)
+            })
+            .filter(|sid| !inner.retired_session_ids.contains(sid))
             .unwrap_or(session_id);
         let generation = Self::next_bootstrap_generation(inner);
         inner.pane_bootstrap.insert(
@@ -524,6 +542,9 @@ impl TmuxRuntime {
             _ => return None,
         };
         if staged_id != session_id && !accept_mismatch {
+            return None;
+        }
+        if inner.retired_session_ids.contains(&session_id) {
             return None;
         }
         let shell_type = inner.shell_type?;
@@ -662,7 +683,9 @@ impl TmuxRuntime {
     }
 
     pub fn note_tracked_control_pane(&self, pane_id: &str) {
-        self.inner.lock().tracked_control_pane = Some(pane_id.to_owned());
+        let mut inner = self.inner.lock();
+        inner.tracked_control_pane = Some(pane_id.to_owned());
+        inner.control_incarnation = next_control_incarnation(inner.control_incarnation);
     }
 
     pub fn tracked_control_pane(&self) -> Option<String> {
@@ -673,12 +696,18 @@ impl TmuxRuntime {
         TmuxClientEvent::PresentationUnready
     }
 
-    pub fn note_early_init_shell(&self, pane_id: &str, session_id: SessionId) -> Option<ShellType> {
+    pub fn note_early_init_shell(
+        &self,
+        pane_id: &str,
+        session_id: SessionId,
+        shell_type: ShellType,
+    ) -> Option<ShellType> {
         let (shell_type, staged_id, model) = {
             let mut inner = self.inner.lock();
-            inner
-                .early_init_shell
-                .insert(pane_id.to_owned(), session_id);
+            inner.shell_type = Some(shell_type);
+            if inner.retired_session_ids.contains(&session_id) {
+                return None;
+            }
             if inner
                 .tracked_control_pane
                 .as_deref()
@@ -686,6 +715,15 @@ impl TmuxRuntime {
             {
                 return None;
             }
+            if inner.tracked_control_pane.as_deref() != Some(pane_id)
+                && !inner.panes.contains_key(pane_id)
+            {
+                return None;
+            }
+            let incarnation = inner.control_incarnation;
+            inner
+                .early_init_shell
+                .insert(pane_id.to_owned(), (session_id, incarnation));
             let (shell_type, staged_id) =
                 Self::complete_staging_to_ready_locked(&mut inner, pane_id, session_id, true)?;
             inner.early_init_shell.remove(pane_id);
@@ -703,11 +741,19 @@ impl TmuxRuntime {
     }
 
     pub fn early_init_session_id(&self, pane_id: &str) -> Option<SessionId> {
-        self.inner.lock().early_init_shell.get(pane_id).copied()
+        self.inner
+            .lock()
+            .early_init_shell
+            .get(pane_id)
+            .map(|(session_id, _)| *session_id)
     }
 
     pub fn take_early_init_shell(&self, pane_id: &str) -> Option<SessionId> {
-        self.inner.lock().early_init_shell.remove(pane_id)
+        self.inner
+            .lock()
+            .early_init_shell
+            .remove(pane_id)
+            .map(|(session_id, _)| session_id)
     }
 
     pub fn complete_if_early_init_shell(&self, pane_id: &str) -> Option<ShellType> {
@@ -764,6 +810,11 @@ impl TmuxRuntime {
     fn buffered_output(&self, pane_id: &str) -> Option<Vec<u8>> {
         self.inner.lock().buffers.get(pane_id).cloned()
     }
+}
+
+fn next_control_incarnation(current: u64) -> u64 {
+    let next = current.wrapping_add(1);
+    if next == 0 { 1 } else { next }
 }
 
 fn client_event_retained_bytes(event: &TmuxClientEvent) -> usize {

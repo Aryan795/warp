@@ -1125,6 +1125,111 @@ fn zsh_silent_term_during_wrapper_restores_exact_state() {
     assert_zsh_silent_signal_restored(libc::SIGTERM, "TERM");
 }
 
+#[cfg(unix)]
+#[test]
+fn zsh_silent_second_wrapper_after_int_restores_without_stale_guard() {
+    let Some(zsh) = optional_shell("zsh") else {
+        return;
+    };
+    let Ok(python) = Command::new("python3").arg("-c").arg("import pty").status() else {
+        return;
+    };
+    if !python.success() {
+        return;
+    }
+    let home = unique_temp_path("warp-tmux-zsh-second-home");
+    std::fs::create_dir_all(&home).expect("zsh second home");
+    let first = super::silent_history_isolated_script(ShellType::Zsh, b"sleep 0.4\n");
+    let second = super::silent_history_isolated_script(ShellType::Zsh, b":\n");
+    let runner = format!(
+        r#"
+import os, pty, select, signal, sys, time
+zsh = {zsh:?}
+first = bytes({first:?})
+second = bytes({second:?})
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir({home:?})
+    os.environ["HOME"] = {home:?}
+    os.environ.pop("HISTFILE", None)
+    os.environ.pop("SAVEHIST", None)
+    os.execv(zsh, [zsh, "--no-rcs", "-i"])
+os.write(fd, b"unsetopt BANG_HIST\nsetopt BANG_HIST\nunset HISTFILE\nunset SAVEHIST\n")
+time.sleep(0.15)
+os.write(fd, first)
+time.sleep(0.12)
+os.kill(pid, signal.SIGINT)
+time.sleep(0.5)
+os.write(fd, second)
+time.sleep(0.25)
+os.write(fd, b"[[ -o banghist ]] && echo BANG_ON || echo BANG_OFF\n")
+os.write(fd, b"[[ -v HISTFILE ]] && echo HIST_SET || echo HIST_UNSET\n")
+os.write(fd, b"[[ -v SAVEHIST ]] && echo SAVE_SET || echo SAVE_UNSET\n")
+os.write(fd, b"[[ -v __warp_silent_cleaned ]] && echo GUARD_SET || echo GUARD_UNSET\n")
+os.write(fd, b"typeset -f __warp_silent_cleanup >/dev/null && echo HELPER_SET || echo HELPER_UNSET\n")
+os.write(fd, b"stty -a 2>/dev/null | tr ' ' '\n' | grep -E '^-?echo$' | head -1 | sed 's/^-echo/ECHO_OFF/;s/^echo/ECHO_ON/'\n")
+os.write(fd, b"echo WARP_SILENT_DONE\nexit\n")
+out = b""
+deadline = time.time() + 8
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+    if b"WARP_SILENT_DONE" in out:
+        break
+try:
+    os.waitpid(pid, 0)
+except ChildProcessError:
+    pass
+sys.stdout.buffer.write(out)
+"#,
+        zsh = zsh.display(),
+        home = home.display(),
+        first = first,
+        second = second,
+    );
+    let child = Command::new("python3")
+        .arg("-c")
+        .arg(&runner)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python pty runner");
+    let output = child.wait_with_output().expect("wait python pty");
+    let _ = std::fs::remove_dir_all(&home);
+    let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+    let text = String::from_utf8_lossy(&combined);
+    assert!(
+        text.contains("WARP_SILENT_DONE"),
+        "second wrapper must complete: {text:?}"
+    );
+    assert!(text.contains("ECHO_ON"), "echo restored: {text:?}");
+    assert!(text.contains("BANG_ON"), "BANG_HIST restored: {text:?}");
+    assert!(
+        text.contains("HIST_UNSET"),
+        "HISTFILE stays unset: {text:?}"
+    );
+    assert!(
+        text.contains("SAVE_UNSET"),
+        "SAVEHIST stays unset: {text:?}"
+    );
+    assert!(
+        text.contains("GUARD_UNSET"),
+        "guard must not leak: {text:?}"
+    );
+    assert!(
+        text.contains("HELPER_UNSET"),
+        "helper must not leak: {text:?}"
+    );
+}
+
 #[test]
 fn in_band_init_saves_and_restores_history_around_injected_body() {
     let bytes = in_band_init_bytes(ShellType::Bash, SessionId::from(3)).expect("bash init");

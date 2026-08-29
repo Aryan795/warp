@@ -17,7 +17,9 @@ fn runtime() -> TmuxRuntime {
             bootstrap_script_count: HashMap::new(),
             next_generation: 0,
             tracked_control_pane: None,
+            control_incarnation: 0,
             early_init_shell: HashMap::new(),
+            retired_session_ids: HashSet::new(),
             shell_type: None,
             app_bind_deadline: None,
             presentation_ready: false,
@@ -377,7 +379,8 @@ fn delayed_first_hook_is_ignored_after_retry_session_rotates() {
 fn early_init_shell_before_bind_reaches_ready_once() {
     let runtime = runtime();
     runtime.note_shell_type(ShellType::Zsh);
-    runtime.note_early_init_shell("%0", sid(3));
+    runtime.note_tracked_control_pane("%0");
+    runtime.note_early_init_shell("%0", sid(3), ShellType::Zsh);
     let claim = runtime.begin_pane_bootstrap("%0", sid(3)).expect("stage");
     assert_eq!(claim.generation, 1);
     assert_eq!(
@@ -421,13 +424,86 @@ fn tracked_control_pane_hands_off_early_init_shell() {
     runtime.note_shell_type(ShellType::Zsh);
     runtime.note_tracked_control_pane("%0");
     assert_eq!(runtime.tracked_control_pane().as_deref(), Some("%0"));
-    runtime.note_early_init_shell("%0", sid(4));
+    runtime.note_early_init_shell("%0", sid(4), ShellType::Zsh);
     runtime.begin_pane_bootstrap("%0", sid(4)).expect("stage");
     assert_eq!(
         runtime.complete_if_early_init_shell("%0"),
         Some(ShellType::Zsh)
     );
     assert!(runtime.pane_bootstrap_ready("%0"));
+}
+
+#[test]
+fn stale_hook_after_remove_does_not_ready_rebound_pane() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    let first = Arc::new(FairMutex::new(crate::terminal::TerminalModel::mock(
+        None, None,
+    )));
+    runtime.register_pane("%0", first.clone());
+    runtime
+        .begin_pane_bootstrap("%0", sid(1))
+        .expect("stage first pane");
+    runtime.unregister_pane("%0");
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(1), ShellType::Zsh)
+            .is_none()
+    );
+    runtime.note_tracked_control_pane("%0");
+    let second = Arc::new(FairMutex::new(crate::terminal::TerminalModel::mock(
+        None, None,
+    )));
+    runtime.register_pane("%0", second);
+    let claim = runtime
+        .begin_pane_bootstrap("%0", sid(2))
+        .expect("stage rebound pane");
+    assert_eq!(claim.session_id, sid(2));
+    assert_eq!(
+        runtime.pane_bootstrap_state("%0"),
+        PaneBootstrapState::Staging
+    );
+    assert!(!runtime.pane_bootstrap_ready("%0"));
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(1), ShellType::Zsh)
+            .is_none()
+    );
+    assert!(!runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(2), ShellType::Zsh),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%0"));
+}
+
+#[test]
+fn late_bash_hook_selects_bash_silent_bootstrap_once() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    let model = Arc::new(FairMutex::new(crate::terminal::TerminalModel::mock(
+        None, None,
+    )));
+    runtime.register_pane("%0", model);
+    runtime
+        .begin_pane_bootstrap("%0", sid(9))
+        .expect("stage as zsh");
+    assert_eq!(runtime.shell_type(), Some(ShellType::Zsh));
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(8), ShellType::Bash),
+        Some(ShellType::Bash)
+    );
+    assert_eq!(runtime.shell_type(), Some(ShellType::Bash));
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(8), ShellType::Bash)
+            .is_none()
+    );
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
 }
 
 #[test]
@@ -450,7 +526,7 @@ fn late_tracked_init_shell_completes_staged_pane_without_retry() {
     let armed = runtime.arm_bootstrap_timeout("%0").expect("arm timer");
     assert_eq!(armed.0, claim.generation);
     assert_eq!(
-        runtime.note_early_init_shell("%0", retained),
+        runtime.note_early_init_shell("%0", retained, ShellType::Zsh),
         Some(ShellType::Zsh)
     );
     assert!(runtime.pane_bootstrap_ready("%0"));
@@ -463,7 +539,11 @@ fn late_tracked_init_shell_completes_staged_pane_without_retry() {
         BootstrapTimeoutResult::Stale
     ));
     assert!(runtime.begin_pane_bootstrap("%0", sid(3)).is_none());
-    assert!(runtime.note_early_init_shell("%0", retained).is_none());
+    assert!(
+        runtime
+            .note_early_init_shell("%0", retained, ShellType::Zsh)
+            .is_none()
+    );
     assert_eq!(runtime.bootstrap_script_count("%0"), 1);
     assert!(runtime.complete_if_early_init_shell("%0").is_none());
 }
@@ -475,12 +555,17 @@ fn late_init_shell_after_pane_removal_does_not_complete() {
     runtime.note_tracked_control_pane("%0");
     let claim = runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
     runtime.unregister_pane("%0");
-    assert!(runtime.note_early_init_shell("%0", sid(11)).is_none());
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(11), ShellType::Zsh)
+            .is_none()
+    );
     assert_eq!(
         runtime.pane_bootstrap_state("%0"),
         PaneBootstrapState::Unsent
     );
-    assert_eq!(runtime.early_init_session_id("%0"), Some(sid(11)));
+    assert_eq!(runtime.early_init_session_id("%0"), None);
+    assert!(runtime.tracked_control_pane().is_none());
     assert!(matches!(
         runtime.handle_bootstrap_timeout("%0", claim.generation),
         BootstrapTimeoutResult::Stale
@@ -588,9 +673,10 @@ fn runtime_unregister_without_pane_model_clears_bootstrap() {
 fn bind_reuses_retained_early_session_id_not_a_random_id() {
     let runtime = runtime();
     runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
     let retained = sid(11);
     let would_be_random = sid(99);
-    runtime.note_early_init_shell("%0", retained);
+    runtime.note_early_init_shell("%0", retained, ShellType::Zsh);
     assert_eq!(runtime.early_init_session_id("%0"), Some(retained));
     let chosen = runtime
         .early_init_session_id("%0")

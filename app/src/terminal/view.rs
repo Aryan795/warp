@@ -12928,7 +12928,7 @@ impl TerminalView {
                             let pane = runtime.tracked_control_pane().or(fallback_pane);
                             if let Some(pane) = pane
                                 && let Some(completed) =
-                                    runtime.note_early_init_shell(&pane, session_id)
+                                    runtime.note_early_init_shell(&pane, session_id, shell_type)
                             {
                                 self.write_tmux_silent_pane_bootstrap(&pane, completed, ctx);
                             }

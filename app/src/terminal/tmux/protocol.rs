@@ -833,6 +833,8 @@ SAVEHIST=0
   if (( __warp_banghist )); then setopt BANG_HIST; else unsetopt BANG_HIST; fi
   unset __warp_histfile __warp_histfile_set __warp_savehist __warp_savehist_set __warp_banghist __warp_silent_cleaned
   unfunction __warp_silent_cleanup 2>/dev/null || true
+else
+  unset __warp_silent_cleaned
 fi
 ",
     );
