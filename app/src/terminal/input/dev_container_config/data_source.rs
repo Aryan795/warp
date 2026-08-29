@@ -26,6 +26,15 @@ impl DevContainerConfigSelectorDataSource {
     pub fn set_configs(&mut self, configs: Vec<PathBuf>) {
         self.configs = configs;
     }
+
+    /// Configs in the order the zero-state menu consumes them.
+    ///
+    /// Inline-menu results are consumed in ascending order of priority, so the last row is the
+    /// one selected by default. Discovery walks the spec locations from most to least canonical,
+    /// so that order is reversed here to make the first config found the default pick.
+    fn zero_state_order(&self) -> impl Iterator<Item = &PathBuf> {
+        self.configs.iter().rev()
+    }
 }
 
 impl SyncDataSource for DevContainerConfigSelectorDataSource {
@@ -39,8 +48,7 @@ impl SyncDataSource for DevContainerConfigSelectorDataSource {
         let query_text = query.text.trim().to_lowercase();
         if query_text.is_empty() {
             return Ok(self
-                .configs
-                .iter()
+                .zero_state_order()
                 .map(|path| QueryResult::from(DevContainerConfigSearchItem::new(path.clone())))
                 .collect());
         }
@@ -66,3 +74,7 @@ impl SyncDataSource for DevContainerConfigSelectorDataSource {
 impl Entity for DevContainerConfigSelectorDataSource {
     type Event = ();
 }
+
+#[cfg(test)]
+#[path = "data_source_tests.rs"]
+mod tests;
