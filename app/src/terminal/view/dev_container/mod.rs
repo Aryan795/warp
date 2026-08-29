@@ -272,6 +272,43 @@ impl TerminalView {
         ctx.notify();
     }
 
+    pub(crate) fn cancel_dev_container_build(&mut self, ctx: &mut ViewContext<Self>) {
+        #[cfg(feature = "local_tty")]
+        {
+            let Some(operation) = self.dev_container_build.clone() else {
+                return;
+            };
+            let process_group_id = operation.read(ctx, |operation, _| {
+                operation.cancel_handle().take_process_group_id()
+            });
+            let key = operation.read(ctx, |operation, _| operation.key().clone());
+            operation.update(ctx, |operation, ctx| {
+                operation.tombstone(ctx);
+            });
+            if let Some(process_group_id) = process_group_id {
+                stream::terminate_process_group(process_group_id);
+            }
+            registry::DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
+                registry.remove(&key);
+            });
+        }
+        #[cfg(not(feature = "local_tty"))]
+        {
+            let _ = ctx;
+        }
+    }
+
+    pub(crate) fn is_dev_container_build_surface(&self) -> bool {
+        #[cfg(feature = "local_tty")]
+        {
+            self.dev_container_build.is_some()
+        }
+        #[cfg(not(feature = "local_tty"))]
+        {
+            false
+        }
+    }
+
     #[cfg(feature = "local_tty")]
     pub(crate) fn model_event_sender(
         &self,

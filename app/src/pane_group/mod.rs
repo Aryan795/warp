@@ -2021,6 +2021,9 @@ impl PaneGroup {
                 // Editor panes are not restored from persistence.
                 Err(anyhow::anyhow!("Can't restore editor panes"))
             }
+            LeafContents::DevContainerBuild => Err(anyhow::anyhow!(
+                "Dev Container build pane should not have been persisted, as it cannot be restored"
+            )),
             LeafContents::NetworkLog => {
                 // Network log panes are intentionally not restored. Two
                 // reasons:

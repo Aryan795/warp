@@ -8476,6 +8476,9 @@ impl TerminalView {
     }
 
     pub fn is_input_box_visible(&self, model: &TerminalModel, app: &AppContext) -> bool {
+        if self.is_dev_container_build_surface() {
+            return false;
+        }
         if model.is_read_only() {
             return false;
         }
