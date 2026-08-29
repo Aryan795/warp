@@ -19,6 +19,8 @@ impl PaneGroup {
         config_file: PathBuf,
         ctx: &mut ViewContext<Self>,
     ) {
+        let workspace_folder = dunce::canonicalize(&workspace_folder).unwrap_or(workspace_folder);
+        let config_file = dunce::canonicalize(&config_file).unwrap_or(config_file);
         let key = DevContainerBuildKey {
             workspace_folder,
             config_file,

@@ -24,9 +24,7 @@ fn tombstone_rejects_late_completions_for_the_same_attempt() {
     let mut op = DevContainerBuildOperation::new(key());
     let operation_id = op.operation_id();
     let attempt_id = op.attempt_id();
-    op.cancel
-        .cancelled
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    op.cancel.mark_cancelled();
     op.status = DevContainerBuildStatus::Cancelling;
     assert!(!op.is_current_attempt(operation_id, attempt_id));
 }
@@ -42,9 +40,7 @@ fn retry_increments_attempt_and_clears_failure() {
         phase: DevContainerBuildPhase::Preflight,
         message: "boom".to_owned(),
     });
-    op.cancel
-        .cancelled
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    op.cancel.mark_cancelled();
 
     op.attempt_id += 1;
     op.phase = DevContainerBuildPhase::Build;

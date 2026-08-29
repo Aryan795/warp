@@ -1,14 +1,15 @@
 use std::io;
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 use std::sync::Arc;
 
 use command::r#async::Command;
-use futures_util::future::try_join;
+use futures_util::future::{try_join, try_join3};
 use futures_util::io::AsyncReadExt;
 use parking_lot::Mutex;
 
 use super::newline::NewlineNormalizer;
+use super::operation::DevContainerBuildCancel;
 
 pub(crate) const STDOUT_LIMIT: usize = 1024 * 1024;
 const STDERR_TAIL_LIMIT: usize = 8 * 1024;
@@ -64,6 +65,79 @@ pub(crate) fn terminate_process_group(process_group_id: u32) {
     }
     #[cfg(not(unix))]
     let _ = process_group_id;
+}
+
+pub(crate) async fn drain_dev_container_child<F>(
+    mut child: async_process::Child,
+    on_stderr: F,
+) -> io::Result<(DevContainerDrain, bool)>
+where
+    F: FnMut(&[u8]) + Send,
+{
+    let process_group_id = child.id();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("devcontainer up stdout was not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("devcontainer up stderr was not piped"))?;
+    let drain_fut = drain_dev_container_pipes(stdout, stderr, on_stderr);
+    let status_fut = async {
+        let status = child.status().await?;
+        terminate_process_group(process_group_id);
+        io::Result::Ok(status)
+    };
+    let (drain, status) = try_join(drain_fut, status_fut).await?;
+    Ok((drain, status.success()))
+}
+
+pub(crate) async fn run_cancellable_process_group_command(
+    mut command: Command,
+    cancel: &DevContainerBuildCancel,
+) -> io::Result<Output> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let process_group_id = child.id();
+    if !cancel.register_process_group(process_group_id) {
+        terminate_process_group(process_group_id);
+        let _ = child.status().await;
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("stdout was not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("stderr was not piped"))?;
+    let stdout_fut = read_to_end(stdout);
+    let stderr_fut = read_to_end(stderr);
+    let status_fut = async {
+        let status = child.status().await?;
+        terminate_process_group(process_group_id);
+        io::Result::Ok(status)
+    };
+    let (stdout, stderr, status) = try_join3(stdout_fut, stderr_fut, status_fut).await?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+async fn read_to_end<R>(mut reader: R) -> io::Result<Vec<u8>>
+where
+    R: futures_util::AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await?;
+    Ok(bytes)
 }
 
 pub(crate) async fn drain_dev_container_pipes<R1, R2, F>(

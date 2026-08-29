@@ -252,9 +252,11 @@ impl TerminalView {
         config_path: PathBuf,
         ctx: &mut ViewContext<Self>,
     ) {
+        let workspace_folder = dunce::canonicalize(&workspace_folder).unwrap_or(workspace_folder);
+        let config_file = dunce::canonicalize(&config_path).unwrap_or(config_path);
         ctx.emit(super::Event::StartDevContainerBuild {
             workspace_folder,
-            config_file: config_path,
+            config_file,
         });
     }
 
@@ -304,13 +306,11 @@ impl TerminalView {
             let Some(operation) = self.dev_container_build.clone() else {
                 return;
             };
-            let process_group_id = operation.read(ctx, |operation, _| {
-                operation.cancel_handle().take_process_group_id()
-            });
             let key = operation.read(ctx, |operation, _| operation.key().clone());
-            operation.update(ctx, |operation, ctx| {
-                operation.tombstone(ctx);
+            let process_group_id = operation.update(ctx, |operation, ctx| {
+                let process_group_id = operation.tombstone(ctx);
                 operation.mark_cancelled(ctx);
+                process_group_id
             });
             if let Some(process_group_id) = process_group_id {
                 stream::terminate_process_group(process_group_id);
@@ -522,8 +522,6 @@ impl TerminalView {
         use parking_lot::Mutex;
         use warp_terminal::model::ansi::Processor;
 
-        use super::super::event::Event as TerminalModelEvent;
-
         let processor = Arc::new(Mutex::new(Processor::new()));
         let model = self.model.clone();
         let event_proxy = self.model.lock().event_proxy.clone();
@@ -531,24 +529,23 @@ impl TerminalView {
             let mut command =
                 stream::dev_container_up_command(&cli, &workspace_folder, &config_file);
             let mut child = command.spawn()?;
-            cancel.set_process_group_id(child.id());
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| std::io::Error::other("devcontainer up stdout was not piped"))?;
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| std::io::Error::other("devcontainer up stderr was not piped"))?;
-            let drain = stream::drain_dev_container_pipes(stdout, stderr, move |chunk| {
+            let process_group_id = child.id();
+            if !cancel.register_process_group(process_group_id) {
+                stream::terminate_process_group(process_group_id);
+                let _ = child.status().await;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                ));
+            }
+            let (drain, exit_success) = stream::drain_dev_container_child(child, move |chunk| {
                 processor
                     .lock()
                     .parse_bytes(&mut *model.lock(), chunk, &mut std::io::sink());
-                event_proxy.send_app_event(TerminalModelEvent::BackgroundBlockStarted);
-            });
-            let drain = drain.await?;
-            let status = child.status().await?;
-            std::io::Result::Ok((drain, status.success(), docker_path, workspace_folder))
+                event_proxy.send_wakeup_event();
+            })
+            .await?;
+            std::io::Result::Ok((drain, exit_success, docker_path, workspace_folder))
         };
         ctx.spawn(up_future, move |me, result, ctx| {
             if !me.is_current_dev_container_attempt(operation_id, attempt_id, ctx) {
@@ -650,15 +647,23 @@ impl TerminalView {
             let container_id = container_id.clone();
             let remote_user = remote_user.clone();
             let remote_workspace_folder = remote_workspace_folder.clone();
+            let cancel = self
+                .dev_container_build
+                .as_ref()
+                .map(|operation| operation.read(ctx, |operation, _| operation.cancel_handle()));
             async move {
-                Command::new(&docker_path)
-                    .args(dev_container_preflight_args(
-                        &container_id,
-                        remote_user.as_deref(),
-                        &remote_workspace_folder,
-                    ))
-                    .output()
-                    .await
+                let mut command = Command::new_with_process_group(&docker_path);
+                command.args(dev_container_preflight_args(
+                    &container_id,
+                    remote_user.as_deref(),
+                    &remote_workspace_folder,
+                ));
+                match cancel {
+                    Some(cancel) => {
+                        stream::run_cancellable_process_group_command(command, &cancel).await
+                    }
+                    None => command.output().await,
+                }
             }
         };
 

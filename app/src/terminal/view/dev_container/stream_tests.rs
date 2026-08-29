@@ -88,6 +88,50 @@ fn drain_marks_stdout_oversized_past_one_mib() {
 }
 
 #[test]
+fn drain_reaches_failed_without_waiting_for_descendant_holding_pipes() {
+    use std::time::Instant;
+
+    use command::r#async::Command;
+
+    block_on(async {
+        let mut command = Command::new_with_process_group("python3");
+        command
+            .arg("-c")
+            .arg(
+                r#"
+import os, time
+pid = os.fork()
+if pid == 0:
+    time.sleep(30)
+    os._exit(0)
+os.write(2, b"marker-before-exit\n")
+os._exit(1)
+"#,
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = command.spawn().expect("spawn parent that forks");
+        let started = Instant::now();
+        let (drain, success) = super::drain_dev_container_child(child, |_| {})
+            .await
+            .expect("drain after parent exit");
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "descendant holding pipes must not pin drain: {:?}",
+            started.elapsed()
+        );
+        assert!(!success);
+        assert!(
+            drain
+                .stderr_tail
+                .windows(b"marker-before-exit".len())
+                .any(|window| window == b"marker-before-exit")
+        );
+    });
+}
+
+#[test]
 fn devcontainer_text_stream_renders_incrementally() {
     let mut model = TerminalModel::mock(None, None);
     model.start_commandless_output_block();

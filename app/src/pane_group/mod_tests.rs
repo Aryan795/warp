@@ -4049,7 +4049,6 @@ fn devcontainer_build_opens_focused_right_split() {
 fn devcontainer_build_pane_renders_streamed_output() {
     use warp_terminal::model::ansi::Processor;
     use warpui::View;
-    use warpui::elements::Element;
 
     use crate::terminal::view::dev_container::operation::DevContainerBuildPhase;
 
@@ -4063,6 +4062,7 @@ fn devcontainer_build_pane_renders_streamed_output() {
                 .expect("build view");
 
             build_view.update(ctx, |view, _ctx| {
+                let event_proxy = view.model.lock().event_proxy.clone();
                 let mut model = view.model.lock();
                 assert!(
                     !model.is_loading_conversation_transcript(),
@@ -4070,6 +4070,7 @@ fn devcontainer_build_pane_renders_streamed_output() {
                 );
                 let mut processor = Processor::new();
                 processor.parse_bytes(&mut *model, b"step-one\r\n", &mut std::io::sink());
+                event_proxy.send_wakeup_event();
             });
 
             let rendered_text = build_view
@@ -4082,17 +4083,17 @@ fn devcontainer_build_pane_renders_streamed_output() {
                 "streamed build output must not be masked by the conversation spinner, got \
                  {rendered_text:?}"
             );
-            let output = build_view
-                .as_ref(ctx)
-                .model
-                .lock()
-                .block_list()
-                .active_block()
-                .output_grid()
-                .contents_to_string(false, None);
             assert!(
-                output.contains("step-one"),
-                "streamed marker missing from displayed grid: {output:?}"
+                rendered_text.contains("step-one"),
+                "render path must display streamed log text, got {rendered_text:?}"
+            );
+            assert!(
+                build_view
+                    .as_ref(ctx)
+                    .dev_container_header_title(ctx)
+                    .expect("title")
+                    .contains("Build"),
+                "phase must come from operation state, not log text"
             );
 
             build_view.update(ctx, |view, ctx| {
@@ -4112,21 +4113,13 @@ fn devcontainer_build_pane_renders_streamed_output() {
                 "failed build body must keep the log grid visible, got {failed_text:?}"
             );
             assert!(
+                failed_text.contains("step-one"),
+                "failed surface must still display already-rendered logs, got {failed_text:?}"
+            );
+            assert!(
                 build_view
                     .as_ref(ctx)
                     .dev_container_shows_retry_and_close(ctx)
-            );
-            let retained = build_view
-                .as_ref(ctx)
-                .model
-                .lock()
-                .block_list()
-                .active_block()
-                .output_grid()
-                .contents_to_string(false, None);
-            assert!(
-                retained.contains("step-one"),
-                "failed surface must retain already-rendered logs: {retained:?}"
             );
         });
     });
@@ -4296,6 +4289,47 @@ fn duplicate_devcontainer_invocation_focuses_existing_surface() {
             assert_eq!(panes.visible_pane_count(), 3);
         });
     });
+}
+
+#[cfg(all(feature = "local_tty", unix))]
+#[test]
+fn duplicate_devcontainer_invocation_canonicalizes_config_aliases() {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    let root = std::env::temp_dir().join(format!("dc-alias-{}", Uuid::new_v4()));
+    let real_ws = root.join("ws");
+    let config_dir = real_ws.join(".devcontainer");
+    fs::create_dir_all(&config_dir).expect("create workspace");
+    let real_config = config_dir.join("devcontainer.json");
+    fs::write(&real_config, "{}").expect("write config");
+    let alias_ws = root.join("ws-alias");
+    symlink(&real_ws, &alias_ws).expect("symlink workspace");
+    let alias_config = alias_ws.join(".devcontainer/devcontainer.json");
+
+    App::test((), {
+        let real_ws = real_ws.clone();
+        let real_config = real_config.clone();
+        let alias_ws = alias_ws.clone();
+        let alias_config = alias_config.clone();
+        move |mut app| async move {
+            initialize_app(&mut app);
+            let pane_group = mock_pane_group(&mut app, Default::default());
+            pane_group.update(&mut app, |panes, ctx| {
+                let originating = get_newly_created_pane_id(panes, &[]);
+                panes.start_dev_container_build(originating, real_ws, real_config, ctx);
+                assert_eq!(panes.visible_pane_count(), 2);
+                panes.start_dev_container_build(originating, alias_ws, alias_config, ctx);
+                assert_eq!(
+                    panes.visible_pane_count(),
+                    2,
+                    "symlinked config paths must share one registry key"
+                );
+            });
+        }
+    });
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[cfg(all(feature = "local_tty", feature = "local_fs"))]

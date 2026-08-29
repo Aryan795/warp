@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 use uuid::Uuid;
@@ -42,30 +41,41 @@ pub(crate) struct DevContainerBuildFailure {
     pub message: String,
 }
 
+#[derive(Default)]
+struct DevContainerBuildCancelState {
+    cancelled: bool,
+    process_group_id: Option<u32>,
+}
+
 #[derive(Clone)]
 pub(crate) struct DevContainerBuildCancel {
-    cancelled: Arc<AtomicBool>,
-    process_group_id: Arc<Mutex<Option<u32>>>,
+    inner: Arc<Mutex<DevContainerBuildCancelState>>,
 }
 
 impl DevContainerBuildCancel {
     fn new() -> Self {
         Self {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            process_group_id: Arc::new(Mutex::new(None)),
+            inner: Arc::new(Mutex::new(DevContainerBuildCancelState::default())),
         }
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.inner.lock().cancelled
     }
 
-    pub(crate) fn set_process_group_id(&self, id: u32) {
-        *self.process_group_id.lock() = Some(id);
+    pub(crate) fn register_process_group(&self, id: u32) -> bool {
+        let mut inner = self.inner.lock();
+        if inner.cancelled {
+            return false;
+        }
+        inner.process_group_id = Some(id);
+        true
     }
 
-    pub(crate) fn take_process_group_id(&self) -> Option<u32> {
-        self.process_group_id.lock().take()
+    pub(crate) fn mark_cancelled(&self) -> Option<u32> {
+        let mut inner = self.inner.lock();
+        inner.cancelled = true;
+        inner.process_group_id.take()
     }
 }
 
@@ -199,12 +209,13 @@ impl DevContainerBuildOperation {
 
     /// Marks the operation cancelled before the caller terminates processes or
     /// removes the pane, so a late completion is a no-op.
-    pub(crate) fn tombstone(&mut self, ctx: &mut ModelContext<Self>) {
-        self.cancel.cancelled.store(true, Ordering::SeqCst);
+    pub(crate) fn tombstone(&mut self, ctx: &mut ModelContext<Self>) -> Option<u32> {
+        let process_group_id = self.cancel.mark_cancelled();
         if self.status == DevContainerBuildStatus::Running {
             self.status = DevContainerBuildStatus::Cancelling;
         }
         ctx.notify();
+        process_group_id
     }
 
     pub(crate) fn mark_cancelled(&mut self, ctx: &mut ModelContext<Self>) {
@@ -213,8 +224,7 @@ impl DevContainerBuildOperation {
     }
 
     pub(crate) fn begin_retry(&mut self, ctx: &mut ModelContext<Self>) -> (u64, Option<u32>) {
-        self.cancel.cancelled.store(true, Ordering::SeqCst);
-        let prior_process_group = self.cancel.take_process_group_id();
+        let prior_process_group = self.cancel.mark_cancelled();
         self.attempt_id += 1;
         self.phase = DevContainerBuildPhase::Build;
         self.status = DevContainerBuildStatus::Running;
