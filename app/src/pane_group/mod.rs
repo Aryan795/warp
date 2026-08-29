@@ -4279,11 +4279,7 @@ impl PaneGroup {
             locked.register_session_id(session_id);
             locked.set_login_shell_spawned(shell_type);
         }
-        let Some(bytes) =
-            crate::terminal::tmux::protocol::in_band_init_bytes(shell_type, session_id)
-        else {
-            return;
-        };
+        let bytes = crate::terminal::tmux::protocol::silent_bootstrap_bytes(shell_type);
         let pane = crate::terminal::tmux::parser::PaneId::from(tmux_pane_id);
         for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bytes) {
             self.write_tmux_command(command.into_bytes(), instance_id, ctx);

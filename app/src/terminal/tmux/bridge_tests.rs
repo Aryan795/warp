@@ -11,8 +11,9 @@ fn runtime() -> TmuxRuntime {
             pending_captures: VecDeque::new(),
             pending_client_events: Vec::new(),
             pending_client_event_bytes: 0,
-            bootstrapped_panes: HashSet::new(),
+            pane_bootstrap: HashMap::new(),
             pending_bootstrap_panes: VecDeque::new(),
+            bootstrap_injects: HashMap::new(),
             shell_type: None,
             app_bind_deadline: None,
             presentation_ready: false,
@@ -181,6 +182,7 @@ fn pane_bootstrap_queues_until_authoritative_shell_type() {
     let ready = runtime.set_authoritative_shell_type(ShellType::Bash);
     assert_eq!(ready, vec!["%0".to_owned()]);
     assert_eq!(runtime.shell_type(), Some(ShellType::Bash));
+    assert!(runtime.pane_bootstrap_in_flight("%0"));
     assert_eq!(runtime.begin_pane_bootstrap("%0"), None);
     assert_eq!(runtime.begin_pane_bootstrap("%1"), Some(ShellType::Bash));
     assert_eq!(runtime.begin_pane_bootstrap("%1"), None);
@@ -208,4 +210,64 @@ fn app_bind_deadline_is_not_cleared_until_presentation_ready() {
     runtime.mark_presentation_ready();
     assert!(runtime.is_presentation_ready());
     assert!(!runtime.app_bind_deadline_elapsed(later));
+}
+
+#[test]
+fn pane_bootstrap_ignores_repeated_bind_before_ready() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    assert_eq!(runtime.begin_pane_bootstrap("%0"), Some(ShellType::Zsh));
+    assert_eq!(runtime.bootstrap_inject_count("%0"), 1);
+    assert_eq!(runtime.begin_pane_bootstrap("%0"), None);
+    assert_eq!(runtime.begin_pane_bootstrap("%0"), None);
+    assert_eq!(runtime.begin_pane_bootstrap("%0"), None);
+    assert_eq!(runtime.bootstrap_inject_count("%0"), 1);
+    assert!(runtime.pane_bootstrap_in_flight("%0"));
+    assert!(runtime.mark_pane_bootstrap_ready("%0"));
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.begin_pane_bootstrap("%0"), None);
+    assert_eq!(runtime.bootstrap_inject_count("%0"), 1);
+}
+
+#[test]
+fn pane_bootstrap_timeout_allows_exactly_one_retry() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    let start = instant::Instant::now();
+    assert_eq!(
+        runtime.begin_pane_bootstrap_at("%0", start),
+        Some(ShellType::Zsh)
+    );
+    let timed_out = start + BOOTSTRAP_INFLIGHT_TIMEOUT + std::time::Duration::from_millis(1);
+    assert_eq!(
+        runtime.begin_pane_bootstrap_at("%0", timed_out),
+        Some(ShellType::Zsh)
+    );
+    assert_eq!(runtime.bootstrap_inject_count("%0"), 2);
+    let later = timed_out + BOOTSTRAP_INFLIGHT_TIMEOUT + std::time::Duration::from_secs(1);
+    assert_eq!(runtime.begin_pane_bootstrap_at("%0", later), None);
+    assert_eq!(runtime.bootstrap_inject_count("%0"), 2);
+}
+
+#[test]
+fn pane_bootstrap_stale_generation_does_not_mark_ready() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    let start = instant::Instant::now();
+    assert_eq!(
+        runtime.begin_pane_bootstrap_at("%0", start),
+        Some(ShellType::Zsh)
+    );
+    let stale = runtime.pane_bootstrap_generation("%0").expect("generation");
+    let timed_out = start + BOOTSTRAP_INFLIGHT_TIMEOUT + std::time::Duration::from_millis(1);
+    assert_eq!(
+        runtime.begin_pane_bootstrap_at("%0", timed_out),
+        Some(ShellType::Zsh)
+    );
+    let live = runtime.pane_bootstrap_generation("%0").expect("live gen");
+    assert_ne!(stale, live);
+    assert!(!runtime.mark_pane_bootstrap_ready_generation("%0", Some(stale)));
+    assert!(runtime.pane_bootstrap_in_flight("%0"));
+    assert!(runtime.mark_pane_bootstrap_ready_generation("%0", Some(live)));
+    assert!(runtime.pane_bootstrap_ready("%0"));
 }

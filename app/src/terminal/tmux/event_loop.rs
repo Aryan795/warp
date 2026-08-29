@@ -17,7 +17,7 @@ use crate::terminal::model::ansi;
 use crate::terminal::tmux::pane_bytes::{feed_control_bytes, notify_exit, sink_writer};
 use crate::terminal::tmux::parser::PaneId;
 use crate::terminal::tmux::protocol::{
-    kill_server_command, refresh_client_command, send_keys_commands, zsh_init_bytes,
+    kill_server_command, refresh_client_command, send_keys_commands,
 };
 use crate::terminal::writeable_pty::Message;
 use crate::terminal::writeable_pty::pty_controller::{EventLoopSendError, EventLoopSender};
@@ -435,7 +435,12 @@ where
             if feed.exited {
                 notify_exit(terminal.deref_mut());
             }
-            Self::maybe_bind_pane(&self.shared, &mut self.zsh_init, state);
+            Self::maybe_bind_pane(
+                &self.shared,
+                &mut self.zsh_init,
+                state,
+                terminal.tmux_instance_id(),
+            );
 
             bytes_processed += bytes_in_buffer;
             bytes_in_buffer = 0;
@@ -455,6 +460,7 @@ where
         shared: &SharedControlState,
         zsh_init: &mut Option<(String, ShellType)>,
         state: &mut LoopState,
+        instance_id: Option<u64>,
     ) {
         let Some(pane_id) = state.tracked_pane.clone() else {
             return;
@@ -469,8 +475,10 @@ where
         let pending = std::mem::take(&mut *shared.pending_pane_writes.lock());
         let pending_control = std::mem::take(&mut *shared.pending_control.lock());
         let mut to_send = Vec::new();
-        if let Some((init_script, shell_type)) = zsh_init.take() {
-            to_send.push(zsh_init_bytes(&init_script, shell_type));
+        if let Some((_init_script, shell_type)) = zsh_init.take()
+            && claim_control_pane_bootstrap(instance_id, pane_id.as_str(), shell_type)
+        {
+            to_send.push(super::protocol::silent_bootstrap_bytes(shell_type));
         }
         to_send.extend(pending.into_iter().map(|bytes| bytes.into_owned()));
         for bytes in to_send {
@@ -515,6 +523,24 @@ where
         }
         Ok(())
     }
+}
+
+fn claim_control_pane_bootstrap(
+    instance_id: Option<u64>,
+    pane_id: &str,
+    shell_type: ShellType,
+) -> bool {
+    use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+    let Some(instance_id) = instance_id else {
+        return false;
+    };
+    let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(instance_id)) else {
+        return false;
+    };
+    if runtime.shell_type().is_none() {
+        runtime.note_shell_type(shell_type);
+    }
+    runtime.begin_pane_bootstrap(pane_id).is_some()
 }
 
 #[cfg(test)]

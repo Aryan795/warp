@@ -1,7 +1,8 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use parking_lot::{FairMutex, Mutex};
 use warpui::WindowId;
@@ -18,7 +19,8 @@ const MAX_UNREGISTERED_PANE_COUNT: usize = 64;
 const MAX_UNREGISTERED_PANE_BYTES: usize = 256 * 1024;
 const MAX_PENDING_CLIENT_EVENT_BYTES: usize = 8 * 1024;
 const PENDING_CLIENT_EVENT_OVERHEAD: usize = 64;
-pub const APP_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+pub const APP_BIND_TIMEOUT: Duration = Duration::from_secs(8);
+pub const BOOTSTRAP_INFLIGHT_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TmuxInstanceId(u64);
@@ -44,6 +46,17 @@ struct PaneSink {
     processor: ansi::Processor,
 }
 
+enum PaneBootstrapEntry {
+    InFlight {
+        generation: u64,
+        started_at: instant::Instant,
+        retried: bool,
+    },
+    Ready {
+        generation: u64,
+    },
+}
+
 struct Inner {
     gateway_window: Option<WindowId>,
     presentation_window: Option<WindowId>,
@@ -52,8 +65,9 @@ struct Inner {
     pending_captures: VecDeque<String>,
     pending_client_events: Vec<TmuxClientEvent>,
     pending_client_event_bytes: usize,
-    bootstrapped_panes: HashSet<String>,
+    pane_bootstrap: HashMap<String, PaneBootstrapEntry>,
     pending_bootstrap_panes: VecDeque<String>,
+    bootstrap_injects: HashMap<String, u32>,
     shell_type: Option<ShellType>,
     app_bind_deadline: Option<instant::Instant>,
     presentation_ready: bool,
@@ -98,8 +112,9 @@ impl TmuxRuntime {
                 pending_captures: VecDeque::new(),
                 pending_client_events: Vec::new(),
                 pending_client_event_bytes: 0,
-                bootstrapped_panes: HashSet::new(),
+                pane_bootstrap: HashMap::new(),
                 pending_bootstrap_panes: VecDeque::new(),
+                bootstrap_injects: HashMap::new(),
                 shell_type: None,
                 app_bind_deadline: None,
                 presentation_ready: false,
@@ -173,8 +188,9 @@ impl TmuxRuntime {
         inner.pending_captures.clear();
         inner.pending_client_events.clear();
         inner.pending_client_event_bytes = 0;
-        inner.bootstrapped_panes.clear();
+        inner.pane_bootstrap.clear();
         inner.pending_bootstrap_panes.clear();
+        inner.bootstrap_injects.clear();
         inner.app_bind_deadline = None;
         inner.presentation_ready = false;
         inner.unregistered_bytes = 0;
@@ -319,13 +335,18 @@ impl TmuxRuntime {
         std::mem::take(&mut inner.pending_client_events)
     }
 
+    pub fn note_shell_type(&self, shell_type: ShellType) {
+        self.inner.lock().shell_type = Some(shell_type);
+    }
+
     pub fn set_authoritative_shell_type(&self, shell_type: ShellType) -> Vec<String> {
         let mut inner = self.inner.lock();
         inner.shell_type = Some(shell_type);
         let pending = std::mem::take(&mut inner.pending_bootstrap_panes);
+        let now = instant::Instant::now();
         let mut ready = Vec::new();
         for pane_id in pending {
-            if inner.bootstrapped_panes.insert(pane_id.clone()) {
+            if Self::begin_pane_bootstrap_locked(&mut inner, &pane_id, now).is_some() {
                 ready.push(pane_id);
             }
         }
@@ -337,18 +358,129 @@ impl TmuxRuntime {
     }
 
     pub fn begin_pane_bootstrap(&self, pane_id: &str) -> Option<ShellType> {
+        self.begin_pane_bootstrap_at(pane_id, instant::Instant::now())
+    }
+
+    pub fn begin_pane_bootstrap_at(
+        &self,
+        pane_id: &str,
+        now: instant::Instant,
+    ) -> Option<ShellType> {
         let mut inner = self.inner.lock();
-        if inner.bootstrapped_panes.contains(pane_id) {
-            return None;
+        Self::begin_pane_bootstrap_locked(&mut inner, pane_id, now)
+    }
+
+    fn begin_pane_bootstrap_locked(
+        inner: &mut Inner,
+        pane_id: &str,
+        now: instant::Instant,
+    ) -> Option<ShellType> {
+        inner.pending_bootstrap_panes.retain(|id| id != pane_id);
+        let inflight = match inner.pane_bootstrap.get(pane_id) {
+            Some(PaneBootstrapEntry::Ready { .. }) => return None,
+            Some(PaneBootstrapEntry::InFlight {
+                generation,
+                started_at,
+                retried,
+            }) => Some((*generation, *started_at, *retried)),
+            None => None,
+        };
+        match inflight {
+            Some((generation, started_at, retried)) => {
+                if now < started_at + BOOTSTRAP_INFLIGHT_TIMEOUT || retried {
+                    return None;
+                }
+                let shell_type = inner.shell_type?;
+                inner.pane_bootstrap.insert(
+                    pane_id.to_owned(),
+                    PaneBootstrapEntry::InFlight {
+                        generation: generation + 1,
+                        started_at: now,
+                        retried: true,
+                    },
+                );
+                *inner
+                    .bootstrap_injects
+                    .entry(pane_id.to_owned())
+                    .or_insert(0) += 1;
+                Some(shell_type)
+            }
+            None => {
+                let Some(shell_type) = inner.shell_type else {
+                    if !inner.pending_bootstrap_panes.iter().any(|id| id == pane_id) {
+                        inner.pending_bootstrap_panes.push_back(pane_id.to_owned());
+                    }
+                    return None;
+                };
+                inner.pane_bootstrap.insert(
+                    pane_id.to_owned(),
+                    PaneBootstrapEntry::InFlight {
+                        generation: 1,
+                        started_at: now,
+                        retried: false,
+                    },
+                );
+                *inner
+                    .bootstrap_injects
+                    .entry(pane_id.to_owned())
+                    .or_insert(0) += 1;
+                Some(shell_type)
+            }
         }
-        if let Some(shell_type) = inner.shell_type {
-            inner.bootstrapped_panes.insert(pane_id.to_owned());
-            return Some(shell_type);
+    }
+
+    pub fn mark_pane_bootstrap_ready(&self, pane_id: &str) -> bool {
+        self.mark_pane_bootstrap_ready_generation(pane_id, None)
+    }
+
+    pub fn mark_pane_bootstrap_ready_generation(
+        &self,
+        pane_id: &str,
+        expected: Option<u64>,
+    ) -> bool {
+        let mut inner = self.inner.lock();
+        let generation = match inner.pane_bootstrap.get(pane_id) {
+            Some(PaneBootstrapEntry::InFlight { generation, .. }) => *generation,
+            _ => return false,
+        };
+        if expected.is_some_and(|want| want != generation) {
+            return false;
         }
-        if !inner.pending_bootstrap_panes.iter().any(|id| id == pane_id) {
-            inner.pending_bootstrap_panes.push_back(pane_id.to_owned());
+        inner
+            .pane_bootstrap
+            .insert(pane_id.to_owned(), PaneBootstrapEntry::Ready { generation });
+        true
+    }
+
+    pub fn pane_bootstrap_in_flight(&self, pane_id: &str) -> bool {
+        matches!(
+            self.inner.lock().pane_bootstrap.get(pane_id),
+            Some(PaneBootstrapEntry::InFlight { .. })
+        )
+    }
+
+    pub fn pane_bootstrap_ready(&self, pane_id: &str) -> bool {
+        matches!(
+            self.inner.lock().pane_bootstrap.get(pane_id),
+            Some(PaneBootstrapEntry::Ready { .. })
+        )
+    }
+
+    pub fn bootstrap_inject_count(&self, pane_id: &str) -> u32 {
+        self.inner
+            .lock()
+            .bootstrap_injects
+            .get(pane_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn pane_bootstrap_generation(&self, pane_id: &str) -> Option<u64> {
+        match self.inner.lock().pane_bootstrap.get(pane_id) {
+            Some(PaneBootstrapEntry::InFlight { generation, .. })
+            | Some(PaneBootstrapEntry::Ready { generation }) => Some(*generation),
+            None => None,
         }
-        None
     }
 
     pub fn pane_model(&self, pane_id: &str) -> Option<Arc<FairMutex<TerminalModel>>> {

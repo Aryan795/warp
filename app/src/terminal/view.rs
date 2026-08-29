@@ -15275,11 +15275,7 @@ impl TerminalView {
                     locked.register_session_id(session_id);
                     locked.set_login_shell_spawned(shell_type);
                 }
-                let Some(bytes) =
-                    crate::terminal::tmux::protocol::in_band_init_bytes(shell_type, session_id)
-                else {
-                    continue;
-                };
+                let bytes = crate::terminal::tmux::protocol::silent_bootstrap_bytes(shell_type);
                 let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
                 for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bytes) {
                     self.write_tmux_control_command(command.into_bytes(), ctx);
@@ -15297,11 +15293,12 @@ impl TerminalView {
         shell_type: ShellType,
         ctx: &mut ViewContext<Self>,
     ) {
-        let (pane_id, is_presentation) = {
+        let (pane_id, is_presentation, instance_id) = {
             let model = self.model.lock();
             (
                 model.tmux_pane_id().map(str::to_owned),
                 model.is_tmux_presentation(),
+                model.tmux_instance_id(),
             )
         };
         if !is_presentation {
@@ -15312,11 +15309,24 @@ impl TerminalView {
         };
         #[cfg(all(unix, feature = "local_tty"))]
         {
-            let bootstrap =
-                crate::terminal::bootstrap::script_for_shell(shell_type, &crate::ASSETS);
-            let framed = crate::terminal::tmux::protocol::silent_history_isolated_script(
-                shell_type, &bootstrap,
-            );
+            #[cfg(not(feature = "remote_tty"))]
+            {
+                use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+                if let Some(id) = instance_id
+                    && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
+                {
+                    runtime.note_shell_type(shell_type);
+                    if runtime.mark_pane_bootstrap_ready(&pane_id) {
+                        return;
+                    }
+                    if runtime.begin_pane_bootstrap(&pane_id).is_none() {
+                        return;
+                    }
+                }
+            }
+            #[cfg(feature = "remote_tty")]
+            let _ = instance_id;
+            let framed = crate::terminal::tmux::protocol::silent_bootstrap_bytes(shell_type);
             let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
             for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &framed) {
                 self.write_tmux_control_command(command.into_bytes(), ctx);
@@ -15324,7 +15334,7 @@ impl TerminalView {
         }
         #[cfg(not(all(unix, feature = "local_tty")))]
         {
-            let _ = (pane_id, shell_type, ctx);
+            let _ = (pane_id, shell_type, instance_id, ctx);
         }
     }
 

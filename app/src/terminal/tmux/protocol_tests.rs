@@ -687,11 +687,17 @@ fn silent_bootstrap_framing_hides_setup_and_clears_before_prompt() {
     assert!(text.contains("setopt NO_BANG_HIST"));
     assert!(text.contains("__warp_histfile_set"));
     assert!(text.contains("__warp_banghist"));
+    assert!(text.contains("(( ${+__warp_silent_cleaned} )) && return"));
     assert!(!text.contains("fc -P") && !text.contains("fc -p"));
+    let trap_off = text.find("trap - EXIT INT TERM").expect("disable traps");
+    let unset_snaps = text
+        .rfind("unset __warp_histfile")
+        .expect("snapshot unset after traps");
     assert!(echo_off < hist);
     assert!(hist < marker);
     assert!(marker < clear);
     assert!(clear < cleanup);
+    assert!(trap_off < unset_snaps);
 }
 
 #[cfg(unix)]
@@ -948,6 +954,148 @@ fn zsh_silent_restores_set_hist_and_banghist_off() {
         text.contains("SAVE_SET:42"),
         "SAVEHIST must be restored: {text:?}"
     );
+}
+
+#[cfg(unix)]
+fn zsh_silent_signal_probe(signum: i32, preamble: &[u8], probe: &[u8]) -> Option<String> {
+    let zsh = optional_shell("zsh")?;
+    let python = Command::new("python3")
+        .arg("-c")
+        .arg("import pty")
+        .status()
+        .ok()?;
+    if !python.success() {
+        return None;
+    }
+    let home = unique_temp_path("warp-tmux-zsh-signal-home");
+    std::fs::create_dir_all(&home).ok()?;
+    let framed = super::silent_history_isolated_script(ShellType::Zsh, b"sleep 0.4\n");
+    let runner = format!(
+        r#"
+import os, pty, select, signal, sys, time
+zsh = {zsh:?}
+preamble = bytes({preamble:?})
+probe = bytes({probe:?})
+signum = {signum}
+script = sys.stdin.buffer.read()
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir({home:?})
+    os.environ["HOME"] = {home:?}
+    os.environ.pop("HISTFILE", None)
+    os.environ.pop("SAVEHIST", None)
+    os.execv(zsh, [zsh, "--no-rcs", "-i"])
+os.write(fd, preamble)
+time.sleep(0.15)
+os.write(fd, script)
+time.sleep(0.12)
+os.kill(pid, signum)
+time.sleep(0.5)
+os.write(fd, probe)
+os.write(fd, b"stty -a 2>/dev/null | tr ' ' '\n' | grep -E '^-?echo$' | head -1 | sed 's/^-echo/ECHO_OFF/;s/^echo/ECHO_ON/'\n")
+os.write(fd, b"echo WARP_SILENT_DONE\n")
+out = b""
+deadline = time.time() + 6
+alive = True
+while time.time() < deadline:
+    wpid, status = os.waitpid(pid, os.WNOHANG)
+    if wpid == pid:
+        alive = False
+        break
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+    if b"WARP_SILENT_DONE" in out:
+        break
+if alive:
+    out += b"\nWARP_SHELL_ALIVE\n"
+    os.write(fd, b"exit\n")
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+sys.stdout.buffer.write(out)
+"#,
+        zsh = zsh.display(),
+        home = home.display(),
+        preamble = preamble,
+        probe = probe,
+        signum = signum,
+    );
+    let mut child = Command::new("python3")
+        .arg("-c")
+        .arg(&runner)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = std::io::Write::write_all(&mut stdin, &framed);
+    }
+    let output = child.wait_with_output().ok()?;
+    let _ = std::fs::remove_dir_all(&home);
+    let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+    Some(String::from_utf8_lossy(&combined).into_owned())
+}
+
+#[cfg(unix)]
+fn assert_zsh_silent_signal_restored(signum: i32, name: &str) {
+    let Some(text) = zsh_silent_signal_probe(
+        signum,
+        b"unsetopt BANG_HIST\nsetopt BANG_HIST\nunset HISTFILE\nunset SAVEHIST\n",
+        b"[[ -o banghist ]] && echo BANG_ON || echo BANG_OFF\n[[ -v HISTFILE ]] && echo HIST_SET || echo HIST_UNSET\n[[ -v SAVEHIST ]] && echo SAVE_SET || echo SAVE_UNSET\n",
+    ) else {
+        return;
+    };
+    assert!(
+        text.contains("WARP_SHELL_ALIVE"),
+        "{name}: shell must stay alive: {text:?}"
+    );
+    assert!(
+        text.contains("WARP_SILENT_DONE"),
+        "{name}: queued epilogue must complete: {text:?}"
+    );
+    assert_eq!(
+        text.matches("WARP_SILENT_DONE").count(),
+        1,
+        "{name}: prompt/done once: {text:?}"
+    );
+    assert!(
+        text.contains("ECHO_ON"),
+        "{name}: echo must be restored: {text:?}"
+    );
+    assert!(
+        text.contains("BANG_ON"),
+        "{name}: BANG_HIST must be restored on: {text:?}"
+    );
+    assert!(
+        text.contains("HIST_UNSET"),
+        "{name}: unset HISTFILE must stay unset: {text:?}"
+    );
+    assert!(
+        text.contains("SAVE_UNSET"),
+        "{name}: unset SAVEHIST must stay unset: {text:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_silent_int_during_wrapper_restores_exact_state() {
+    assert_zsh_silent_signal_restored(libc::SIGINT, "INT");
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_silent_term_during_wrapper_restores_exact_state() {
+    assert_zsh_silent_signal_restored(libc::SIGTERM, "TERM");
 }
 
 #[test]

@@ -15,7 +15,9 @@ use instant::Instant;
 use parking_lot::Mutex;
 use warp_core::SessionId;
 use warp_core::paths::cache_dir;
-use warp_terminal::bootstrap::{generate_session_id, init_shell_script_for_shell};
+use warp_terminal::bootstrap::{
+    generate_session_id, init_shell_script_for_shell, script_for_shell,
+};
 use warp_terminal::local_tty::shell::{
     DirectShellStarter, arguments_for_session_spawning_command, supported_shell_path_and_type,
 };
@@ -797,15 +799,18 @@ fn silent_posix_script(shell_type: ShellType, body: &[u8]) -> Vec<u8> {
 }
 
 fn silent_zsh_script(body: &[u8]) -> Vec<u8> {
+    // INT/TERM/EXIT may run cleanup and then the epilogue; re-entry must not
+    // treat restored state as the snapshot. Keep snapshots until traps are off.
     let mut wrapped = br"if [[ -o banghist ]]; then typeset __warp_banghist=1; else typeset __warp_banghist=0; fi
 if (( ${+HISTFILE} )); then typeset __warp_histfile=$HISTFILE; typeset __warp_histfile_set=1; else typeset __warp_histfile_set=0; fi
 if (( ${+SAVEHIST} )); then typeset __warp_savehist=$SAVEHIST; typeset __warp_savehist_set=1; else typeset __warp_savehist_set=0; fi
 __warp_silent_cleanup() {
+  (( ${+__warp_silent_cleaned} )) && return
+  __warp_silent_cleaned=1
   stty echo 2>/dev/null || true
   if (( __warp_histfile_set )); then HISTFILE=$__warp_histfile; else unset HISTFILE; fi
   if (( __warp_savehist_set )); then SAVEHIST=$__warp_savehist; else unset SAVEHIST; fi
   if (( __warp_banghist )); then setopt BANG_HIST; else unsetopt BANG_HIST; fi
-  unset __warp_histfile __warp_histfile_set __warp_savehist __warp_savehist_set __warp_banghist
 }
 setopt NO_BANG_HIST
 stty -echo 2>/dev/null || true
@@ -821,8 +826,14 @@ SAVEHIST=0
     wrapped.push(b'\n');
     wrapped.extend_from_slice(b"trap - EXIT INT TERM\n");
     wrapped.extend_from_slice(b"__warp_silent_cleanup\n");
+    wrapped.extend_from_slice(b"unset __warp_histfile __warp_histfile_set __warp_savehist __warp_savehist_set __warp_banghist __warp_silent_cleaned\n");
     wrapped.extend_from_slice(b"unfunction __warp_silent_cleanup 2>/dev/null || true\n");
     wrapped
+}
+
+pub(crate) fn silent_bootstrap_bytes(shell_type: ShellType) -> Vec<u8> {
+    let body = script_for_shell(shell_type, &ASSETS);
+    silent_history_isolated_script(shell_type, &body)
 }
 
 pub fn in_band_init_bytes(shell_type: ShellType, session_id: SessionId) -> Option<Vec<u8>> {
