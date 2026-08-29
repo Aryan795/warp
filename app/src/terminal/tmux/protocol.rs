@@ -724,13 +724,45 @@ pub fn zsh_init_bytes(init_script: &str, shell_type: ShellType) -> Vec<u8> {
     bytes
 }
 
-fn in_band_history_prefix(shell_type: ShellType) -> &'static [u8] {
+// Bash records a line before running it, so history is disabled by a preceding
+// command; restore deletes that setup line before re-enabling.
+fn in_band_history_setup(shell_type: ShellType) -> &'static [u8] {
     match shell_type {
-        ShellType::Bash => b" set +o history;HISTCONTROL=ignorespace;HISTIGNORE=' *';",
-        ShellType::Zsh => b" setopt hist_ignore_space;HISTFILE=/dev/null;",
-        ShellType::Fish => b" set -g fish_history '';",
+        ShellType::Bash => {
+            b"__warp_histfile=${HISTFILE-};__warp_histcontrol=${HISTCONTROL-};__warp_histignore=${HISTIGNORE-};__warp_histcmd=${HISTCMD};set +o history;HISTFILE=/dev/null;HISTCONTROL=ignorespace;HISTIGNORE='*'\n"
+        }
+        ShellType::Zsh => {
+            b"typeset __warp_histfile=$HISTFILE;typeset __warp_savehist=$SAVEHIST;fc -p /dev/null\n"
+        }
+        ShellType::Fish => b"set -g __warp_fish_history $fish_history; set -g fish_history ''\n",
         ShellType::PowerShell => b"",
     }
+}
+
+fn in_band_history_restore(shell_type: ShellType) -> &'static [u8] {
+    match shell_type {
+        ShellType::Bash => {
+            br#"[ -n "${__warp_histcmd}" ] && history -d "${__warp_histcmd}" 2>/dev/null;HISTFILE=${__warp_histfile-};HISTCONTROL=${__warp_histcontrol-};HISTIGNORE=${__warp_histignore-};unset __warp_histfile __warp_histcontrol __warp_histignore __warp_histcmd;set -o history"#
+        }
+        ShellType::Zsh => {
+            b"fc -P;HISTFILE=$__warp_histfile;SAVEHIST=$__warp_savehist;unset __warp_histfile __warp_savehist"
+        }
+        ShellType::Fish => {
+            b"if set -q __warp_fish_history; set -g fish_history $__warp_fish_history; else; set -e fish_history; end; set -e __warp_fish_history"
+        }
+        ShellType::PowerShell => b"",
+    }
+}
+
+fn history_isolated_script(shell_type: ShellType, body: &[u8]) -> Vec<u8> {
+    let mut bytes = in_band_history_setup(shell_type).to_vec();
+    bytes.extend_from_slice(body);
+    if !bytes.ends_with(b"\n") {
+        bytes.push(b'\n');
+    }
+    bytes.extend_from_slice(in_band_history_restore(shell_type));
+    bytes.extend_from_slice(shell_type.execute_command_bytes());
+    bytes
 }
 
 pub fn in_band_init_bytes(shell_type: ShellType, session_id: SessionId) -> Option<Vec<u8>> {
@@ -738,10 +770,7 @@ pub fn in_band_init_bytes(shell_type: ShellType, session_id: SessionId) -> Optio
         ShellType::PowerShell => None,
         shell_type => {
             let script = init_shell_script_for_shell(shell_type, &ASSETS, session_id);
-            let mut bytes = in_band_history_prefix(shell_type).to_vec();
-            bytes.extend_from_slice(script.as_bytes());
-            bytes.extend_from_slice(shell_type.execute_command_bytes());
-            Some(bytes)
+            Some(history_isolated_script(shell_type, script.as_bytes()))
         }
     }
 }

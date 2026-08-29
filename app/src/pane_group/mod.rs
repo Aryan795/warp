@@ -4185,6 +4185,23 @@ impl PaneGroup {
         ))
     }
 
+    #[cfg(test)]
+    pub(crate) fn tmux_presentation_input_commands(
+        &self,
+        bytes: &[u8],
+        ctx: &AppContext,
+    ) -> Option<Vec<String>> {
+        let binding = self.tmux_presentation_binding(self.focused_pane_id(ctx), ctx)?;
+        if !binding.is_presentation {
+            return None;
+        }
+        let tmux_pane = binding.pane_id?;
+        Some(crate::terminal::tmux::protocol::send_keys_commands(
+            &crate::terminal::tmux::parser::PaneId::from(tmux_pane.as_str()),
+            bytes,
+        ))
+    }
+
     pub fn bind_tmux_pane(&self, pane_id: PaneId, tmux_pane_id: &str, ctx: &mut ViewContext<Self>) {
         let Some(view) = self.terminal_view_from_pane_id(pane_id, ctx) else {
             return;

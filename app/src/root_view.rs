@@ -1701,7 +1701,7 @@ impl NewWorkspaceSource {
             self,
             NewWorkspaceSource::SharedSessionAsViewer { .. }
                 | NewWorkspaceSource::FromCloudConversationId { .. }
-        )
+        ) || matches!(self, NewWorkspaceSource::Session { options } if options.tmux_presentation)
     }
 }
 

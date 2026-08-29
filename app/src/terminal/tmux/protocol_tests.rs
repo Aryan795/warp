@@ -674,16 +674,206 @@ fn in_band_init_bytes_are_remote_safe_and_session_scoped() {
 }
 
 #[test]
-fn bash_in_band_init_disables_history_before_interactive_body() {
+fn in_band_init_saves_and_restores_history_around_injected_body() {
     let bytes = in_band_init_bytes(ShellType::Bash, SessionId::from(3)).expect("bash init");
     let text = String::from_utf8_lossy(&bytes);
     let history_off = text.find("set +o history").expect("history off");
+    let setup_newline = text[history_off..].find('\n').expect("setup command");
     let stty = text.find("stty raw").expect("stty");
-    assert!(history_off < stty);
+    let restore = text.rfind("set -o history").expect("history restore");
+    assert!(history_off + setup_newline < stty);
     assert!(text[history_off..stty].contains("HISTCONTROL=ignorespace"));
+    assert!(text[..history_off + setup_newline].contains("__warp_histfile"));
+    assert!(stty < restore);
     let zsh = in_band_init_bytes(ShellType::Zsh, SessionId::from(3)).expect("zsh init");
     let zsh_text = String::from_utf8_lossy(&zsh);
-    assert!(zsh_text.contains("hist_ignore_space"));
+    let push = zsh_text.find("fc -p /dev/null").expect("zsh hist push");
+    let pop = zsh_text.rfind("fc -P").expect("zsh hist pop");
+    assert!(push < pop);
     let fish = in_band_init_bytes(ShellType::Fish, SessionId::from(3)).expect("fish init");
-    assert!(String::from_utf8_lossy(&fish).contains("fish_history"));
+    let fish_text = String::from_utf8_lossy(&fish);
+    let disable = fish_text
+        .find("set -g fish_history ''")
+        .expect("fish hist off");
+    let enable = fish_text
+        .rfind("set -g fish_history $__warp_fish_history")
+        .expect("fish hist restore");
+    assert!(disable < enable);
+}
+
+#[cfg(unix)]
+fn write_history_script(init: &[u8], user_command: &str, flush: &str) -> Vec<u8> {
+    let mut script = init.to_vec();
+    script.extend_from_slice(user_command.as_bytes());
+    script.push(b'\n');
+    script.extend_from_slice(flush.as_bytes());
+    script.push(b'\n');
+    script.extend_from_slice(b"exit\n");
+    script
+}
+
+#[cfg(unix)]
+fn optional_shell(name: &str) -> Option<PathBuf> {
+    warp_util::path::resolve_executable(name).map(|path| path.into_owned())
+}
+
+#[cfg(unix)]
+fn run_shell_history_script(
+    program: &Path,
+    args: &[&str],
+    env: &[(&str, &Path)],
+    script: &[u8],
+) -> bool {
+    let mut command = Command::new(program);
+    command.args(args);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    command.env_remove("HISTCONTROL");
+    command.env_remove("HISTIGNORE");
+    command.env("HISTSIZE", "1000");
+    command.env("HISTFILESIZE", "1000");
+    command.env("SAVEHIST", "1000");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = std::io::Write::write_all(&mut stdin, script);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.wait();
+    true
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_in_band_init_does_not_persist_bootstrap_in_history() {
+    let bash = Path::new("/bin/bash");
+    if !bash.exists() {
+        return;
+    }
+    let home = unique_temp_path("warp-tmux-bash-hist-home");
+    std::fs::create_dir_all(&home).expect("bash hist home");
+    let hist = home.join(".bash_history");
+    std::fs::write(&hist, b"").expect("create bash histfile");
+    let init = super::history_isolated_script(ShellType::Bash, b":");
+    let script = write_history_script(&init, "echo warp-tmux-user-cmd", "history -a");
+    if !run_shell_history_script(
+        bash,
+        &["--noprofile", "--norc", "-i"],
+        &[("HOME", home.as_path()), ("HISTFILE", hist.as_path())],
+        &script,
+    ) {
+        return;
+    }
+    let hist_bytes = std::fs::read(&hist).unwrap_or_default();
+    let entries = ShellType::Bash.parse_history(&hist_bytes);
+    let joined = entries.join("\n");
+    assert!(
+        !joined.contains("__warp_histfile") && !joined.contains("InitShell"),
+        "bootstrap must not be saved: {joined:?}"
+    );
+    assert!(
+        joined.contains("warp-tmux-user-cmd"),
+        "following user command must be saved: {joined:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_in_band_init_does_not_persist_bootstrap_in_history() {
+    let Some(zsh) = optional_shell("zsh") else {
+        return;
+    };
+    let home = unique_temp_path("warp-tmux-zsh-hist-home");
+    std::fs::create_dir_all(&home).expect("zsh hist home");
+    let hist = home.join(".zsh_history");
+    std::fs::write(&hist, b"").expect("create zsh histfile");
+    let init_bytes = super::history_isolated_script(ShellType::Zsh, b":");
+    let init = String::from_utf8_lossy(&init_bytes);
+    let command = format!(
+        "HISTFILE={hist};SAVEHIST=1000;{init}echo warp-tmux-user-cmd;fc -W",
+        hist = hist.display(),
+        init = init,
+    );
+    let status = Command::new(&zsh)
+        .args(["--no-rcs", "-c", &command])
+        .env("HOME", &home)
+        .env("HISTFILE", &hist)
+        .env("SAVEHIST", "1000")
+        .status();
+    if !status.map(|s| s.success()).unwrap_or(false) {
+        let _ = std::fs::remove_dir_all(&home);
+        return;
+    }
+    let hist_bytes = std::fs::read(&hist).unwrap_or_default();
+    if hist_bytes.is_empty() {
+        let _ = std::fs::remove_dir_all(&home);
+        return;
+    }
+    let entries = ShellType::Zsh.parse_history(&hist_bytes);
+    let joined = entries.join("\n");
+    assert!(
+        !joined.contains("__warp_histfile") && !joined.contains("InitShell"),
+        "bootstrap must not be saved: {joined:?}"
+    );
+    assert!(
+        joined.contains("warp-tmux-user-cmd"),
+        "following user command must be saved: {joined:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn fish_in_band_init_does_not_persist_bootstrap_in_history() {
+    let Some(fish) = optional_shell("fish") else {
+        return;
+    };
+    let home = unique_temp_path("warp-tmux-fish-hist-home");
+    let data = home.join("data");
+    std::fs::create_dir_all(data.join("fish")).expect("fish hist home");
+    let init_bytes = super::history_isolated_script(ShellType::Fish, b"true");
+    let init = String::from_utf8_lossy(&init_bytes);
+    let command = format!("{init}; echo warp-tmux-user-cmd; history save");
+    let status = Command::new(&fish)
+        .args(["--no-config", "-c", &command])
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", &data)
+        .status();
+    if !status.map(|s| s.success()).unwrap_or(false) {
+        let _ = std::fs::remove_dir_all(&home);
+        return;
+    }
+    let hist = data.join("fish").join("fish_history");
+    let hist_bytes = std::fs::read(&hist).unwrap_or_default();
+    if hist_bytes.is_empty() {
+        let _ = std::fs::remove_dir_all(&home);
+        return;
+    }
+    let entries = ShellType::Fish.parse_history(&hist_bytes);
+    let joined = entries.join("\n");
+    assert!(
+        !joined.contains("__warp_fish_history") && !joined.contains("InitShell"),
+        "bootstrap must not be saved: {joined:?}"
+    );
+    assert!(
+        joined.contains("warp-tmux-user-cmd"),
+        "following user command must be saved: {joined:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
 }

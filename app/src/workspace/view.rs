@@ -13350,7 +13350,11 @@ impl Workspace {
             return;
         }
         let gateway = runtime.gateway_window();
+        let presentation = runtime.presentation_window().or(Some(ctx.window_id()));
         runtime.mark_presentation_ready();
+        if let Some(presentation) = presentation {
+            ctx.windows().show_window_and_focus_app(presentation);
+        }
         if let Some(gateway) = gateway {
             ctx.windows().hide_window(gateway);
         }
@@ -13368,6 +13372,9 @@ impl Workspace {
             && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
         {
             runtime.mark_presentation_ready();
+            if let Some(presentation) = runtime.presentation_window() {
+                ctx.windows().show_window_and_focus_app(presentation);
+            }
         }
         ctx.windows().hide_window(gateway_window);
     }
@@ -13517,10 +13524,12 @@ impl Workspace {
                 && let Some(runtime) = self.tmux_runtime(ctx.window_id())
             {
                 let bytes = payload.join("\n").into_bytes();
-                runtime.deliver_output(
+                if !runtime.deliver_output(
                     &crate::terminal::tmux::parser::PaneId::from(pane_id),
                     &bytes,
-                );
+                ) {
+                    self.fail_tmux_presentation(ctx);
+                }
             }
         }
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]

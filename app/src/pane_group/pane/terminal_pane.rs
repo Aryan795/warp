@@ -1475,11 +1475,17 @@ fn handle_terminal_view_event(
             Event::WriteBytesToPty { bytes } => {
                 if let Some(binding) = group.tmux_presentation_binding(pane_id, ctx)
                     && binding.is_presentation
+                    && let Some(tmux_pane) = binding.pane_id
                 {
-                    ctx.emit(pane_group::Event::TmuxControlWrite {
-                        bytes: bytes.clone(),
-                        instance_id: binding.instance_id,
-                    });
+                    for command in crate::terminal::tmux::protocol::send_keys_commands(
+                        &crate::terminal::tmux::parser::PaneId::from(tmux_pane.as_str()),
+                        bytes,
+                    ) {
+                        ctx.emit(pane_group::Event::TmuxControlWrite {
+                            bytes: command.into_bytes().into(),
+                            instance_id: binding.instance_id,
+                        });
+                    }
                 }
             }
             #[cfg(all(unix, feature = "local_tty"))]

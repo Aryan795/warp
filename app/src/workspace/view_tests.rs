@@ -664,6 +664,70 @@ fn tmux_presentation_second_window_is_ready_after_bind_and_flush() {
 
 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
 #[test]
+fn open_tmux_presentation_window_binds_owned_view_and_encodes_send_keys() {
+    use crate::terminal::model::terminal_model::TmuxClientEvent;
+    use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+    use crate::terminal::tmux::parser::PaneId;
+    use crate::terminal::tmux::protocol::send_keys_commands;
+
+    let _tmux = FeatureFlag::TmuxControlPrototype.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let gateway = mock_workspace(&mut app);
+        let runtime = TmuxRuntime::new();
+        let instance_id = runtime.id().as_u64();
+        configure_tmux_gateway(&gateway, &mut app, instance_id);
+        let gateway_window = gateway.update(&mut app, |_, ctx| ctx.window_id());
+        runtime.bind_gateway(gateway_window);
+        runtime.start_app_bind_deadline();
+        let startup_events = [
+            TmuxClientEvent::WindowAdd {
+                window_id: "@0".to_owned(),
+            },
+            TmuxClientEvent::LayoutChange {
+                window_id: "@0".to_owned(),
+                layout: "80x24,0,0,0".to_owned(),
+                visible_layout: None,
+                flags: None,
+            },
+        ];
+        gateway.update(&mut app, |workspace, ctx| {
+            workspace.apply_tmux_client_events_from_gateway_for_tests(&startup_events, ctx);
+        });
+        let initial_windows = app.window_ids().len();
+        gateway.update(&mut app, |workspace, ctx| {
+            workspace.open_tmux_presentation_window_for_tests(Some(instance_id), ctx);
+        });
+        assert_eq!(app.window_ids().len(), initial_windows + 1);
+        let presentation = app
+            .read(|ctx| Workspace::presentation_workspace_for_tests(ctx, Some(gateway_window)))
+            .expect("real new-window path must bind a presentation workspace");
+        presentation.read(&app, |workspace, ctx| {
+            assert!(
+                workspace.is_tmux_owned_window_for_tests(ctx),
+                "new window must be tmux-owned, not a default New session"
+            );
+            assert_eq!(
+                workspace.tmux_active_window_and_pane(ctx),
+                (Some("@0".to_owned()), Some("%0".to_owned()))
+            );
+            let commands = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .tmux_presentation_input_commands(b"hi", ctx);
+            assert_eq!(
+                commands,
+                Some(send_keys_commands(&PaneId::from("%0"), b"hi"))
+            );
+        });
+        assert!(runtime.is_presentation_ready());
+        assert!(TmuxRuntime::for_id(TmuxInstanceId::from_u64(instance_id)).is_some());
+        runtime.unregister();
+    });
+}
+
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+#[test]
 fn tmux_app_bind_deadline_rolls_back_even_if_io_layout_is_ready() {
     use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
 
@@ -786,6 +850,54 @@ fn tmux_presentation_windows_are_not_persisted() {
                 "tmux presentation windows must not be persisted"
             );
         });
+        runtime.unregister();
+    });
+}
+
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+#[test]
+fn active_tmux_presentation_does_not_shift_persisted_window_index() {
+    use std::sync::Arc;
+
+    use crate::app_state::get_app_state;
+    use crate::pane_group::{NewTerminalOptions, PanesLayout};
+    use crate::terminal::tmux::bridge::TmuxRuntime;
+
+    let _tmux = FeatureFlag::TmuxControlPrototype.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let gateway = mock_workspace(&mut app);
+        let presentation = mock_workspace(&mut app);
+        let runtime = TmuxRuntime::new();
+        let gateway_window = gateway.update(&mut app, |_, ctx| ctx.window_id());
+        let presentation_window = presentation.update(&mut app, |_, ctx| ctx.window_id());
+        runtime.bind_gateway(gateway_window);
+        runtime.bind_presentation(presentation_window);
+        presentation.update(&mut app, |workspace, ctx| {
+            workspace.clear_tabs_for_tests();
+            workspace.add_tab_with_pane_layout(
+                PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
+                    tmux_presentation: true,
+                    tmux_gateway_window: Some(gateway_window),
+                    hide_homepage: true,
+                    ..Default::default()
+                })),
+                Arc::new(HashMap::new()),
+                None,
+                ctx,
+            );
+            assert!(workspace.is_tmux_owned_window_for_tests(ctx));
+            let snapshot = workspace.snapshot(ctx.window_id(), false, ctx);
+            assert!(snapshot.tabs.is_empty());
+        });
+        let state = app.read(get_app_state);
+        assert_eq!(state.windows.len(), 1);
+        assert!(
+            state.active_window_index.unwrap_or(0) < state.windows.len(),
+            "active_window_index {:?} must be in range for {} persisted window(s)",
+            state.active_window_index,
+            state.windows.len()
+        );
         runtime.unregister();
     });
 }

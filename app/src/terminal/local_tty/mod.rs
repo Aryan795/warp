@@ -58,8 +58,9 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
             use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
             if let Some(id) = self.tmux_instance_id()
                 && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
+                && !runtime.deliver_output(pane_id, bytes)
             {
-                runtime.deliver_output(pane_id, bytes);
+                self.on_tmux_presentation_unready();
             }
         }
         #[cfg(feature = "remote_tty")]

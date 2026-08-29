@@ -14,6 +14,8 @@ use crate::terminal::shell::ShellType;
 use crate::terminal::tmux::pane_bytes::sink_writer;
 
 const MAX_BUFFERED_PANE_BYTES: usize = 64 * 1024;
+const MAX_UNREGISTERED_PANE_COUNT: usize = 64;
+const MAX_UNREGISTERED_PANE_BYTES: usize = 256 * 1024;
 const MAX_PENDING_CLIENT_EVENT_BYTES: usize = 8 * 1024;
 const PENDING_CLIENT_EVENT_OVERHEAD: usize = 64;
 pub const APP_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
@@ -55,6 +57,7 @@ struct Inner {
     shell_type: Option<ShellType>,
     app_bind_deadline: Option<instant::Instant>,
     presentation_ready: bool,
+    unregistered_bytes: usize,
 }
 
 /// One Warp-managed tmux control-mode session (gateway PTY + presentation window).
@@ -100,6 +103,7 @@ impl TmuxRuntime {
                 shell_type: None,
                 app_bind_deadline: None,
                 presentation_ready: false,
+                unregistered_bytes: 0,
             }),
             applying: AtomicBool::new(false),
         });
@@ -173,6 +177,7 @@ impl TmuxRuntime {
         inner.pending_bootstrap_panes.clear();
         inner.app_bind_deadline = None;
         inner.presentation_ready = false;
+        inner.unregistered_bytes = 0;
     }
 
     pub fn is_applying(&self) -> bool {
@@ -189,6 +194,7 @@ impl TmuxRuntime {
     pub fn register_pane(&self, pane_id: &str, model: Arc<FairMutex<TerminalModel>>) {
         let mut inner = self.inner.lock();
         let buffered = inner.buffers.remove(pane_id).unwrap_or_default();
+        inner.unregistered_bytes = inner.unregistered_bytes.saturating_sub(buffered.len());
         let mut sink = PaneSink {
             model,
             processor: ansi::Processor::new(),
@@ -203,22 +209,38 @@ impl TmuxRuntime {
         self.inner.lock().panes.remove(pane_id);
     }
 
-    pub fn deliver_output(&self, pane_id: &PaneId, bytes: &[u8]) {
+    pub fn deliver_output(&self, pane_id: &PaneId, bytes: &[u8]) -> bool {
         let mut inner = self.inner.lock();
         if let Some(sink) = inner.panes.get_mut(pane_id.as_str()) {
             feed_sink(sink, bytes);
-            return;
+            return true;
         }
-        let buffer = inner
+        let is_new_pane = !inner.buffers.contains_key(pane_id.as_str());
+        if is_new_pane && inner.buffers.len() >= MAX_UNREGISTERED_PANE_COUNT {
+            clear_unregistered_buffers(&mut inner);
+            return false;
+        }
+        let buffered_len = inner
             .buffers
-            .entry(pane_id.as_str().to_owned())
-            .or_default();
-        let room = MAX_BUFFERED_PANE_BYTES.saturating_sub(buffer.len());
+            .get(pane_id.as_str())
+            .map(Vec::len)
+            .unwrap_or(0);
+        let room = MAX_BUFFERED_PANE_BYTES.saturating_sub(buffered_len);
         if room == 0 {
-            return;
+            return true;
         }
         let take = bytes.len().min(room);
-        buffer.extend_from_slice(&bytes[..take]);
+        if inner.unregistered_bytes.saturating_add(take) > MAX_UNREGISTERED_PANE_BYTES {
+            clear_unregistered_buffers(&mut inner);
+            return false;
+        }
+        inner
+            .buffers
+            .entry(pane_id.as_str().to_owned())
+            .or_default()
+            .extend_from_slice(&bytes[..take]);
+        inner.unregistered_bytes += take;
+        true
     }
 
     pub fn note_capture(&self, pane_id: &str) {
@@ -399,6 +421,12 @@ fn client_event_retained_bytes(event: &TmuxClientEvent) -> usize {
     PENDING_CLIENT_EVENT_OVERHEAD.saturating_add(payload)
 }
 
+fn clear_unregistered_buffers(inner: &mut Inner) {
+    log::warn!("tmux unregistered pane output overflow; rolling back");
+    inner.buffers.clear();
+    inner.unregistered_bytes = 0;
+}
+
 fn feed_sink(sink: &mut PaneSink, bytes: &[u8]) {
     let mut writer = sink_writer();
     let mut model = sink.model.lock();
@@ -427,6 +455,7 @@ mod tests {
                 shell_type: None,
                 app_bind_deadline: None,
                 presentation_ready: false,
+                unregistered_bytes: 0,
             }),
             applying: AtomicBool::new(false),
         }
@@ -457,11 +486,45 @@ mod tests {
     #[test]
     fn unregistered_pane_output_keeps_leading_bootstrap_bytes() {
         let runtime = runtime();
-        runtime.deliver_output(&PaneId::from("%0"), b"HOOK");
-        runtime.deliver_output(&PaneId::from("%0"), &vec![b'x'; MAX_BUFFERED_PANE_BYTES]);
+        assert!(runtime.deliver_output(&PaneId::from("%0"), b"HOOK"));
+        assert!(runtime.deliver_output(&PaneId::from("%0"), &vec![b'x'; MAX_BUFFERED_PANE_BYTES]));
         let buffered = runtime.buffered_output("%0").expect("buffered");
         assert!(buffered.starts_with(b"HOOK"));
         assert_eq!(buffered.len(), MAX_BUFFERED_PANE_BYTES);
+    }
+
+    #[test]
+    fn unregistered_pane_count_cap_clears_and_rolls_back() {
+        let runtime = runtime();
+        for index in 0..MAX_UNREGISTERED_PANE_COUNT {
+            let pane = format!("%{index}");
+            assert!(
+                runtime.deliver_output(&PaneId::from(pane.as_str()), b"x"),
+                "pane {pane} should fit under the count cap"
+            );
+        }
+        assert!(!runtime.deliver_output(&PaneId::from("%64"), b"overflow"));
+        for index in 0..=MAX_UNREGISTERED_PANE_COUNT {
+            let pane = format!("%{index}");
+            assert_eq!(runtime.buffered_output(&pane), None);
+        }
+    }
+
+    #[test]
+    fn unregistered_pane_aggregate_byte_cap_clears_and_rolls_back() {
+        let runtime = runtime();
+        let chunk = vec![b'y'; MAX_BUFFERED_PANE_BYTES];
+        let fitting = MAX_UNREGISTERED_PANE_BYTES / MAX_BUFFERED_PANE_BYTES;
+        for index in 0..fitting {
+            let pane = format!("%{index}");
+            assert!(runtime.deliver_output(&PaneId::from(pane.as_str()), &chunk));
+        }
+        let overflow_pane = format!("%{fitting}");
+        assert!(!runtime.deliver_output(&PaneId::from(overflow_pane.as_str()), &chunk));
+        for index in 0..=fitting {
+            let pane = format!("%{index}");
+            assert_eq!(runtime.buffered_output(&pane), None);
+        }
     }
 
     #[test]
