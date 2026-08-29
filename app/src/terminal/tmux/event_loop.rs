@@ -18,7 +18,7 @@ use crate::terminal::model::ansi;
 use crate::terminal::tmux::pane_bytes::{feed_control_bytes, notify_exit, sink_writer};
 use crate::terminal::tmux::parser::PaneId;
 use crate::terminal::tmux::protocol::{
-    kill_server_command, refresh_client_command, send_keys_commands,
+    kill_server_command, refresh_client_command, send_keys_commands, zsh_init_bytes,
 };
 use crate::terminal::writeable_pty::Message;
 use crate::terminal::writeable_pty::pty_controller::{EventLoopSendError, EventLoopSender};
@@ -482,7 +482,9 @@ where
         let pending = std::mem::take(&mut *shared.pending_pane_writes.lock());
         let pending_control = std::mem::take(&mut *shared.pending_control.lock());
         let mut to_send = Vec::new();
-        let _ = zsh_init.take();
+        if let Some((script, shell_type, _)) = zsh_init.take() {
+            to_send.push(zsh_init_bytes(&script, shell_type));
+        }
         to_send.extend(pending.into_iter().map(|bytes| bytes.into_owned()));
         for bytes in to_send {
             for command in send_keys_commands(&pane_id, &bytes) {

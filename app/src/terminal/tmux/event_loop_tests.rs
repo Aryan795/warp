@@ -6,12 +6,14 @@ use std::time::Duration;
 use anyhow::Result;
 use mio::{Interest, Token};
 use parking_lot::FairMutex;
+use warp_core::SessionId;
+use warp_terminal::shell::ShellType;
 
 use super::{ControlClientEventLoop, SharedControlState, TmuxControlSender};
 use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::local_tty::{ChildEvent, EventedPty, EventedReadWrite, mio_channel};
-use crate::terminal::tmux::parser::PaneId;
-use crate::terminal::tmux::protocol::{kill_server_command, send_keys_commands};
+use crate::terminal::tmux::parser::{CONTROL_MODE_DCS, PaneId};
+use crate::terminal::tmux::protocol::{kill_server_command, send_keys_commands, zsh_init_bytes};
 use crate::terminal::writeable_pty::Message;
 use crate::terminal::writeable_pty::pty_controller::EventLoopSender as _;
 use crate::terminal::{SizeInfo, TerminalModel};
@@ -21,14 +23,22 @@ const CHILD_TOKEN: Token = Token(2);
 
 struct FakeReader {
     error: Option<io::ErrorKind>,
+    pending: Mutex<Vec<u8>>,
 }
 
 impl Read for FakeReader {
-    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if let Some(kind) = self.error {
             return Err(io::Error::new(kind, "fake read error"));
         }
-        Err(io::Error::new(io::ErrorKind::WouldBlock, "no fake bytes"))
+        let mut pending = self.pending.lock().expect("reader lock");
+        if pending.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, "no fake bytes"));
+        }
+        let n = pending.len().min(buf.len());
+        buf[..n].copy_from_slice(&pending[..n]);
+        pending.drain(..n);
+        Ok(n)
     }
 }
 
@@ -63,6 +73,7 @@ struct FakePty {
 fn fake_pty(
     reader_error: Option<io::ErrorKind>,
     writer_error: Option<io::ErrorKind>,
+    pending_read: Vec<u8>,
 ) -> (FakePty, mio::net::UnixStream, Arc<Mutex<Vec<u8>>>) {
     let (stream, peer) = mio::net::UnixStream::pair().expect("unix stream pair");
     let written = Arc::new(Mutex::new(Vec::new()));
@@ -71,6 +82,7 @@ fn fake_pty(
             stream,
             reader: FakeReader {
                 error: reader_error,
+                pending: Mutex::new(pending_read),
             },
             writer: FakeWriter {
                 written: written.clone(),
@@ -144,7 +156,16 @@ struct Harness {
 }
 
 fn start_loop(reader_error: Option<io::ErrorKind>, writer_error: Option<io::ErrorKind>) -> Harness {
-    let (pty, peer, written) = fake_pty(reader_error, writer_error);
+    start_loop_with(reader_error, writer_error, None, Vec::new())
+}
+
+fn start_loop_with(
+    reader_error: Option<io::ErrorKind>,
+    writer_error: Option<io::ErrorKind>,
+    zsh_init: Option<(String, ShellType, SessionId)>,
+    pending_read: Vec<u8>,
+) -> Harness {
+    let (pty, peer, written) = fake_pty(reader_error, writer_error, pending_read);
     let (wakeups_tx, wakeups_rx) = async_channel::unbounded();
     let listener = ChannelEventListener::builder_for_test::<crate::terminal::event::Event>()
         .with_wakeups_tx(wakeups_tx)
@@ -154,7 +175,7 @@ fn start_loop(reader_error: Option<io::ErrorKind>, writer_error: Option<io::Erro
     let shared = Arc::new(SharedControlState::new());
     let sender = TmuxControlSender::new(tx, shared.clone());
     let event_loop =
-        ControlClientEventLoop::new(model.clone(), listener, pty, rx, shared.clone(), None);
+        ControlClientEventLoop::new(model.clone(), listener, pty, rx, shared.clone(), zsh_init);
     Harness {
         handle: event_loop.spawn(),
         sender,
@@ -333,5 +354,59 @@ fn generic_input_is_not_encoded_as_pane_send_keys() {
     assert!(
         !written.contains("send-keys -t %0"),
         "generic Input must not be send-keys encoded: {written}"
+    );
+}
+
+fn wait_for_written(written: &Arc<Mutex<Vec<u8>>>, needle: &[u8]) {
+    let deadline = instant::Instant::now() + Duration::from_secs(2);
+    loop {
+        {
+            let got = written.lock().expect("written lock");
+            if got.windows(needle.len()).any(|w| w == needle) {
+                return;
+            }
+        }
+        if instant::Instant::now() >= deadline {
+            let got = written.lock().expect("written lock").clone();
+            panic!("timed out waiting for send-keys, got {got:?}");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn bound_pane_writes_retained_zsh_init_send_keys_exactly_once() {
+    let script = "WARP_ZSH_INIT_MARKER".to_owned();
+    let init_bytes = zsh_init_bytes(&script, ShellType::Zsh);
+    let encoded = send_keys_commands(&PaneId::from("%0"), &init_bytes);
+    let expected: Vec<u8> = encoded.iter().flat_map(|c| c.as_bytes()).copied().collect();
+    let mut control = CONTROL_MODE_DCS.to_vec();
+    control.extend_from_slice(b"%window-pane-changed @0 %0\n");
+    let mut harness = start_loop_with(
+        None,
+        None,
+        Some((script, ShellType::Zsh, SessionId::from(7))),
+        control,
+    );
+    let mut peer = harness.peer.take().expect("peer");
+    peer.write_all(&[1]).expect("wake readable");
+    wait_for_written(&harness.written, &expected);
+    harness
+        .sender
+        .send(Message::Shutdown)
+        .expect("send shutdown");
+    join_loop(harness.handle);
+    let written = harness.written.lock().expect("written lock").clone();
+    assert_eq!(
+        written
+            .windows(expected.len())
+            .filter(|w| *w == expected)
+            .count(),
+        1
+    );
+    let written_text = String::from_utf8_lossy(&written);
+    assert!(
+        !written_text.contains("send-keys -t %0 -H 73 65 6e 64"),
+        "zsh init send-keys must not be hex-encoded again: {written_text}"
     );
 }

@@ -4271,7 +4271,9 @@ impl PaneGroup {
         let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), model) else {
             return;
         };
-        let session_id = warp_terminal::bootstrap::generate_session_id();
+        let session_id = runtime
+            .early_init_session_id(tmux_pane_id)
+            .unwrap_or_else(warp_terminal::bootstrap::generate_session_id);
         if let Some(claim) = runtime.begin_pane_bootstrap(tmux_pane_id, session_id) {
             let mut locked = model.lock();
             locked.register_session_id(claim.session_id);

@@ -455,3 +455,99 @@ fn unbind_retires_session_id_from_presentation_model() {
     assert!(reused.lock().is_registered_session(sid(6)));
     assert!(runtime.on_init_shell("%0", sid(5)).is_none());
 }
+
+fn assert_runtime_maps_cleared(runtime: &TmuxRuntime, pane_id: &str) {
+    assert_eq!(
+        runtime.pane_bootstrap_state(pane_id),
+        PaneBootstrapState::Unsent
+    );
+    assert!(runtime.pane_model(pane_id).is_none());
+    assert_eq!(runtime.buffered_output(pane_id), None);
+    assert_eq!(runtime.take_capture(), None);
+    assert_eq!(runtime.bootstrap_stage_count(pane_id), 0);
+    assert_eq!(runtime.bootstrap_script_count(pane_id), 0);
+    assert!(runtime.tracked_control_pane().is_none());
+    assert!(runtime.take_early_init_shell(pane_id).is_none());
+}
+
+#[test]
+fn runtime_unregister_retires_ready_session_and_rejects_delayed_hook() {
+    use crate::terminal::model::ansi::Handler as _;
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    let model = Arc::new(FairMutex::new(crate::terminal::TerminalModel::mock(
+        None, None,
+    )));
+    runtime.register_pane("%0", model.clone());
+    let claim = runtime.begin_pane_bootstrap("%0", sid(5)).expect("stage");
+    runtime.apply_claim_session(&claim);
+    assert_eq!(runtime.on_init_shell("%0", sid(5)), Some(ShellType::Zsh));
+    runtime.note_capture("%0");
+    runtime.unregister();
+    assert!(!model.lock().is_registered_session(sid(5)));
+    assert!(runtime.on_init_shell("%0", sid(5)).is_none());
+    assert_runtime_maps_cleared(&runtime, "%0");
+}
+
+#[test]
+fn runtime_unregister_retires_failed_session_and_rejects_delayed_hook() {
+    use crate::terminal::model::ansi::Handler as _;
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    let model = Arc::new(FairMutex::new(crate::terminal::TerminalModel::mock(
+        None, None,
+    )));
+    runtime.register_pane("%0", model.clone());
+    let claim = runtime.begin_pane_bootstrap("%0", sid(5)).expect("stage");
+    runtime.apply_claim_session(&claim);
+    let BootstrapTimeoutResult::Retry(retry) =
+        runtime.handle_bootstrap_timeout("%0", claim.generation)
+    else {
+        panic!("expected retry");
+    };
+    runtime.apply_claim_session(&retry);
+    assert!(matches!(
+        runtime.handle_bootstrap_timeout("%0", retry.generation),
+        BootstrapTimeoutResult::Failed
+    ));
+    assert!(runtime.pane_bootstrap_failed("%0"));
+    runtime.unregister();
+    assert!(!model.lock().is_registered_session(sid(5)));
+    assert!(!model.lock().is_registered_session(retry.session_id));
+    assert!(runtime.on_init_shell("%0", retry.session_id).is_none());
+    assert_runtime_maps_cleared(&runtime, "%0");
+}
+
+#[test]
+fn runtime_unregister_without_pane_model_clears_bootstrap() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
+    runtime.unregister();
+    assert_runtime_maps_cleared(&runtime, "%0");
+}
+
+#[test]
+fn bind_reuses_retained_early_session_id_not_a_random_id() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    let retained = sid(11);
+    let would_be_random = sid(99);
+    runtime.note_early_init_shell("%0", retained);
+    assert_eq!(runtime.early_init_session_id("%0"), Some(retained));
+    let chosen = runtime
+        .early_init_session_id("%0")
+        .unwrap_or(would_be_random);
+    assert_eq!(chosen, retained);
+    assert_ne!(chosen, would_be_random);
+    let claim = runtime
+        .begin_pane_bootstrap("%0", would_be_random)
+        .expect("stage with retained id");
+    assert_eq!(claim.session_id, retained);
+    assert_ne!(claim.session_id, would_be_random);
+    assert_eq!(
+        runtime.complete_if_early_init_shell("%0"),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%0"));
+}

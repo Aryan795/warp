@@ -88,6 +88,16 @@ enum PaneBootstrapEntry {
     },
 }
 
+impl PaneBootstrapEntry {
+    fn session_id(&self) -> SessionId {
+        match self {
+            Self::Staging { session_id, .. }
+            | Self::Ready { session_id, .. }
+            | Self::Failed { session_id, .. } => *session_id,
+        }
+    }
+}
+
 struct Inner {
     gateway_window: Option<WindowId>,
     presentation_window: Option<WindowId>,
@@ -212,31 +222,45 @@ impl TmuxRuntime {
     }
 
     pub fn unregister(&self) {
-        let mut inner = self.inner.lock();
-        let mut idx = index();
-        idx.by_id.remove(&self.id);
-        if let Some(gateway) = inner.gateway_window.take() {
-            idx.by_gateway.remove(&gateway);
+        let retire = {
+            let mut inner = self.inner.lock();
+            {
+                let mut idx = index();
+                idx.by_id.remove(&self.id);
+                if let Some(gateway) = inner.gateway_window.take() {
+                    idx.by_gateway.remove(&gateway);
+                }
+                if let Some(presentation) = inner.presentation_window.take() {
+                    idx.by_presentation.remove(&presentation);
+                }
+            }
+            self.applying.store(false, Ordering::SeqCst);
+            let mut retire = Vec::new();
+            let bootstrap = std::mem::take(&mut inner.pane_bootstrap);
+            for (pane_id, entry) in bootstrap {
+                if let Some(sink) = inner.panes.remove(&pane_id) {
+                    retire.push((sink.model, entry.session_id()));
+                }
+            }
+            inner.panes.clear();
+            inner.buffers.clear();
+            inner.pending_captures.clear();
+            inner.pending_client_events.clear();
+            inner.pending_client_event_bytes = 0;
+            inner.pending_bootstrap_panes.clear();
+            inner.bootstrap_stage_count.clear();
+            inner.bootstrap_script_count.clear();
+            inner.next_generation = 0;
+            inner.tracked_control_pane = None;
+            inner.early_init_shell.clear();
+            inner.app_bind_deadline = None;
+            inner.presentation_ready = false;
+            inner.unregistered_bytes = 0;
+            retire
+        };
+        for (model, session_id) in retire {
+            model.lock().unregister_session_id(session_id);
         }
-        if let Some(presentation) = inner.presentation_window.take() {
-            idx.by_presentation.remove(&presentation);
-        }
-        self.applying.store(false, Ordering::SeqCst);
-        inner.panes.clear();
-        inner.buffers.clear();
-        inner.pending_captures.clear();
-        inner.pending_client_events.clear();
-        inner.pending_client_event_bytes = 0;
-        inner.pane_bootstrap.clear();
-        inner.pending_bootstrap_panes.clear();
-        inner.bootstrap_stage_count.clear();
-        inner.bootstrap_script_count.clear();
-        inner.next_generation = 0;
-        inner.tracked_control_pane = None;
-        inner.early_init_shell.clear();
-        inner.app_bind_deadline = None;
-        inner.presentation_ready = false;
-        inner.unregistered_bytes = 0;
     }
 
     pub fn is_applying(&self) -> bool {
@@ -265,23 +289,22 @@ impl TmuxRuntime {
     }
 
     pub fn unregister_pane(&self, pane_id: &str) {
-        let mut inner = self.inner.lock();
-        let session_id = match inner.pane_bootstrap.remove(pane_id) {
-            Some(PaneBootstrapEntry::Staging { session_id, .. })
-            | Some(PaneBootstrapEntry::Ready { session_id, .. })
-            | Some(PaneBootstrapEntry::Failed { session_id, .. }) => Some(session_id),
-            None => None,
+        let retire = {
+            let mut inner = self.inner.lock();
+            let session_id = inner
+                .pane_bootstrap
+                .remove(pane_id)
+                .map(|entry| entry.session_id());
+            let model = inner.panes.remove(pane_id).map(|sink| sink.model);
+            inner.pending_bootstrap_panes.retain(|id| id != pane_id);
+            inner.bootstrap_stage_count.remove(pane_id);
+            inner.bootstrap_script_count.remove(pane_id);
+            inner.early_init_shell.remove(pane_id);
+            session_id.zip(model)
         };
-        if let Some(session_id) = session_id
-            && let Some(sink) = inner.panes.get(pane_id)
-        {
-            sink.model.lock().unregister_session_id(session_id);
+        if let Some((session_id, model)) = retire {
+            model.lock().unregister_session_id(session_id);
         }
-        inner.panes.remove(pane_id);
-        inner.pending_bootstrap_panes.retain(|id| id != pane_id);
-        inner.bootstrap_stage_count.remove(pane_id);
-        inner.bootstrap_script_count.remove(pane_id);
-        inner.early_init_shell.remove(pane_id);
     }
 
     pub fn deliver_output(&self, pane_id: &PaneId, bytes: &[u8]) -> bool {
@@ -444,6 +467,11 @@ impl TmuxRuntime {
             }
             return None;
         };
+        let session_id = inner
+            .early_init_shell
+            .get(pane_id)
+            .copied()
+            .unwrap_or(session_id);
         let generation = Self::next_bootstrap_generation(inner);
         inner.pane_bootstrap.insert(
             pane_id.to_owned(),
@@ -640,6 +668,10 @@ impl TmuxRuntime {
             .lock()
             .early_init_shell
             .insert(pane_id.to_owned(), session_id);
+    }
+
+    pub fn early_init_session_id(&self, pane_id: &str) -> Option<SessionId> {
+        self.inner.lock().early_init_shell.get(pane_id).copied()
     }
 
     pub fn take_early_init_shell(&self, pane_id: &str) -> Option<SessionId> {
