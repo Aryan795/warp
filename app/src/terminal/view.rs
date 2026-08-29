@@ -12926,15 +12926,21 @@ impl TerminalView {
                             && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
                         {
                             let pane = runtime.tracked_control_pane().or(fallback_pane);
-                            if let Some(pane) = pane
-                                && let Some(completed) =
+                            if let Some(pane) = pane {
+                                if let Some(completed) =
                                     runtime.note_early_init_shell(&pane, session_id, shell_type)
-                            {
-                                self.write_tmux_silent_pane_bootstrap(&pane, completed, ctx);
+                                {
+                                    self.write_tmux_silent_pane_bootstrap(&pane, completed, ctx);
+                                }
+                            } else {
+                                runtime.note_shell_type(shell_type);
                             }
-                            runtime.note_shell_type(shell_type);
+                            if let Some(current) = runtime.shell_type() {
+                                self.flush_queued_tmux_pane_bootstrap(current, ctx);
+                            }
                         }
                     }
+                    #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
                     self.flush_queued_tmux_pane_bootstrap(shell_type, ctx);
                 }
                 // The remote confirmed a subshell bootstrap is starting. Hide the

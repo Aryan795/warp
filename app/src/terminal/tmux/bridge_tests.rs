@@ -18,8 +18,8 @@ fn runtime() -> TmuxRuntime {
             next_generation: 0,
             tracked_control_pane: None,
             control_incarnation: 0,
+            tracked_expected_session: None,
             early_init_shell: HashMap::new(),
-            retired_session_ids: HashSet::new(),
             shell_type: None,
             app_bind_deadline: None,
             presentation_ready: false,
@@ -434,6 +434,76 @@ fn tracked_control_pane_hands_off_early_init_shell() {
 }
 
 #[test]
+fn stale_differing_shell_hook_does_not_replace_authoritative_type() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    let model = Arc::new(FairMutex::new(crate::terminal::TerminalModel::mock(
+        None, None,
+    )));
+    runtime.register_pane("%0", model.clone());
+    runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
+    runtime.unregister_pane("%0");
+    assert_eq!(runtime.shell_type(), Some(ShellType::Zsh));
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(1), ShellType::Bash)
+            .is_none()
+    );
+    runtime.note_tracked_control_pane("%0");
+    runtime.register_pane("%0", model);
+    runtime.begin_pane_bootstrap("%0", sid(2)).expect("restage");
+    assert_eq!(runtime.shell_type(), Some(ShellType::Zsh));
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(1), ShellType::Bash)
+            .is_none()
+    );
+    assert_eq!(runtime.shell_type(), Some(ShellType::Zsh));
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(2), ShellType::Bash),
+        Some(ShellType::Bash)
+    );
+    assert_eq!(runtime.shell_type(), Some(ShellType::Bash));
+}
+
+#[test]
+fn pane_churn_keeps_binding_maps_bounded() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    let baseline = runtime.live_binding_counts();
+    for i in 0..80 {
+        let pane = format!("%{i}");
+        let model = Arc::new(FairMutex::new(crate::terminal::TerminalModel::mock(
+            None, None,
+        )));
+        runtime.note_tracked_control_pane(&pane);
+        runtime.register_pane(&pane, model);
+        runtime
+            .begin_pane_bootstrap(&pane, sid(i as u64 + 1))
+            .expect("stage churn pane");
+        runtime.unregister_pane(&pane);
+    }
+    assert_eq!(runtime.live_binding_counts(), baseline);
+    runtime.note_tracked_control_pane("%0");
+    let model = Arc::new(FairMutex::new(crate::terminal::TerminalModel::mock(
+        None, None,
+    )));
+    runtime.register_pane("%0", model);
+    runtime.begin_pane_bootstrap("%0", sid(9)).expect("live");
+    assert_eq!(runtime.live_binding_counts(), (1, 1, 0));
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(1), ShellType::Zsh)
+            .is_none()
+    );
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(9), ShellType::Zsh),
+        Some(ShellType::Zsh)
+    );
+}
+
+#[test]
 fn stale_hook_after_remove_does_not_ready_rebound_pane() {
     let runtime = runtime();
     runtime.note_shell_type(ShellType::Zsh);
@@ -490,6 +560,7 @@ fn late_bash_hook_selects_bash_silent_bootstrap_once() {
     runtime
         .begin_pane_bootstrap("%0", sid(9))
         .expect("stage as zsh");
+    runtime.set_tracked_expected_session(sid(8));
     assert_eq!(runtime.shell_type(), Some(ShellType::Zsh));
     assert_eq!(
         runtime.note_early_init_shell("%0", sid(8), ShellType::Bash),
@@ -525,6 +596,7 @@ fn late_tracked_init_shell_completes_staged_pane_without_retry() {
     runtime.apply_claim_session(&claim);
     let armed = runtime.arm_bootstrap_timeout("%0").expect("arm timer");
     assert_eq!(armed.0, claim.generation);
+    runtime.set_tracked_expected_session(retained);
     assert_eq!(
         runtime.note_early_init_shell("%0", retained, ShellType::Zsh),
         Some(ShellType::Zsh)

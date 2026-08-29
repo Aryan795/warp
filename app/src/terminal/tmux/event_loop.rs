@@ -476,6 +476,9 @@ where
             use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
             if let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(instance_id)) {
                 runtime.note_tracked_control_pane(pane_id.as_str());
+                if let Some((_, _, session_id)) = zsh_init.as_ref() {
+                    runtime.set_tracked_expected_session(*session_id);
+                }
             }
         }
 
