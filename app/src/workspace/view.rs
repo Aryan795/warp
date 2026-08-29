@@ -13053,7 +13053,7 @@ impl Workspace {
         }
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
         {
-            let _ = ctx;
+            let _ = (instance_id, ctx);
             None
         }
     }
@@ -13129,6 +13129,7 @@ impl Workspace {
         events: &[crate::terminal::model::terminal_model::TmuxClientEvent],
         ctx: &mut ViewContext<Self>,
     ) {
+        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         use crate::terminal::model::terminal_model::TmuxClientEvent;
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         let Some(runtime) = self.tmux_runtime(ctx.window_id()) else {
@@ -13562,6 +13563,7 @@ impl Workspace {
         default_session_mode_behavior: DefaultSessionModeBehavior,
         ctx: &mut ViewContext<Self>,
     ) {
+        #[cfg(all(unix, feature = "local_tty"))]
         if self.is_tmux_owned_window(ctx) {
             if let Some(view) = self
                 .active_tab_pane_group()
@@ -13569,7 +13571,7 @@ impl Workspace {
                 .active_session_view(ctx)
             {
                 view.update(ctx, |view, ctx| {
-                    view.write_to_pty(
+                    view.write_tmux_control_command(
                         crate::terminal::tmux::protocol::new_window_command().into_bytes(),
                         ctx,
                     );
@@ -13720,7 +13722,7 @@ impl Workspace {
                     .active_session_view(ctx)
                 {
                     view.update(ctx, |view, ctx| {
-                        view.write_to_pty(
+                        view.write_tmux_control_command(
                             crate::terminal::tmux::protocol::new_window_command().into_bytes(),
                             ctx,
                         );

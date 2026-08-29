@@ -4397,6 +4397,8 @@ impl PaneGroup {
                 }
                 model.lock().set_tmux_pane_id(None);
             }
+            #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+            let _ = tmux_id;
             if self.panes.visible_pane_count() > 1 {
                 self.close_pane(warp_pane, ctx);
             }

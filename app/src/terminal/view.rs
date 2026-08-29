@@ -22016,7 +22016,10 @@ impl TerminalView {
                 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
                 self.create_and_push_tmux_workspace(args, ctx);
                 #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
-                log::warn!("tmux control prototype requires a local Unix tty");
+                {
+                    let _ = args;
+                    log::warn!("tmux control prototype requires a local Unix tty");
+                }
             }
             InputEvent::ExitCloudModeAndStartLocalAgent { initial_prompt } => {
                 let origin = AgentViewEntryOrigin::Input {
