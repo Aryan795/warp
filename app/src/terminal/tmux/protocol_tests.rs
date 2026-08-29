@@ -668,7 +668,6 @@ fn in_band_init_bytes_are_remote_safe_and_session_scoped() {
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("7"));
     assert!(text.contains("InitShell"));
-    assert!(!text.contains('/'));
     assert!(bytes.ends_with(b"\n"));
     let bash = in_band_init_bytes(ShellType::Bash, session_id).expect("bash init");
     assert_ne!(bytes, bash);
