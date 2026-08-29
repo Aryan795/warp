@@ -669,10 +669,10 @@ fn parse_dev_container_up_stdout(stdout: &[u8]) -> Option<DevContainerUpResult> 
 }
 
 /// Finds `devcontainer.json` candidates for `workspace_folder`, in the order the
-/// [devcontainers spec](https://containers.dev/implementors/spec/#devcontainerjson) resolves
-/// them: `.devcontainer/devcontainer.json`, then any `.devcontainer/<folder>/devcontainer.json`
-/// (sorted by folder name, for a stable and predictable selector order), then a workspace-root
-/// `.devcontainer.json`.
+/// [devcontainers spec](https://containers.dev/implementors/spec/#devcontainerjson) lists
+/// them: `.devcontainer/devcontainer.json`, then a workspace-root `.devcontainer.json`, then
+/// any `.devcontainer/<folder>/devcontainer.json` (sorted by folder name, for a stable
+/// selector order).
 ///
 /// A repo with more than one candidate needs the caller to ask the user which one to use (see
 /// [`TerminalView::find_and_start_dev_container`]) and to pass the chosen path explicitly via
@@ -688,6 +688,11 @@ fn discover_dev_container_configs(workspace_folder: &Path) -> Vec<PathBuf> {
         configs.push(top_level_config);
     }
 
+    let root_config = workspace_folder.join(".devcontainer.json");
+    if root_config.is_file() {
+        configs.push(root_config);
+    }
+
     if let Ok(entries) = std::fs::read_dir(&devcontainer_dir) {
         let mut nested_configs: Vec<PathBuf> = entries
             .filter_map(Result::ok)
@@ -698,11 +703,6 @@ fn discover_dev_container_configs(workspace_folder: &Path) -> Vec<PathBuf> {
             .collect();
         nested_configs.sort();
         configs.extend(nested_configs);
-    }
-
-    let root_config = workspace_folder.join(".devcontainer.json");
-    if root_config.is_file() {
-        configs.push(root_config);
     }
 
     configs

@@ -240,9 +240,25 @@ fn discover_dev_container_configs_finds_all_three_shapes_together_in_spec_order(
         discover_dev_container_configs(workspace.path()),
         vec![
             devcontainer_dir.join("devcontainer.json"),
-            nested_dir.join("devcontainer.json"),
             workspace.path().join(".devcontainer.json"),
+            nested_dir.join("devcontainer.json"),
         ]
+    );
+}
+
+#[test]
+fn discover_dev_container_configs_puts_root_ahead_of_nested_when_top_level_is_absent() {
+    let workspace = tempfile::tempdir().expect("create temp workspace");
+    let nested_dir = workspace.path().join(".devcontainer").join("web");
+    std::fs::create_dir_all(&nested_dir).expect("create nested devcontainer folder");
+    std::fs::write(nested_dir.join("devcontainer.json"), "{}")
+        .expect("write nested devcontainer.json");
+    let root_config = workspace.path().join(".devcontainer.json");
+    std::fs::write(&root_config, "{}").expect("write root-level .devcontainer.json");
+
+    assert_eq!(
+        discover_dev_container_configs(workspace.path()),
+        vec![root_config, nested_dir.join("devcontainer.json")]
     );
 }
 
