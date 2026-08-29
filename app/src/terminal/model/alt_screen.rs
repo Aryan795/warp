@@ -120,6 +120,24 @@ impl AltScreen {
         &mut self.grid_handler
     }
 
+    pub(crate) fn replace_grid_with_blank(
+        &mut self,
+        obfuscate_secrets: ObfuscateSecrets,
+    ) -> GridHandler {
+        let blank = GridHandler::new(
+            SizeInfo::new_without_font_metrics(
+                self.grid_handler.visible_rows(),
+                self.grid_handler.columns(),
+            ),
+            0,
+            self.event_proxy.clone(),
+            true,
+            obfuscate_secrets,
+            PerformResetGridChecks::default(),
+        );
+        std::mem::replace(&mut self.grid_handler, blank)
+    }
+
     /// Resize terminal to new dimensions.
     pub fn resize(&mut self, size_update: &SizeUpdate) {
         // Clear any selection on screen resize, to prevent stale anchors

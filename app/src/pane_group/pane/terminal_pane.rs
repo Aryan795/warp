@@ -1472,19 +1472,6 @@ fn handle_terminal_view_event(
                 ctx.emit(pane_group::Event::TmuxClientEvents(events.clone()));
             }
             #[cfg(all(unix, feature = "local_tty"))]
-            Event::WriteBytesToPty { bytes } => {
-                if let Some(binding) = group.tmux_presentation_binding(pane_id, ctx)
-                    && binding.is_presentation
-                    && let Some(tmux_pane) = binding.pane_id
-                {
-                    ctx.emit(pane_group::Event::TmuxPaneInput {
-                        pane_id: tmux_pane,
-                        bytes: bytes.clone(),
-                        instance_id: binding.instance_id,
-                    });
-                }
-            }
-            #[cfg(all(unix, feature = "local_tty"))]
             Event::TmuxControlCommand { bytes } => {
                 if let Some(binding) = group.tmux_presentation_binding(pane_id, ctx)
                     && binding.is_presentation

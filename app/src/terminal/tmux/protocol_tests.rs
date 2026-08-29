@@ -674,6 +674,24 @@ fn in_band_init_bytes_are_remote_safe_and_session_scoped() {
 }
 
 #[test]
+fn silent_bootstrap_framing_hides_setup_and_clears_before_prompt() {
+    let body =
+        b"warp_bootstrapped() {\nread -r -d '' WARP_BOOTSTRAP_VAR << 'EOM'\npayload\nEOM\n\n";
+    let framed = super::silent_history_isolated_script(ShellType::Zsh, body);
+    let text = String::from_utf8_lossy(&framed);
+    let echo_off = text.find("stty -echo").expect("echo off");
+    let hist = text.find("fc -p /dev/null").expect("history isolate");
+    let marker = text.find("warp_bootstrapped").expect("bootstrap body");
+    let clear = text.find("printf").expect("clear");
+    let echo_on = text.rfind("stty echo").expect("echo on");
+    assert!(echo_off < hist);
+    assert!(hist < marker);
+    assert!(marker < clear);
+    assert!(clear < echo_on);
+    assert!(text[clear..echo_on].contains("[2J"));
+}
+
+#[test]
 fn in_band_init_saves_and_restores_history_around_injected_body() {
     let bytes = in_band_init_bytes(ShellType::Bash, SessionId::from(3)).expect("bash init");
     let text = String::from_utf8_lossy(&bytes);

@@ -107,7 +107,13 @@ impl<T: EventLoopSender> PtyController<T> {
             ModelEvent::Handler(AnsiHandlerEvent::InitShell {
                 pending_session_info,
             }) => {
-                me.initialize_shell(pending_session_info.as_ref(), ctx);
+                let skip_pty_bootstrap = {
+                    let model = me.terminal_model.lock();
+                    model.is_tmux_control_mode() || model.is_tmux_presentation()
+                };
+                if !skip_pty_bootstrap {
+                    me.initialize_shell(pending_session_info.as_ref(), ctx);
+                }
             }
             ModelEvent::Handler(AnsiHandlerEvent::Bootstrapped { is_subshell, .. }) => {
                 me.shell_bootstrapped(*is_subshell);

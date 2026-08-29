@@ -767,6 +767,31 @@ fn history_isolated_script(shell_type: ShellType, body: &[u8]) -> Vec<u8> {
     bytes
 }
 
+// send-keys paste is echoed by the tty; disable echo and clear so setup never remains visible.
+pub(crate) fn silent_history_isolated_script(shell_type: ShellType, body: &[u8]) -> Vec<u8> {
+    let mut wrapped = Vec::new();
+    if !matches!(shell_type, ShellType::PowerShell) {
+        wrapped.extend_from_slice(b"stty -echo 2>/dev/null || true\n");
+    }
+    wrapped.extend_from_slice(in_band_history_setup(shell_type));
+    wrapped.extend_from_slice(body);
+    if !wrapped.ends_with(b"\n") {
+        wrapped.push(b'\n');
+    }
+    if !matches!(shell_type, ShellType::PowerShell) {
+        wrapped.extend_from_slice(b"printf '\\033[H\\033[2J' 2>/dev/null || true\n");
+    }
+    wrapped.extend_from_slice(in_band_history_restore(shell_type));
+    if !matches!(shell_type, ShellType::PowerShell) {
+        if !wrapped.ends_with(b"\n") {
+            wrapped.push(b'\n');
+        }
+        wrapped.extend_from_slice(b"stty echo 2>/dev/null || true");
+    }
+    wrapped.extend_from_slice(shell_type.execute_command_bytes());
+    wrapped
+}
+
 pub fn in_band_init_bytes(shell_type: ShellType, session_id: SessionId) -> Option<Vec<u8>> {
     match shell_type {
         ShellType::PowerShell => None,

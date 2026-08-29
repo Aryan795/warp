@@ -9542,7 +9542,18 @@ impl TerminalView {
         let bytes_vec = bytes.to_vec();
         self.clear_selected_blocks(ctx);
         self.update_scroll_position_locking(ScrollPositionUpdate::AfterWriteUserBytesToPty, ctx);
-        self.write_to_pty(bytes, ctx);
+        let presentation_pane = {
+            let model = self.model.lock();
+            model
+                .is_tmux_presentation()
+                .then(|| model.tmux_pane_id().map(str::to_owned))
+                .flatten()
+        };
+        if let Some(pane_id) = presentation_pane {
+            self.write_tmux_pane_input(pane_id, bytes, ctx);
+        } else {
+            self.write_to_pty(bytes, ctx);
+        }
         self.emit_non_editor_typed_event(bytes_vec, ctx);
         true
     }
@@ -15303,8 +15314,11 @@ impl TerminalView {
         {
             let bootstrap =
                 crate::terminal::bootstrap::script_for_shell(shell_type, &crate::ASSETS);
+            let framed = crate::terminal::tmux::protocol::silent_history_isolated_script(
+                shell_type, &bootstrap,
+            );
             let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
-            for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bootstrap) {
+            for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &framed) {
                 self.write_tmux_control_command(command.into_bytes(), ctx);
             }
         }

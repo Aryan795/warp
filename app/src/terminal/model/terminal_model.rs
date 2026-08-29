@@ -2249,7 +2249,7 @@ impl TerminalModel {
     ///
     /// If the alternate screen is already active, this will not re-initialize
     /// it, except for tmux presentation: the primary pane already paints here, so a nested
-    /// `CSI ?1049h` saves that grid and switches to a true alternate buffer.
+    /// swap (`CSI ?47h` / `CSI ?1049h`) saves that grid and switches to a true alternate buffer.
     pub(crate) fn enter_alt_screen(&mut self, save_cursor_and_clear_screen: bool) {
         if self.alt_screen_active {
             if self.tmux_presentation {
@@ -2303,7 +2303,10 @@ impl TerminalModel {
 
     fn enter_nested_tmux_alt_screen(&mut self, save_cursor_and_clear_screen: bool) {
         if self.tmux_saved_primary_grid.is_none() {
-            self.tmux_saved_primary_grid = Some(self.alt_screen.grid_handler().clone());
+            self.tmux_saved_primary_grid = Some(
+                self.alt_screen
+                    .replace_grid_with_blank(self.obfuscate_secrets),
+            );
         }
         self.alt_screen.reset_pending_lines_to_scroll();
         self.alt_screen

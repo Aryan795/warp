@@ -309,3 +309,29 @@ fn bootstrap_and_split_are_not_double_encoded() {
         "split-window must not be hex-encoded: {written}"
     );
 }
+
+#[test]
+fn generic_input_is_not_encoded_as_pane_send_keys() {
+    let harness = start_loop(None, None);
+    harness.shared.bind_pane(PaneId::from("%0"));
+    let bootstrap = b"warp_bootstrapped() {\nread -r -d '' WARP_BOOTSTRAP_VAR << 'EOM'\nEOM\n\n";
+    harness
+        .sender
+        .send(Message::Input(std::borrow::Cow::Borrowed(bootstrap)))
+        .expect("send generic input");
+    harness
+        .sender
+        .send(Message::Shutdown)
+        .expect("send shutdown");
+    join_loop(harness.handle);
+    let written =
+        String::from_utf8(harness.written.lock().expect("written lock").clone()).expect("utf8");
+    assert!(
+        !written.contains("warp_bootstrapped"),
+        "generic Input must not be typed into the pane: {written}"
+    );
+    assert!(
+        !written.contains("send-keys -t %0"),
+        "generic Input must not be send-keys encoded: {written}"
+    );
+}

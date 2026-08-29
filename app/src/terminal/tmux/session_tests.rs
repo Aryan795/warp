@@ -299,6 +299,82 @@ fn presentation_nested_alt_screen_restores_primary_grid() {
     );
 }
 
+#[test]
+fn presentation_nested_csi_47_uses_a_distinct_alt_grid() {
+    use crate::terminal::model::ansi::{Handler, Mode};
+
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_presentation(true);
+    model.process_bytes("prompt $ hello-primary");
+    assert!(
+        model
+            .alt_screen()
+            .output_to_string()
+            .contains("hello-primary"),
+        "primary prompt must be painted, got {:?}",
+        model.alt_screen().output_to_string()
+    );
+
+    model.set_mode(Mode::SwapScreen {
+        save_cursor_and_clear_screen: false,
+    });
+    assert!(model.is_alt_screen_active());
+    assert!(
+        !model
+            .alt_screen()
+            .output_to_string()
+            .contains("hello-primary"),
+        "CSI ?47h must leave the primary grid immediately, got {:?}",
+        model.alt_screen().output_to_string()
+    );
+    model.process_bytes("alt-program");
+    let tui = model.alt_screen().output_to_string();
+    assert!(
+        tui.contains("alt-program"),
+        "nested program must draw on the alternate buffer, got {tui:?}"
+    );
+    assert!(!tui.contains("hello-primary"));
+
+    model.unset_mode(Mode::SwapScreen {
+        save_cursor_and_clear_screen: false,
+    });
+    assert!(model.is_alt_screen_active());
+    let restored = model.alt_screen().output_to_string();
+    assert!(
+        restored.contains("hello-primary"),
+        "CSI ?47l must restore the owned primary grid, got {restored:?}"
+    );
+    assert!(
+        !restored.contains("alt-program"),
+        "restored primary must not keep nested contents, got {restored:?}"
+    );
+}
+
+#[test]
+fn presentation_grid_clear_drops_bootstrap_markers() {
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_presentation(true);
+    model.process_bytes("warp_bootstrapped() {\nEOM\nprintf DCS\n");
+    assert!(
+        model
+            .alt_screen()
+            .output_to_string()
+            .contains("warp_bootstrapped"),
+        "setup text is present before clear, got {:?}",
+        model.alt_screen().output_to_string()
+    );
+    model.process_bytes("\x1b[H\x1b[2Jprompt $ ");
+    let painted = model.alt_screen().output_to_string();
+    assert!(
+        !painted.contains("warp_bootstrapped") && !painted.contains("EOM"),
+        "cleared grid must not keep bootstrap markers, got {painted:?}"
+    );
+    assert!(
+        painted.contains("prompt $"),
+        "cleared grid should show the prompt, got {painted:?}"
+    );
+}
+
 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
 #[test]
 fn bound_presentation_pane_output_paints_on_the_alt_screen_grid() {
