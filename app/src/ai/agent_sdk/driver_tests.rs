@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -35,14 +34,14 @@ use warpui::{App, SingletonEntity as _};
 
 use super::{
     AgentDriver, AgentDriverError, AgentRunPrompt, CLIAgentSessionStatus, EndOfRunAction,
-    EndOfRunOps, IdleTimeoutSender, InterruptFlags, InterruptSignal,
+    IdleTimeoutSender, InterruptFlags, InterruptSignal,
     LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV, LEGACY_OZ_PARENT_STATE_ROOT_ENV,
     MANAGED_MCP_RESOLVE_MAX_ATTEMPTS, OZ_MESSAGE_LISTENER_MANAGED_EXTERNALLY_ENV,
     OZ_MESSAGE_LISTENER_STATE_ROOT_ENV, PlatformErrorCode, RunEndCause,
     SDKConversationOutputStatus, WARP_MESSAGE_LISTENER_STATE_ROOT_ENV, build_secret_env_vars,
-    end_of_run_actions, execute_end_of_run_actions, idle_window_for_cli_session_status,
-    idle_window_for_terminal_status, run_end_cause, select_run_outcome,
-    setup_failure_status_update, should_attempt_handoff_snapshot, terminal_status_log_outcome,
+    end_of_run_actions, idle_window_for_cli_session_status, idle_window_for_terminal_status,
+    run_end_cause, select_run_outcome, setup_failure_status_update,
+    should_attempt_handoff_snapshot, terminal_status_log_outcome,
 };
 use crate::ai::agent::conversation::ConversationStatus;
 use crate::ai::agent::task::TaskId;
@@ -2755,83 +2754,6 @@ fn recorded_interrupt_flags(term: bool, int: bool) -> InterruptFlags {
     }
 }
 
-#[derive(Default)]
-struct RecordingEndOfRunOps {
-    invoked: Vec<EndOfRunAction>,
-}
-
-impl EndOfRunOps for RecordingEndOfRunOps {
-    fn snapshot(&mut self) -> impl Future<Output = ()> {
-        self.invoked.push(EndOfRunAction::Snapshot);
-        std::future::ready(())
-    }
-
-    fn recording(&mut self) -> impl Future<Output = ()> {
-        self.invoked.push(EndOfRunAction::Recording);
-        std::future::ready(())
-    }
-
-    fn unregister_handlers(&mut self) {
-        self.invoked.push(EndOfRunAction::UnregisterHandlers);
-    }
-
-    fn unregister_consumers(&mut self) -> impl Future<Output = ()> {
-        self.invoked.push(EndOfRunAction::UnregisterConsumers);
-        std::future::ready(())
-    }
-
-    fn cleanup(&mut self) -> impl Future<Output = ()> {
-        self.invoked.push(EndOfRunAction::Cleanup);
-        std::future::ready(())
-    }
-
-    fn flush_status(&mut self) -> impl Future<Output = ()> {
-        self.invoked.push(EndOfRunAction::FlushStatus);
-        std::future::ready(())
-    }
-
-    fn send_result(&mut self) {
-        self.invoked.push(EndOfRunAction::SendResult);
-    }
-
-    fn reraise(&mut self, signal: InterruptSignal) {
-        self.invoked.push(EndOfRunAction::Reraise(signal));
-    }
-}
-
-fn drive_end_of_run(cause: RunEndCause, snapshot_allowed: bool) -> Vec<EndOfRunAction> {
-    let mut ops = RecordingEndOfRunOps::default();
-    block_on(execute_end_of_run_actions(
-        end_of_run_actions(cause, snapshot_allowed),
-        &mut ops,
-    ));
-    ops.invoked
-}
-
-#[test]
-fn executor_calls_snapshot_recording_and_reraise_ops() {
-    let mut ops = RecordingEndOfRunOps::default();
-    block_on(execute_end_of_run_actions(
-        [
-            EndOfRunAction::Snapshot,
-            EndOfRunAction::Recording,
-            EndOfRunAction::UnregisterHandlers,
-            EndOfRunAction::Reraise(InterruptSignal::Term),
-            EndOfRunAction::Cleanup,
-        ],
-        &mut ops,
-    ));
-    assert_eq!(
-        ops.invoked,
-        vec![
-            EndOfRunAction::Snapshot,
-            EndOfRunAction::Recording,
-            EndOfRunAction::UnregisterHandlers,
-            EndOfRunAction::Reraise(InterruptSignal::Term),
-        ]
-    );
-}
-
 #[test]
 fn recorded_sigterm_wins_when_run_and_deadline_are_also_ready() {
     let flags = recorded_interrupt_flags(true, false);
@@ -2864,9 +2786,9 @@ fn select_biased_prefers_ready_sigint_over_ready_run() {
 }
 
 #[test]
-fn sigterm_invokes_snapshot_then_recording_then_reraise() {
+fn sigterm_plan_is_snapshot_then_recording_then_reraise() {
     assert_eq!(
-        drive_end_of_run(RunEndCause::Signal(InterruptSignal::Term), true),
+        end_of_run_actions(RunEndCause::Signal(InterruptSignal::Term), true),
         vec![
             EndOfRunAction::Snapshot,
             EndOfRunAction::Recording,
@@ -2879,9 +2801,9 @@ fn sigterm_invokes_snapshot_then_recording_then_reraise() {
 }
 
 #[test]
-fn sigint_invokes_snapshot_only_then_reraise() {
+fn sigint_plan_is_snapshot_only_then_reraise() {
     assert_eq!(
-        drive_end_of_run(RunEndCause::Signal(InterruptSignal::Int), true),
+        end_of_run_actions(RunEndCause::Signal(InterruptSignal::Int), true),
         vec![
             EndOfRunAction::Snapshot,
             EndOfRunAction::UnregisterHandlers,
@@ -2891,10 +2813,9 @@ fn sigint_invokes_snapshot_only_then_reraise() {
 }
 
 #[test]
-fn sandbox_deadline_invokes_recording_then_snapshot_without_reraise() {
-    let invoked = drive_end_of_run(RunEndCause::SandboxDeadline, true);
+fn sandbox_deadline_plan_is_recording_then_snapshot_without_reraise() {
     assert_eq!(
-        invoked,
+        end_of_run_actions(RunEndCause::SandboxDeadline, true),
         vec![
             EndOfRunAction::UnregisterHandlers,
             EndOfRunAction::UnregisterConsumers,
@@ -2921,11 +2842,11 @@ fn deadline_timer_is_selected_when_no_interrupt_is_recorded() {
 
 #[test]
 fn handoff_snapshot_gate_omits_snapshot_on_sigterm() {
-    let invoked = drive_end_of_run(RunEndCause::Signal(InterruptSignal::Term), false);
-    assert!(!invoked.contains(&EndOfRunAction::Snapshot));
-    assert!(invoked.contains(&EndOfRunAction::Recording));
+    let plan = end_of_run_actions(RunEndCause::Signal(InterruptSignal::Term), false);
+    assert!(!plan.contains(&EndOfRunAction::Snapshot));
+    assert!(plan.contains(&EndOfRunAction::Recording));
     assert_eq!(
-        invoked.last(),
+        plan.last(),
         Some(&EndOfRunAction::Reraise(InterruptSignal::Term))
     );
 }
@@ -2943,4 +2864,149 @@ fn handoff_snapshot_is_skipped_without_a_task_id() {
 #[test]
 fn handoff_snapshot_is_skipped_when_no_snapshot_is_set() {
     assert!(!should_attempt_handoff_snapshot(true, true, true));
+}
+
+#[cfg(unix)]
+const SIGNAL_CHILD_ENV: &str = "WARP_AGENT_DRIVER_SIGNAL_CHILD";
+#[cfg(unix)]
+const SIGNAL_LOG_ENV: &str = "WARP_AGENT_DRIVER_SIGNAL_LOG";
+#[cfg(unix)]
+const SIGNAL_READY_ENV: &str = "WARP_AGENT_DRIVER_SIGNAL_READY";
+
+#[cfg(unix)]
+fn signal_lifecycle_child() -> ! {
+    use std::io::Write as _;
+
+    let kind = std::env::var(SIGNAL_CHILD_ENV).expect("child kind");
+    let expected = match kind.as_str() {
+        "term" => InterruptSignal::Term,
+        "int" => InterruptSignal::Int,
+        other => panic!("unknown child kind {other}"),
+    };
+    let log_path = std::env::var(SIGNAL_LOG_ENV).unwrap();
+    let ready_path = std::env::var(SIGNAL_READY_ENV).unwrap();
+
+    let (signal_fut, flags, mut sig_ids) = super::watch_interrupt_signals();
+    fs::write(&ready_path, b"ready").unwrap();
+
+    let selected = block_on(select_run_outcome(
+        std::future::pending::<Result<(), AgentDriverError>>(),
+        std::future::pending::<()>(),
+        signal_fut,
+        Some(&flags),
+        false,
+    ));
+    assert_eq!(run_end_cause(&selected), RunEndCause::Signal(expected));
+
+    let mut log = fs::File::create(&log_path).unwrap();
+    for action in end_of_run_actions(run_end_cause(&selected), true) {
+        let label = match action {
+            EndOfRunAction::Snapshot => "snapshot",
+            EndOfRunAction::Recording => "recording",
+            EndOfRunAction::UnregisterHandlers => "unregister_handlers",
+            EndOfRunAction::UnregisterConsumers => "unregister_consumers",
+            EndOfRunAction::Cleanup => "cleanup",
+            EndOfRunAction::Reraise(_) => "reraise",
+            EndOfRunAction::FlushStatus | EndOfRunAction::SendResult => continue,
+        };
+        writeln!(log, "{label}").unwrap();
+        if matches!(action, EndOfRunAction::UnregisterHandlers) {
+            super::unregister_signal_ids(std::mem::take(&mut sig_ids));
+        }
+        if let EndOfRunAction::Reraise(signal) = action {
+            log.sync_all().unwrap();
+            super::restore_default_and_reraise(signal);
+        }
+    }
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
+fn spawn_signal_lifecycle_child(
+    kind: &str,
+    test_name: &str,
+    expected_sig: i32,
+    expected_log: &str,
+) {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    if std::env::var_os(SIGNAL_CHILD_ENV).is_some() {
+        signal_lifecycle_child();
+    }
+
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("steps.log");
+    let ready_path = dir.path().join("ready");
+    let raw_signal = if kind == "term" {
+        libc::SIGTERM
+    } else {
+        libc::SIGINT
+    };
+
+    let stderr_path = dir.path().join("stderr");
+    let mut cmd = command::blocking::Command::new(std::env::current_exe().unwrap());
+    cmd.arg(test_name)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(SIGNAL_CHILD_ENV, kind)
+        .env(SIGNAL_LOG_ENV, &log_path)
+        .env(SIGNAL_READY_ENV, &ready_path)
+        .env("RUST_TEST_THREADS", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(fs::File::create(&stderr_path).unwrap());
+    for (key, _) in std::env::vars() {
+        if key.starts_with("NEXTEST") {
+            cmd.env_remove(&key);
+        }
+    }
+    let mut child = cmd.spawn().unwrap();
+
+    for _ in 0..1_000 {
+        if ready_path.exists() {
+            break;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "signal child exited before becoming ready: status={status:?} stderr={}",
+                fs::read_to_string(&stderr_path).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ready_path.exists(),
+        "signal child did not become ready; stderr={}",
+        fs::read_to_string(&stderr_path).unwrap_or_default()
+    );
+
+    // SAFETY: `child.id()` is this child's pid; SIGTERM/SIGINT is sent only to it.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, raw_signal);
+    }
+
+    let status = child.wait().unwrap();
+    assert_eq!(status.signal(), Some(expected_sig), "status={status:?}");
+    assert_eq!(fs::read_to_string(&log_path).unwrap(), expected_log);
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_subprocess_writes_snapshot_then_recording_and_exits_signaled() {
+    spawn_signal_lifecycle_child(
+        "term",
+        "ai::agent_sdk::driver::tests::sigterm_subprocess_writes_snapshot_then_recording_and_exits_signaled",
+        libc::SIGTERM,
+        "snapshot\nrecording\nunregister_handlers\nunregister_consumers\ncleanup\nreraise\n",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sigint_subprocess_writes_snapshot_only_and_exits_signaled() {
+    spawn_signal_lifecycle_child(
+        "int",
+        "ai::agent_sdk::driver::tests::sigint_subprocess_writes_snapshot_only_and_exits_signaled",
+        libc::SIGINT,
+        "snapshot\nunregister_handlers\nreraise\n",
+    );
 }
