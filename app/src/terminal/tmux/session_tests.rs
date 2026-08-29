@@ -229,14 +229,73 @@ fn presentation_output_paints_on_the_alt_screen_grid() {
     model.finish_block();
     assert!(
         model.is_alt_screen_active(),
-        "presentation must keep the alt-screen paint path after SwapScreen unset and command finish"
+        "presentation must keep the alt-screen paint path after Warp hook alt-screen exit"
     );
     assert!(
         model
             .alt_screen()
             .output_to_string()
             .contains("hello-from-tmux"),
-        "live grid content must survive Warp hook / TUI alt-screen exits"
+        "primary grid must survive Warp hook alt-screen exit, got {:?}",
+        model.alt_screen().output_to_string()
+    );
+}
+
+#[test]
+fn presentation_nested_alt_screen_restores_primary_grid() {
+    use crate::terminal::model::ansi::{Handler, Mode};
+
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_presentation(true);
+    model.process_bytes("prompt $ hello-primary");
+    assert!(
+        model
+            .alt_screen()
+            .output_to_string()
+            .contains("hello-primary"),
+        "primary prompt must be painted, got {:?}",
+        model.alt_screen().output_to_string()
+    );
+
+    model.set_mode(Mode::SwapScreen {
+        save_cursor_and_clear_screen: true,
+    });
+    assert!(model.is_alt_screen_active());
+    assert!(
+        !model
+            .alt_screen()
+            .output_to_string()
+            .contains("hello-primary"),
+        "CSI ?1049h must leave the primary grid, got {:?}",
+        model.alt_screen().output_to_string()
+    );
+    model.process_bytes("vim-tui");
+    let tui = model.alt_screen().output_to_string();
+    assert!(
+        tui.contains("vim-tui"),
+        "nested TUI must draw on the alternate buffer, got {tui:?}"
+    );
+    assert!(!tui.contains("hello-primary"));
+
+    model.unset_mode(Mode::SwapScreen {
+        save_cursor_and_clear_screen: true,
+    });
+    assert!(model.is_alt_screen_active());
+    let restored = model.alt_screen().output_to_string();
+    assert!(
+        restored.contains("hello-primary"),
+        "CSI ?1049l must restore the primary grid, got {restored:?}"
+    );
+    assert!(
+        !restored.contains("vim-tui"),
+        "restored primary must not keep TUI contents, got {restored:?}"
+    );
+
+    model.process_bytes(" more");
+    let live = model.alt_screen().output_to_string();
+    assert!(
+        live.contains("hello-primary") && live.contains("more"),
+        "live updates must continue on the restored primary grid, got {live:?}"
     );
 }
 

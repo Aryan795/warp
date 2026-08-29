@@ -508,6 +508,8 @@ pub struct TerminalModel {
     tmux_pane_id: Option<String>,
     tmux_instance_id: Option<u64>,
     tmux_presentation: bool,
+    /// Primary tmux grid saved while an in-pane TUI occupies the alt-screen (`CSI ?1049h`).
+    tmux_saved_primary_grid: Option<GridHandler>,
     tmux_open_presentation: bool,
     tmux_close_presentation: bool,
     tmux_events: Vec<TmuxClientEvent>,
@@ -1130,6 +1132,7 @@ impl TerminalModel {
             tmux_pane_id: None,
             tmux_instance_id: None,
             tmux_presentation: false,
+            tmux_saved_primary_grid: None,
             tmux_open_presentation: false,
             tmux_close_presentation: false,
             tmux_events: Vec::new(),
@@ -2195,6 +2198,9 @@ impl TerminalModel {
             || size_update.rows_or_columns_changed()
         {
             self.alt_screen.resize(&size_update);
+            if let Some(primary) = &mut self.tmux_saved_primary_grid {
+                primary.resize(size_update.new_size);
+            }
 
             // Don't reflow old blocks for shared session size updates:
             // - Viewers skip reflow when the sharer's size changed
@@ -2242,10 +2248,15 @@ impl TerminalModel {
     /// block list and clears the alt screen's contents.
     ///
     /// If the alternate screen is already active, this will not re-initialize
-    /// it.
+    /// it, except for tmux presentation: the primary pane already paints here, so a nested
+    /// `CSI ?1049h` saves that grid and switches to a true alternate buffer.
     pub(crate) fn enter_alt_screen(&mut self, save_cursor_and_clear_screen: bool) {
         if self.alt_screen_active {
-            log::info!("Tried to enter the alternate screen, but it was already active");
+            if self.tmux_presentation {
+                self.enter_nested_tmux_alt_screen(save_cursor_and_clear_screen);
+            } else {
+                log::info!("Tried to enter the alternate screen, but it was already active");
+            }
             return;
         }
 
@@ -2290,6 +2301,36 @@ impl TerminalModel {
             .send_app_event(Event::TerminalModeSwapped(TerminalMode::AltScreen));
     }
 
+    fn enter_nested_tmux_alt_screen(&mut self, save_cursor_and_clear_screen: bool) {
+        if self.tmux_saved_primary_grid.is_none() {
+            self.tmux_saved_primary_grid = Some(self.alt_screen.grid_handler().clone());
+        }
+        self.alt_screen.reset_pending_lines_to_scroll();
+        self.alt_screen
+            .grid_handler_mut()
+            .reset_keyboard_mode_state();
+        if save_cursor_and_clear_screen {
+            let bg = self.alt_screen.grid_storage().cursor().template.bg;
+            self.alt_screen
+                .grid_storage_mut()
+                .region_mut(..)
+                .each(|cell| *cell = bg.into());
+            self.alt_screen.grid_handler_mut().clear_secrets();
+        }
+        self.alt_screen_mut().clear_selection();
+        self.event_proxy.send_wakeup_event();
+    }
+
+    fn exit_nested_tmux_alt_screen(&mut self) {
+        let Some(primary) = self.tmux_saved_primary_grid.take() else {
+            return;
+        };
+        self.alt_screen_mut().grid_handler_mut().evict_all_images();
+        *self.alt_screen.grid_handler_mut() = primary;
+        self.alt_screen_mut().clear_selection();
+        self.event_proxy.send_wakeup_event();
+    }
+
     /// Deactivate the alternate screen, switching back to the block list and
     /// copying over relevant state.
     ///
@@ -2297,9 +2338,8 @@ impl TerminalModel {
     /// against programs that set or unset the alternate screen mode multiple
     /// times, like `info`  (see WAR-5897).
     fn exit_alt_screen(&mut self, restore_cursor: bool) {
-        // Presentation panes are classic grids; Warp hooks and in-pane TUIs must not drop back to
-        // the hidden block-list editor.
         if self.tmux_presentation {
+            self.exit_nested_tmux_alt_screen();
             return;
         }
         if !self.alt_screen_active {
