@@ -799,21 +799,23 @@ fn silent_posix_script(shell_type: ShellType, body: &[u8]) -> Vec<u8> {
 }
 
 fn silent_zsh_script(body: &[u8]) -> Vec<u8> {
-    // INT/TERM/EXIT may run cleanup and then the epilogue; re-entry must not
-    // treat restored state as the snapshot. Keep snapshots until traps are off.
-    let mut wrapped = br"if [[ -o banghist ]]; then typeset __warp_banghist=1; else typeset __warp_banghist=0; fi
+    // Keep echo off for the whole injected tail so send-keys after restore is not
+    // painted. INT/TERM still restores echo because the epilogue may not run.
+    let mut wrapped = br"stty -echo 2>/dev/null || true
+if [[ -o banghist ]]; then typeset __warp_banghist=1; else typeset __warp_banghist=0; fi
 if (( ${+HISTFILE} )); then typeset __warp_histfile=$HISTFILE; typeset __warp_histfile_set=1; else typeset __warp_histfile_set=0; fi
 if (( ${+SAVEHIST} )); then typeset __warp_savehist=$SAVEHIST; typeset __warp_savehist_set=1; else typeset __warp_savehist_set=0; fi
 __warp_silent_cleanup() {
   (( ${+__warp_silent_cleaned} )) && return
   __warp_silent_cleaned=1
-  stty echo 2>/dev/null || true
   if (( __warp_histfile_set )); then HISTFILE=$__warp_histfile; else unset HISTFILE; fi
   if (( __warp_savehist_set )); then SAVEHIST=$__warp_savehist; else unset SAVEHIST; fi
   if (( __warp_banghist )); then setopt BANG_HIST; else unsetopt BANG_HIST; fi
+  unset __warp_histfile __warp_histfile_set __warp_savehist __warp_savehist_set __warp_banghist
+  unfunction __warp_silent_cleanup 2>/dev/null || true
+  stty echo 2>/dev/null || true
 }
 setopt NO_BANG_HIST
-stty -echo 2>/dev/null || true
 trap '__warp_silent_cleanup' EXIT INT TERM
 HISTFILE=/dev/null
 SAVEHIST=0
@@ -822,12 +824,21 @@ SAVEHIST=0
     if !wrapped.ends_with(b"\n") {
         wrapped.push(b'\n');
     }
+    wrapped.extend_from_slice(b"trap - EXIT INT TERM\n");
+    wrapped.extend_from_slice(
+        br"if (( ! ${+__warp_silent_cleaned} )); then
+  __warp_silent_cleaned=1
+  if (( __warp_histfile_set )); then HISTFILE=$__warp_histfile; else unset HISTFILE; fi
+  if (( __warp_savehist_set )); then SAVEHIST=$__warp_savehist; else unset SAVEHIST; fi
+  if (( __warp_banghist )); then setopt BANG_HIST; else unsetopt BANG_HIST; fi
+  unset __warp_histfile __warp_histfile_set __warp_savehist __warp_savehist_set __warp_banghist __warp_silent_cleaned
+  unfunction __warp_silent_cleanup 2>/dev/null || true
+fi
+",
+    );
     wrapped.extend_from_slice(br"printf '\033[H\033[2J' 2>/dev/null || true");
     wrapped.push(b'\n');
-    wrapped.extend_from_slice(b"trap - EXIT INT TERM\n");
-    wrapped.extend_from_slice(b"__warp_silent_cleanup\n");
-    wrapped.extend_from_slice(b"unset __warp_histfile __warp_histfile_set __warp_savehist __warp_savehist_set __warp_banghist __warp_silent_cleaned\n");
-    wrapped.extend_from_slice(b"unfunction __warp_silent_cleanup 2>/dev/null || true\n");
+    wrapped.extend_from_slice(b"stty echo 2>/dev/null || true\n");
     wrapped
 }
 

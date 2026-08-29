@@ -682,22 +682,28 @@ fn silent_bootstrap_framing_hides_setup_and_clears_before_prompt() {
     let echo_off = text.find("stty -echo").expect("echo off");
     let hist = text.find("HISTFILE=/dev/null").expect("history isolate");
     let marker = text.find("warp_bootstrapped").expect("bootstrap body");
-    let clear = text.find("printf").expect("clear");
-    let cleanup = text.rfind("__warp_silent_cleanup").expect("cleanup");
+    let trap_off = text.find("trap - EXIT INT TERM").expect("disable traps");
+    let unset_snaps = text
+        .rfind("unset __warp_histfile")
+        .expect("snapshot unset after traps");
+    let unfunction = text
+        .rfind("unfunction __warp_silent_cleanup")
+        .expect("unfunction after unset");
+    let clear = text.rfind("printf").expect("clear");
+    let echo_on = text.rfind("stty echo").expect("echo restore");
     assert!(text.contains("setopt NO_BANG_HIST"));
     assert!(text.contains("__warp_histfile_set"));
     assert!(text.contains("__warp_banghist"));
     assert!(text.contains("(( ${+__warp_silent_cleaned} )) && return"));
     assert!(!text.contains("fc -P") && !text.contains("fc -p"));
-    let trap_off = text.find("trap - EXIT INT TERM").expect("disable traps");
-    let unset_snaps = text
-        .rfind("unset __warp_histfile")
-        .expect("snapshot unset after traps");
     assert!(echo_off < hist);
     assert!(hist < marker);
-    assert!(marker < clear);
-    assert!(clear < cleanup);
+    assert!(marker < trap_off);
     assert!(trap_off < unset_snaps);
+    assert!(unset_snaps < unfunction);
+    assert!(unfunction < clear);
+    assert!(clear < echo_on);
+    assert!(text.trim_end().ends_with("stty echo 2>/dev/null || true"));
 }
 
 #[cfg(unix)]
@@ -753,6 +759,7 @@ os.write(fd, script)
 time.sleep(0.2)
 os.write(fd, b"typeset -f warp_silent_hook >/dev/null && echo WARP_HOOK_OK\n")
 time.sleep(0.1)
+os.write(fd, b"stty -a 2>/dev/null | tr ' ' '\n' | grep -E '^-?echo$' | head -1 | sed 's/^-echo/ECHO_OFF/;s/^echo/ECHO_ON/'\n")
 os.write(fd, b"SAVEHIST=0\necho WARP_SILENT_DONE\nexit\n")
 out = b""
 deadline = time.time() + 5
@@ -811,6 +818,26 @@ sys.stdout.buffer.write(out)
         text.contains("WARP_SILENT_DONE"),
         "interactive zsh must reach a prompt and exit once: {text:?}"
     );
+    assert!(
+        text.contains("ECHO_ON"),
+        "echo must be restored after silent bootstrap: {text:?}"
+    );
+    let csi = [0x1b, 0x5b, 0x48, 0x1b, 0x5b, 0x32, 0x4a];
+    let Some(clear_at) = combined.windows(csi.len()).position(|w| w == csi) else {
+        panic!("CSI clear missing: {text:?}");
+    };
+    let after_clear = String::from_utf8_lossy(&combined[clear_at + csi.len()..]);
+    for marker in [
+        "trap - EXIT INT TERM",
+        "unset __warp_histfile",
+        "unfunction __warp_silent_cleanup",
+        "__warp_silent_cleanup",
+    ] {
+        assert!(
+            !after_clear.contains(marker),
+            "cleanup {marker:?} must not appear after clear: {after_clear:?}"
+        );
+    }
     let hist_bytes = std::fs::read(&hist).unwrap_or_default();
     let entries = ShellType::Zsh.parse_history(&hist_bytes);
     let joined = entries.join("\n");
