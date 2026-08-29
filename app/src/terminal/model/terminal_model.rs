@@ -1819,6 +1819,10 @@ impl TerminalModel {
     // Starts active block as a background block. Used in Alacritty integration tests to
     // work with the output grid directly.
     pub fn start_active_block_as_background_block(&mut self) {
+        self.start_commandless_output_block();
+    }
+
+    pub fn start_commandless_output_block(&mut self) {
         self.block_list.active_block_mut().start_background(None);
     }
 
