@@ -13,6 +13,7 @@ use super::{
     ReadAgentMessageResponse, RunFollowupRequest, RunSortBy, RunSortOrder, SpawnAgentRequest,
     TaskListFilter, UploadFieldValue, UserQueryMode, build_fork_conversation_url,
     build_list_agent_runs_url, build_run_followup_url, is_unknown_git_credential_schema_error,
+    legacy_git_credential_id,
 };
 use crate::notebooks::NotebookId;
 use crate::server::server_api::presigned_upload::upload_to_target;
@@ -39,6 +40,19 @@ fn ambient_agent_headers_for_task_overrides_existing_cloud_agent_header() {
             task_scoped_id.to_string()
         )]
     );
+}
+
+#[test]
+fn legacy_git_credential_id_does_not_expose_the_host() {
+    let id = legacy_git_credential_id("customer-gitlab.example.com");
+
+    assert!(id.starts_with("legacy:"));
+    assert!(!id.contains("customer-gitlab.example.com"));
+    assert_eq!(
+        id,
+        legacy_git_credential_id("CUSTOMER-GITLAB.EXAMPLE.COM")
+    );
+    assert_ne!(id, legacy_git_credential_id("other.example.com"));
 }
 
 #[test]

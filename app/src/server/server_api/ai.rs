@@ -177,6 +177,14 @@ fn public_api_user_query_mode(mode: UserQueryMode) -> &'static str {
     }
 }
 
+fn legacy_git_credential_id(host: &str) -> String {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let mut hasher = std::hash::DefaultHasher::new();
+    host.to_ascii_lowercase().hash(&mut hasher);
+    format!("legacy:{:016x}", hasher.finish())
+}
+
 fn serialize_user_query_mode_for_public_api<S>(
     mode: &UserQueryMode,
     serializer: S,
@@ -1759,7 +1767,7 @@ fn into_legacy_git_credential(
     credential: warp_graphql::queries::task_git_credentials::TaskGitCredentialLegacy,
 ) -> GitCredential {
     GitCredential {
-        id: format!("legacy:{}", credential.host),
+        id: legacy_git_credential_id(&credential.host),
         instance_uid: None,
         installation_uid: None,
         scheme: "https".to_string(),
