@@ -410,6 +410,10 @@ impl VimHandler for TuiInputView {
     fn change_mode(&mut self, old: &VimMode, new: &ModeTransition, ctx: &mut ViewContext<Self>) {
         self.model.update(ctx, |model, ctx| {
             apply_mode_change(model, old, new, ctx);
+            // Char-cell `vim_newline(false)` leaves the cursor on the original line.
+            if new.mode == VimMode::Insert && new.position == InsertPosition::LineBelow {
+                model.move_right(ctx);
+            }
         });
         self.follow_cursor(ctx);
         ctx.notify();
