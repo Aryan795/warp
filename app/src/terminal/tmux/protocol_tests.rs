@@ -692,7 +692,7 @@ fn product_path_tmux_cc_no_rcs_pane_survives_init_ack_bootstrap_and_detach() {
     let Some(tmux) = super::resolve_tmux_binary() else {
         return;
     };
-    let Some(zsh) = optional_shell("zsh") else {
+    if optional_shell("zsh").is_none() {
         return;
     };
     let Ok(python) = Command::new("python3").arg("-c").arg("import pty").status() else {
@@ -701,14 +701,24 @@ fn product_path_tmux_cc_no_rcs_pane_survives_init_ack_bootstrap_and_detach() {
     if !python.success() {
         return;
     }
-    let bootstrap = pane_bootstrap_for_shell(zsh.clone(), ShellType::Zsh);
-    let init_script = bootstrap.init_script.expect("zsh needs an init script");
-    let init = zsh_init_bytes(&init_script, ShellType::Zsh, bootstrap.session_id);
-    let bootstrap_bytes = silent_bootstrap_bytes(ShellType::Zsh);
-    let socket_name = format!(
-        "warp-cc-{}",
-        TEST_PATH_COUNTER.fetch_add(1, Ordering::Relaxed)
+    let (mut argv, session_id) =
+        crate::terminal::tmux::transport::tmux_cc_argv(&[], "warp", 80, 24, Some(ShellType::Zsh))
+            .expect("bare /tmux argv");
+    let session_id = session_id.expect("bare /tmux always includes a pane spawn");
+    argv[0] = tmux.display().to_string();
+    argv.insert(1, "-f".to_owned());
+    argv.insert(2, "/dev/null".to_owned());
+    let init = zsh_init_bytes(
+        &warp_terminal::bootstrap::raw_init_shell_script_for_shell(
+            ShellType::Zsh,
+            &crate::ASSETS,
+            session_id,
+        ),
+        ShellType::Zsh,
+        session_id,
     );
+    let bootstrap_bytes = silent_bootstrap_bytes(ShellType::Zsh);
+    let socket_name = warp_terminal::tmux::WARP_CONTROL_SOCKET_NAME;
     let home = unique_temp_path("warp-tmux-cc-home");
     std::fs::create_dir_all(&home).expect("tmux cc home");
     let tmpdir = unique_temp_path("warp-tmux-cc-tmp");
@@ -721,7 +731,7 @@ fn product_path_tmux_cc_no_rcs_pane_survives_init_ack_bootstrap_and_detach() {
         r##"
 import os, pty, select, signal, subprocess, sys, time
 tmux = {tmux:?}
-zsh = {zsh:?}
+argv = {argv:?}
 socket = {socket_name:?}
 home = {home:?}
 tmpdir = {tmpdir:?}
@@ -741,7 +751,7 @@ boot_hex = to_hex(open(boot_path, "rb").read())
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(home)
-    os.execv(tmux, [tmux, "-f", "/dev/null", "-CC", "-L", socket, "new-session", "-A", "-s", "warp", "-n", "warp", "-x", "80", "-y", "24", "--", zsh, "-g", "--no-rcs", "-i"])
+    os.execv(tmux, argv)
 out = b""
 deadline = time.time() + 8
 entered = False
@@ -812,7 +822,7 @@ print("INIT", int(saw_init), "ACK", int(saw_ack), "BOOT", int(saw_boot), file=sy
 sys.exit(0 if saw_init and saw_ack and saw_boot and listed.returncode == 0 and listed_after.returncode == 0 and "0" in panes.stdout else 1)
 "##,
         tmux = tmux.display(),
-        zsh = zsh.display(),
+        argv = argv,
         socket_name = socket_name,
         home = home.display(),
         tmpdir = tmpdir.display(),

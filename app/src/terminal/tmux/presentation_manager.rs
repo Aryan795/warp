@@ -70,6 +70,10 @@ impl TmuxPresentationManager {
             if let Some(shell_type) = runtime.shell_type() {
                 model.set_login_shell_spawned(shell_type);
             }
+            if let Some(session_id) = runtime.spawned_expected_session() {
+                model.set_tmux_expected_session_id(Some(session_id));
+                model.register_session_id(session_id);
+            }
         }
         let colors = model.colors();
         let model = Arc::new(FairMutex::new(model));

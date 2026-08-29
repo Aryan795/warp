@@ -7,6 +7,10 @@ fn start_command() -> Cow<'static, [u8]> {
     Cow::Borrowed(b"tmux -CC new-session -A -s warp -n warp -x 80 -y 24\n")
 }
 
+fn managed_start_command() -> Cow<'static, [u8]> {
+    Cow::Borrowed(b"tmux -CC -L warp-control-v1 new-session -A -s warp -n warp -x 80 -y 24\n")
+}
+
 fn enter_control(io: &mut TmuxIoState) {
     io.enqueue_input(start_command());
     io.feed(CONTROL_MODE_DCS);
@@ -23,6 +27,15 @@ fn tmux_cc_start_is_detected() {
     assert!(is_tmux_cc_start(b"tmux -CC new-session -A -s warp\n"));
     assert!(is_tmux_cc_start(b"  tmux -CC\n"));
     assert!(!is_tmux_cc_start(b"echo tmux -CC\n"));
+    assert!(super::is_managed_isolated_tmux_cc(
+        b"tmux -CC -L warp-control-v1 new-session -A -s warp\n"
+    ));
+    assert!(super::is_managed_isolated_tmux_cc(
+        b"tmux -CC -Lwarp-control-v1 new-session\n"
+    ));
+    assert!(!super::is_managed_isolated_tmux_cc(
+        b"tmux -CC new-session -A -s warp\n"
+    ));
 }
 
 #[test]
@@ -328,7 +341,7 @@ fn enter_issues_list_windows_snapshot() {
 #[test]
 fn enter_disables_exit_empty_before_snapshot() {
     let mut io = TmuxIoState::new();
-    io.enqueue_input(start_command());
+    io.enqueue_input(managed_start_command());
     let items = io.feed(CONTROL_MODE_DCS);
     let encoded: Vec<&[u8]> = items
         .iter()
@@ -351,6 +364,35 @@ fn enter_disables_exit_empty_before_snapshot() {
             .iter()
             .any(|bytes| bytes.starts_with(b"set -s exit-unattached"))
     );
+}
+
+#[test]
+fn arbitrary_tmux_cc_does_not_disable_exit_empty() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    let items = io.feed(CONTROL_MODE_DCS);
+    assert!(!items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::EncodedPending(bytes)
+            if bytes.as_slice() == crate::tmux::encode::EXIT_EMPTY_OFF_COMMAND.as_bytes()
+    )));
+    assert!(items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::EncodedPending(bytes)
+            if bytes.as_slice() == crate::tmux::encode::LIST_WINDOWS_LAYOUT_COMMAND.as_bytes()
+    )));
+}
+
+#[test]
+fn explicit_managed_flag_disables_exit_empty_without_warp_socket() {
+    let mut io = TmuxIoState::new().with_managed_isolated();
+    io.enqueue_input(start_command());
+    let items = io.feed(CONTROL_MODE_DCS);
+    assert!(items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::EncodedPending(bytes)
+            if bytes.as_slice() == crate::tmux::encode::EXIT_EMPTY_OFF_COMMAND.as_bytes()
+    )));
 }
 
 #[test]

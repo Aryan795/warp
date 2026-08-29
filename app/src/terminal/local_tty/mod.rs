@@ -43,6 +43,9 @@ impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
                 if let Some(shell_type) = self.last_init_shell_type() {
                     runtime.set_authoritative_shell_type(shell_type);
                 }
+                if let Some(session_id) = self.tmux_expected_session_id() {
+                    runtime.set_spawned_expected_session(session_id);
+                }
                 self.set_tmux_instance_id(Some(runtime.id().as_u64()));
             }
         }

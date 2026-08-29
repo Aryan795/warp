@@ -5,7 +5,8 @@ use std::time::Duration;
 use instant::Instant;
 
 use super::encode::{
-    EXIT_EMPTY_OFF_COMMAND, LIST_WINDOWS_LAYOUT_COMMAND, refresh_client_command, send_keys_command,
+    EXIT_EMPTY_OFF_COMMAND, LIST_WINDOWS_LAYOUT_COMMAND, WARP_CONTROL_SOCKET_NAME,
+    refresh_client_command, send_keys_command,
 };
 use super::parser::{ControlEvent, ControlModeParser, DecodeItem, PaneId, WindowId};
 
@@ -41,6 +42,19 @@ pub fn is_tmux_cc_start(bytes: &[u8]) -> bool {
     trimmed.starts_with(b"tmux -CC")
 }
 
+/// True for Warp-managed `/tmux` (`-L warp-control-v1`), not arbitrary user `tmux -CC`.
+pub fn is_managed_isolated_tmux_cc(bytes: &[u8]) -> bool {
+    let trimmed = bytes.trim_ascii_start();
+    if !is_tmux_cc_start(trimmed) {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(trimmed) else {
+        return false;
+    };
+    text.contains(&format!("-L {WARP_CONTROL_SOCKET_NAME}"))
+        || text.contains(&format!("-L{WARP_CONTROL_SOCKET_NAME}"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TmuxPhaseKind {
     Inactive,
@@ -65,6 +79,7 @@ enum TmuxPhase {
         pending_control: Vec<Cow<'static, [u8]>>,
         pending_resize: Option<(usize, usize)>,
         started_at: Instant,
+        managed_isolated: bool,
     },
     InControl {
         focused: Option<PaneId>,
@@ -91,6 +106,7 @@ enum TmuxPhase {
 pub struct TmuxIoState {
     parser: ControlModeParser,
     phase: TmuxPhase,
+    managed: bool,
 }
 
 impl Default for TmuxIoState {
@@ -104,7 +120,14 @@ impl TmuxIoState {
         Self {
             parser: ControlModeParser::new(),
             phase: TmuxPhase::Inactive,
+            managed: false,
         }
+    }
+
+    /// Treat the next control-mode entry as Warp-managed even without `-L warp-control-v1`.
+    pub fn with_managed_isolated(mut self) -> Self {
+        self.managed = true;
+        self
     }
 
     pub fn phase(&self) -> TmuxPhaseKind {
@@ -138,6 +161,7 @@ impl TmuxIoState {
                         pending_control: Vec::new(),
                         pending_resize: None,
                         started_at: Instant::now(),
+                        managed_isolated: self.managed || is_managed_isolated_tmux_cc(&input),
                     };
                 }
                 vec![input]
@@ -394,21 +418,23 @@ impl TmuxIoState {
         }
         match event {
             ControlEvent::EnteredControlMode => {
-                let (pending_writes, pending_control, pending_resize, from_start) =
+                let (pending_writes, pending_control, pending_resize, from_start, managed_isolated) =
                     match &mut self.phase {
                         TmuxPhase::StartPending {
                             pending_writes,
                             pending_control,
                             pending_resize,
+                            managed_isolated,
                             ..
                         } => (
                             std::mem::take(pending_writes),
                             std::mem::take(pending_control),
                             pending_resize.take(),
                             true,
+                            *managed_isolated,
                         ),
-                        TmuxPhase::Inactive => (Vec::new(), Vec::new(), None, false),
-                        _ => (Vec::new(), Vec::new(), None, false),
+                        TmuxPhase::Inactive => (Vec::new(), Vec::new(), None, false, self.managed),
+                        _ => (Vec::new(), Vec::new(), None, false, false),
                     };
                 self.phase = TmuxPhase::InControl {
                     focused: None,
@@ -433,10 +459,12 @@ impl TmuxIoState {
                     self.note_outgoing_command(command.as_bytes());
                 }
                 let mut items = vec![TmuxFeedItem::EnteredControl { refresh_client }];
-                self.note_outgoing_command(EXIT_EMPTY_OFF_COMMAND.as_bytes());
-                items.push(TmuxFeedItem::EncodedPending(
-                    EXIT_EMPTY_OFF_COMMAND.as_bytes().to_vec(),
-                ));
+                if managed_isolated {
+                    self.note_outgoing_command(EXIT_EMPTY_OFF_COMMAND.as_bytes());
+                    items.push(TmuxFeedItem::EncodedPending(
+                        EXIT_EMPTY_OFF_COMMAND.as_bytes().to_vec(),
+                    ));
+                }
                 self.note_outgoing_command(LIST_WINDOWS_LAYOUT_COMMAND.as_bytes());
                 items.push(TmuxFeedItem::EncodedPending(
                     LIST_WINDOWS_LAYOUT_COMMAND.as_bytes().to_vec(),

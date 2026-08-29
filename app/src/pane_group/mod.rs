@@ -4202,20 +4202,12 @@ impl PaneGroup {
             return None;
         }
         let tmux_pane = self.tmux_presentation_binding(pane_id, ctx)?.pane_id?;
-        #[cfg(all(unix, feature = "local_tty"))]
-        {
-            Some(crate::terminal::tmux::protocol::select_pane_command(
-                &crate::terminal::tmux::parser::PaneId::from(tmux_pane.as_str()),
-            ))
-        }
-        #[cfg(not(all(unix, feature = "local_tty")))]
-        {
-            let _ = tmux_pane;
-            None
-        }
+        Some(crate::terminal::tmux::protocol::select_pane_command(
+            &crate::terminal::tmux::parser::PaneId::from(tmux_pane.as_str()),
+        ))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix, feature = "local_tty"))]
     pub(crate) fn tmux_presentation_pane_input(
         &self,
         bytes: &[u8],
@@ -4243,6 +4235,7 @@ impl PaneGroup {
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         if let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), &model) {
             runtime.register_pane(tmux_pane_id, model.clone());
+            runtime.admit_buffered_init_shell(tmux_pane_id, &model);
         }
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         self.finish_tmux_pane_bootstrap(&model, tmux_pane_id, instance_id, ctx);
@@ -4274,7 +4267,13 @@ impl PaneGroup {
         let session_id = runtime
             .early_init_session_id(tmux_pane_id)
             .or_else(|| model.lock().tmux_expected_session_id())
+            .or_else(|| runtime.spawned_expected_session())
             .unwrap_or_else(warp_terminal::bootstrap::generate_session_id);
+        {
+            let mut locked = model.lock();
+            locked.set_tmux_expected_session_id(Some(session_id));
+            locked.register_session_id(session_id);
+        }
         runtime.note_tracked_control_pane(tmux_pane_id);
         runtime.set_tracked_expected_session(session_id);
         if let Some(claim) = runtime.begin_pane_bootstrap(tmux_pane_id, session_id) {

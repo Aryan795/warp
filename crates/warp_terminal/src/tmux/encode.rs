@@ -6,6 +6,9 @@ const SEND_KEYS_CHUNK_BYTES: usize = 128;
 /// enters control mode without `%layout-change` or `%window-pane-changed`.
 pub const LIST_WINDOWS_LAYOUT_COMMAND: &str = "list-windows -F '#{window_id} #{window_layout}'\n";
 
+/// Dedicated socket name for Warp-managed `/tmux` (`tmux -CC -L warp-control-v1 …`).
+pub const WARP_CONTROL_SOCKET_NAME: &str = "warp-control-v1";
+
 /// Keep the isolated Warp server alive if the last pane exits while a control client is attached.
 pub const EXIT_EMPTY_OFF_COMMAND: &str = "set -s exit-empty off\n";
 

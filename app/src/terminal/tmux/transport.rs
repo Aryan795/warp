@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use warp_core::SessionId;
 use warp_terminal::shell::ShellType;
+use warp_terminal::tmux::WARP_CONTROL_SOCKET_NAME;
 
 use super::protocol::{PaneBootstrap, control_client_argv, in_place_pane_spawn_argv};
 
@@ -45,7 +46,6 @@ impl ControlTransportSpec {
 }
 
 const DEFAULT_SESSION: &str = "warp";
-const WARP_TMUX_SOCKET_NAME: &str = "warp-control-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TmuxCommandError {
@@ -108,7 +108,7 @@ pub fn tmux_cc_argv(
         "tmux".to_owned(),
         "-CC".to_owned(),
         "-L".to_owned(),
-        WARP_TMUX_SOCKET_NAME.to_owned(),
+        WARP_CONTROL_SOCKET_NAME.to_owned(),
     ];
     argv.extend(
         globals

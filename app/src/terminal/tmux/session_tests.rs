@@ -680,3 +680,95 @@ fn tmux_36a_control_bytes_open_and_queue_layout_on_gateway_model() {
             .unregister();
     }
 }
+
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+#[test]
+fn bare_tmux_spawned_token_reaches_ready_without_fallback_staging() {
+    use std::sync::Arc;
+
+    use parking_lot::FairMutex;
+    use warp_terminal::local_tty::event_loop::ActiveTerminal;
+    use warp_terminal::tmux::{
+        CONTROL_MODE_DCS, EXIT_EMPTY_OFF_COMMAND, TmuxFeedItem, TmuxIoState,
+    };
+
+    use crate::terminal::model::ansi::{Handler, InitShellValue};
+    use crate::terminal::model::session::get_local_hostname;
+    use crate::terminal::shell::ShellType;
+    use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+    use crate::terminal::tmux::parser::PaneId;
+    use crate::terminal::tmux::protocol::STAGE_COMPLETE_OSC_PREFIX;
+    use crate::terminal::tmux::transport::tmux_cc_shell_command;
+
+    let (command, spawned) =
+        tmux_cc_shell_command("", Some("warp"), 80, 24, Some(ShellType::Zsh)).expect("bare /tmux");
+    let spawned = spawned.expect("bare /tmux always includes a pane spawn");
+    assert!(command.contains("-L warp-control-v1"));
+    assert!(command.contains("--no-rcs"));
+
+    let mut gateway = TerminalModel::mock(None, None);
+    gateway.set_tmux_expected_session_id(Some(spawned));
+    gateway.register_session_id(spawned);
+
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(std::borrow::Cow::Owned(command.into_bytes()));
+    let items = io.feed(CONTROL_MODE_DCS);
+    assert!(items.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::EncodedPending(bytes)
+            if bytes.as_slice() == EXIT_EMPTY_OFF_COMMAND.as_bytes()
+    )));
+
+    gateway.on_tmux_control_mode(true);
+    let id = gateway.tmux_instance_id().expect("runtime bound on enter");
+    let runtime = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)).expect("runtime");
+    assert_eq!(runtime.spawned_expected_session(), Some(spawned));
+
+    let mut ack = STAGE_COMPLETE_OSC_PREFIX.to_vec();
+    ack.extend_from_slice(format!("{}\x07", spawned.as_u64()).as_bytes());
+    assert!(runtime.deliver_output(&PaneId::from("%0"), &ack));
+    assert_eq!(runtime.tracked_expected_session(), Some(spawned));
+
+    let mut presentation = TerminalModel::mock(None, None);
+    presentation.set_tmux_presentation(true);
+    if let Some(session_id) = runtime.spawned_expected_session() {
+        presentation.set_tmux_expected_session_id(Some(session_id));
+        presentation.register_session_id(session_id);
+    }
+    let hostname = get_local_hostname().unwrap_or_else(|_| "localhost".to_string());
+    presentation.init_shell(InitShellValue {
+        session_id: spawned,
+        shell: "zsh".to_owned(),
+        hostname,
+        ..Default::default()
+    });
+    let presentation = Arc::new(FairMutex::new(presentation));
+
+    let session_id = runtime
+        .early_init_session_id("%0")
+        .or_else(|| presentation.lock().tmux_expected_session_id())
+        .or_else(|| runtime.spawned_expected_session())
+        .expect("original spawned token");
+    assert_eq!(session_id, spawned);
+    runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(session_id);
+    runtime
+        .begin_pane_bootstrap("%0", session_id)
+        .expect("stage original token");
+    runtime.register_pane("%0", presentation.clone());
+    runtime.admit_buffered_init_shell("%0", &presentation);
+
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.pane_bootstrap_session_id("%0"), Some(spawned));
+    assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert!(runtime.begin_pane_bootstrap("%0", spawned).is_none());
+    assert_eq!(runtime.take_pending_silent_bootstrap().len(), 1);
+    assert!(runtime.take_pending_silent_bootstrap().is_empty());
+    assert_eq!(presentation.lock().pending_session_id(), Some(spawned));
+    assert!(runtime.pane_model("%0").is_some());
+    runtime.unregister();
+    assert!(runtime.pane_model("%0").is_none());
+    assert!(runtime.pane_bootstrap_session_id("%0").is_none());
+    assert!(runtime.spawned_expected_session().is_none());
+}

@@ -13061,7 +13061,7 @@ impl Workspace {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix, feature = "local_tty", not(feature = "remote_tty")))]
     pub(crate) fn gateway_view_for_tmux_control_write_for_tests(
         instance_id: Option<u64>,
         ctx: &AppContext,
@@ -13447,7 +13447,7 @@ impl Workspace {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix, feature = "local_tty", not(feature = "remote_tty")))]
     pub(crate) fn apply_tmux_client_events_for_tests(
         &mut self,
         events: &[crate::terminal::model::terminal_model::TmuxClientEvent],
@@ -13456,7 +13456,7 @@ impl Workspace {
         self.apply_tmux_client_events_inner(events, ctx);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix, feature = "local_tty", not(feature = "remote_tty")))]
     pub(crate) fn apply_tmux_client_events_from_gateway_for_tests(
         &mut self,
         events: &[crate::terminal::model::terminal_model::TmuxClientEvent],

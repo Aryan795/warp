@@ -19,6 +19,7 @@ fn runtime() -> TmuxRuntime {
             tracked_control_pane: None,
             control_incarnation: 0,
             tracked_expected_session: None,
+            spawned_expected_session: None,
             retained_zsh_init: None,
             early_init_shell: HashMap::new(),
             early_stage_complete: HashMap::new(),
@@ -185,6 +186,27 @@ fn repeated_zero_payload_events_overflow_the_pending_queue() {
 
 fn sid(n: u64) -> warp_core::SessionId {
     n.into()
+}
+
+#[test]
+fn spawned_token_auto_tracks_first_pane_and_reaches_ready() {
+    let runtime = runtime();
+    runtime.set_spawned_expected_session(sid(42));
+    let mut ack = crate::terminal::tmux::protocol::STAGE_COMPLETE_OSC_PREFIX.to_vec();
+    ack.extend_from_slice(b"42\x07");
+    assert!(runtime.deliver_output(&PaneId::from("%0"), &ack));
+    assert_eq!(runtime.tracked_control_pane().as_deref(), Some("%0"));
+    assert_eq!(runtime.tracked_expected_session(), Some(sid(42)));
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.begin_pane_bootstrap("%0", sid(42)).expect("stage");
+    assert_eq!(runtime.pane_bootstrap_session_id("%0"), Some(sid(42)));
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(42), ShellType::Zsh),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
 }
 
 #[test]

@@ -296,6 +296,7 @@ fn empty_workspace_new_session_is_not_tmux_owned() {
     });
 }
 
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
 fn configure_tmux_gateway(workspace: &ViewHandle<Workspace>, app: &mut App, instance_id: u64) {
     workspace.update(app, |workspace, ctx| {
         if workspace.tab_count() == 0 {
