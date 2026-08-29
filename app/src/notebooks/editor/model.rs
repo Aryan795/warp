@@ -112,6 +112,7 @@ pub struct NotebooksEditorModel {
     file_link_resolution_context: Option<FileLinkResolutionContext>,
     default_mermaid_display_mode: MarkdownDisplayMode,
     vim_visual_tails: Vec<CharOffset>,
+    #[allow(dead_code)]
     vim_selection_stash: Option<Vec1<SelectionOffsets>>,
 }
 

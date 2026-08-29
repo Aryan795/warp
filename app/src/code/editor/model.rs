@@ -17,7 +17,7 @@ use rangemap::{RangeMap, RangeSet};
 use string_offset::CharOffset;
 use syntax_tree::{ColorMap, DecorationStateEvent, SyntaxTreeState};
 use vec1::{Vec1, vec1};
-use vim::handler::{CaseTransform as VimCaseTransform, VimBufferOps};
+use vim::handler::VimBufferOps;
 use vim::vim::{
     BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
     InsertPosition, LineMotion, MotionType, TextObjectInclusion, TextObjectType, VimMotion,
@@ -304,6 +304,7 @@ pub struct CodeEditorModel {
     /// visual selections that may differ from the cursor positions.
     vim_visual_tails: Vec<CharOffset>,
     /// Selections saved across a yank so the cursor can be restored afterward.
+    #[allow(dead_code)]
     vim_selection_stash: Option<Vec1<SelectionOffsets>>,
     hovered_symbol_range: Option<HoverableLink>,
     /// Automatically hide lines outside of the active diff with X context lines.
@@ -4230,14 +4231,61 @@ impl CodeEditorModel {
 impl VimBufferOps for CodeEditorModel {
     type Ctx<'a> = ModelContext<'a, Self>;
 
-    fn select_for_operand(
+    fn snapshot(&self, ctx: &Self::Ctx<'_>) -> vim::handler::VimSnapshot {
+        let text = self.content().as_ref(ctx).text().into_string();
+        let carets = self
+            .buffer_selection_model()
+            .as_ref(ctx)
+            .selection_offsets()
+            .iter()
+            .map(|selection| vim::handler::VimCaret {
+                head: selection.head,
+                tail: selection.tail,
+            })
+            .collect();
+        vim::handler::VimSnapshot::from_plain_text(&text, carets)
+    }
+
+    fn set_selections(&mut self, carets: &[vim::handler::VimCaret], ctx: &mut Self::Ctx<'_>) {
+        let Ok(selections) = Vec1::try_from_vec(
+            carets
+                .iter()
+                .map(|caret| SelectionOffsets {
+                    head: caret.head,
+                    tail: caret.tail,
+                })
+                .collect(),
+        ) else {
+            return;
+        };
+        self.vim_set_selections(selections, AutoScrollBehavior::Selection, ctx);
+    }
+
+    fn replace_ranges(
         &mut self,
-        operator: &VimOperator,
-        operand_count: u32,
-        operand: &VimOperand,
+        edits: &[(CharOffset, CharOffset, String)],
         ctx: &mut Self::Ctx<'_>,
     ) {
-        self.vim_select_for_operand(operator, operand_count, operand, ctx);
+        let Ok(edits) = Vec1::try_from_vec(
+            edits
+                .iter()
+                .map(|(start, end, text)| (text.clone(), *start..*end))
+                .collect(),
+        ) else {
+            return;
+        };
+        let selection_model = self.buffer_selection_model().clone();
+        self.update_content(
+            |mut content, ctx| {
+                content.apply_edit(
+                    BufferEditAction::InsertAtCharOffsetRanges { edits: &edits },
+                    EditOrigin::UserInitiated,
+                    selection_model,
+                    ctx,
+                );
+            },
+            ctx,
+        );
     }
 
     fn selected_text(&mut self, ctx: &mut Self::Ctx<'_>) -> String {
@@ -4255,48 +4303,6 @@ impl VimBufferOps for CodeEditorModel {
         self.insert(text, EditOrigin::UserInitiated, ctx);
     }
 
-    fn change_line_smart_indent(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_change_line_with_smart_indent(ctx);
-    }
-
-    fn move_to_line_start(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_move_to_line_bound(LineBound::Start, false, ctx);
-    }
-
-    fn stash_selections(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_selection_stash = Some(self.selections(ctx).clone());
-    }
-
-    fn restore_stashed_selections(&mut self, ctx: &mut Self::Ctx<'_>) {
-        if let Some(selections) = self.vim_selection_stash.take() {
-            self.vim_set_selections(selections, AutoScrollBehavior::None, ctx);
-        }
-    }
-
-    fn collapse_to_selection_start(&mut self, ctx: &mut Self::Ctx<'_>) {
-        let starts = self
-            .buffer_selection_model()
-            .as_ref(ctx)
-            .selection_offsets()
-            .mapped(|selection| {
-                let start = selection.head.min(selection.tail);
-                SelectionOffsets {
-                    head: start,
-                    tail: start,
-                }
-            });
-        self.vim_set_selections(starts, AutoScrollBehavior::None, ctx);
-    }
-
-    fn transform_case(&mut self, transform: VimCaseTransform, ctx: &mut Self::Ctx<'_>) {
-        let transform = match transform {
-            VimCaseTransform::Toggle => CaseTransform::Toggle,
-            VimCaseTransform::Uppercase => CaseTransform::Uppercase,
-            VimCaseTransform::Lowercase => CaseTransform::Lowercase,
-        };
-        self.transform_current_selections_case(transform, ctx);
-    }
-
     fn toggle_comments(&mut self, ctx: &mut Self::Ctx<'_>) {
         self.toggle_comments(ctx);
     }
@@ -4305,8 +4311,34 @@ impl VimBufferOps for CodeEditorModel {
         CoreEditorModel::indent(self, dedent, ctx);
     }
 
-    fn move_to_first_nonwhitespace(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_move_to_first_nonwhitespace(false, ctx);
+    fn open_line(&mut self, above: bool, ctx: &mut Self::Ctx<'_>) {
+        self.vim_newline(above, ctx);
+    }
+
+    fn change_line_smart_indent(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.vim_change_line_with_smart_indent(ctx);
+    }
+
+    fn supports_operator(&self, _operator: &VimOperator) -> bool {
+        true
+    }
+
+    fn supports_text_objects(&self) -> bool {
+        true
+    }
+
+    fn smart_indent_on_linewise_change(&self, _operand: &VimOperand) -> bool {
+        true
+    }
+
+    fn select_for_operand(
+        &mut self,
+        operator: &VimOperator,
+        operand_count: u32,
+        operand: &VimOperand,
+        ctx: &mut Self::Ctx<'_>,
+    ) {
+        self.vim_select_for_operand(operator, operand_count, operand, ctx);
     }
 
     fn expand_visual_selection(
@@ -4316,10 +4348,6 @@ impl VimBufferOps for CodeEditorModel {
         ctx: &mut Self::Ctx<'_>,
     ) {
         self.vim_visual_selection_range(motion_type, include_newline, ctx);
-    }
-
-    fn clear_selections(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_clear_selections(ctx);
     }
 
     fn apply_insert_position(&mut self, position: &InsertPosition, ctx: &mut Self::Ctx<'_>) {
@@ -4347,10 +4375,6 @@ impl VimBufferOps for CodeEditorModel {
         self.vim_move_horizontal_by_offset(1, &Direction::Backward, false, true, ctx);
     }
 
-    fn enforce_cursor_line_cap(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_enforce_cursor_line_cap(ctx);
-    }
-
     fn set_visual_tails_to_heads(&mut self, ctx: &mut Self::Ctx<'_>) {
         self.vim_set_visual_tail_to_selection_heads(ctx);
     }
@@ -4359,10 +4383,6 @@ impl VimBufferOps for CodeEditorModel {
         if self.vim_needs_line_capping(ctx) {
             self.vim_enforce_cursor_line_cap(ctx);
         }
-    }
-
-    fn supports_operator(&self, _operator: &VimOperator) -> bool {
-        true
     }
 }
 

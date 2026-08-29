@@ -3,7 +3,7 @@ use std::cmp;
 use num_traits::SaturatingSub;
 use string_offset::CharOffset;
 use vec1::Vec1;
-use vim::handler::{CaseTransform, VimBufferOps};
+use vim::handler::VimBufferOps;
 use vim::vim::{
     CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion, InsertPosition,
     LineMotion, MotionType, VimMotion, VimOperand, VimOperator, WordBound, WordMotion,
@@ -339,6 +339,7 @@ impl NotebooksEditorModel {
         &self.vim_visual_tails
     }
 
+    #[allow(dead_code)]
     fn vim_extend_selection_linewise(
         &mut self,
         include_newline: bool,
@@ -368,6 +369,7 @@ impl NotebooksEditorModel {
         self.vim_set_selections(new_selections, AutoScrollBehavior::Selection, ctx);
     }
 
+    #[allow(dead_code)]
     fn vim_select_for_operand(
         &mut self,
         operator: &VimOperator,
@@ -470,84 +472,59 @@ impl NotebooksEditorModel {
 impl VimBufferOps for NotebooksEditorModel {
     type Ctx<'a> = ModelContext<'a, Self>;
 
-    fn select_for_operand(
-        &mut self,
-        operator: &VimOperator,
-        operand_count: u32,
-        operand: &VimOperand,
-        ctx: &mut Self::Ctx<'_>,
-    ) {
-        self.vim_select_for_operand(operator, operand_count, operand, ctx);
-    }
-
-    fn selected_text(&mut self, ctx: &mut Self::Ctx<'_>) -> String {
-        self.content()
-            .as_ref(ctx)
-            .selected_text_as_plain_text(self.buffer_selection_model().clone(), ctx)
-            .into_string()
-    }
-
-    fn delete_selection(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.delete(TextDirection::Forwards, TextUnit::Character, false, ctx);
-    }
-
-    fn insert_text(&mut self, text: &str, ctx: &mut Self::Ctx<'_>) {
-        self.insert(text, EditOrigin::UserInitiated, ctx);
-    }
-
-    fn move_to_line_start(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_move_to_line_bound(true, false, ctx);
-    }
-
-    fn stash_selections(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_selection_stash = Some(self.selections(ctx).clone());
-    }
-
-    fn restore_stashed_selections(&mut self, ctx: &mut Self::Ctx<'_>) {
-        if let Some(selections) = self.vim_selection_stash.take() {
-            self.vim_set_selections(selections, AutoScrollBehavior::None, ctx);
-        }
-    }
-
-    fn collapse_to_selection_start(&mut self, ctx: &mut Self::Ctx<'_>) {
-        let starts = self.selections(ctx).mapped(|selection| {
-            let start = selection.head.min(selection.tail);
-            SelectionOffsets {
-                head: start,
-                tail: start,
-            }
-        });
-        self.vim_set_selections(starts, AutoScrollBehavior::None, ctx);
-    }
-
-    fn transform_case(&mut self, transform: CaseTransform, ctx: &mut Self::Ctx<'_>) {
-        let buffer = self.content().as_ref(ctx);
-        let ranges = self
-            .buffer_selection_model()
-            .as_ref(ctx)
-            .selections_to_offset_ranges();
-        let edits_vec: Vec<(String, std::ops::Range<CharOffset>)> = ranges
+    fn snapshot(&self, ctx: &Self::Ctx<'_>) -> vim::handler::VimSnapshot {
+        let text = self.content().as_ref(ctx).text().into_string();
+        let carets = self
+            .selections(ctx)
             .iter()
-            .map(|range| {
-                let original = buffer.text_in_range(range.clone()).into_string();
-                (transform.apply_to(&original), range.clone())
+            .map(|selection| vim::handler::VimCaret {
+                head: selection.head,
+                tail: selection.tail,
             })
             .collect();
-        if let Ok(edits) = Vec1::try_from_vec(edits_vec) {
-            let selection_model = self.buffer_selection_model().clone();
-            self.update_content(
-                |mut content, ctx| {
-                    content.apply_edit(
-                        BufferEditAction::InsertAtCharOffsetRanges { edits: &edits },
-                        EditOrigin::UserInitiated,
-                        selection_model,
-                        ctx,
-                    );
-                },
-                ctx,
-            );
-        }
-        self.clear_selections(ctx);
+        vim::handler::VimSnapshot::from_plain_text(&text, carets)
+    }
+
+    fn set_selections(&mut self, carets: &[vim::handler::VimCaret], ctx: &mut Self::Ctx<'_>) {
+        let Ok(selections) = Vec1::try_from_vec(
+            carets
+                .iter()
+                .map(|caret| SelectionOffsets {
+                    head: caret.head,
+                    tail: caret.tail,
+                })
+                .collect(),
+        ) else {
+            return;
+        };
+        self.vim_set_selections(selections, AutoScrollBehavior::Selection, ctx);
+    }
+
+    fn replace_ranges(
+        &mut self,
+        edits: &[(CharOffset, CharOffset, String)],
+        ctx: &mut Self::Ctx<'_>,
+    ) {
+        let Ok(edits) = Vec1::try_from_vec(
+            edits
+                .iter()
+                .map(|(start, end, text)| (text.clone(), *start..*end))
+                .collect(),
+        ) else {
+            return;
+        };
+        let selection_model = self.buffer_selection_model().clone();
+        self.update_content(
+            |mut content, ctx| {
+                content.apply_edit(
+                    BufferEditAction::InsertAtCharOffsetRanges { edits: &edits },
+                    EditOrigin::UserInitiated,
+                    selection_model,
+                    ctx,
+                );
+            },
+            ctx,
+        );
     }
 
     fn indent(&mut self, dedent: bool, ctx: &mut Self::Ctx<'_>) {
@@ -568,8 +545,19 @@ impl VimBufferOps for NotebooksEditorModel {
         );
     }
 
-    fn move_to_first_nonwhitespace(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_move_to_first_nonwhitespace(false, ctx);
+    fn selected_text(&mut self, ctx: &mut Self::Ctx<'_>) -> String {
+        self.content()
+            .as_ref(ctx)
+            .selected_text_as_plain_text(self.buffer_selection_model().clone(), ctx)
+            .into_string()
+    }
+
+    fn delete_selection(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.delete(TextDirection::Forwards, TextUnit::Character, false, ctx);
+    }
+
+    fn insert_text(&mut self, text: &str, ctx: &mut Self::Ctx<'_>) {
+        self.insert(text, EditOrigin::UserInitiated, ctx);
     }
 
     fn expand_visual_selection(
@@ -615,16 +603,18 @@ impl VimBufferOps for NotebooksEditorModel {
         }
     }
 
-    fn clear_selections(&mut self, ctx: &mut Self::Ctx<'_>) {
-        let first = *self.selections(ctx).first();
-        self.vim_set_selections(
-            Vec1::new(SelectionOffsets {
-                head: first.head,
-                tail: first.head,
-            }),
-            AutoScrollBehavior::None,
-            ctx,
-        );
+    fn select_for_operand(
+        &mut self,
+        operator: &VimOperator,
+        operand_count: u32,
+        operand: &VimOperand,
+        ctx: &mut Self::Ctx<'_>,
+    ) {
+        self.vim_select_for_operand(operator, operand_count, operand, ctx);
+    }
+
+    fn set_visual_tails_to_heads(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.vim_visual_tails = self.selections(ctx).iter().map(|s| s.head).collect();
     }
 
     fn apply_insert_position(&mut self, position: &InsertPosition, ctx: &mut Self::Ctx<'_>) {
@@ -645,40 +635,6 @@ impl VimBufferOps for NotebooksEditorModel {
                 self.newline(ctx);
             }
         }
-    }
-
-    fn move_left_exiting_insert(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_move_horizontal(1, &Direction::Backward, false, true, ctx);
-    }
-
-    fn enforce_cursor_line_cap(&mut self, ctx: &mut Self::Ctx<'_>) {
-        let buffer = self.content().as_ref(ctx);
-        let current_selections = self.selections(ctx);
-        let new_selections = current_selections.mapped(|selection| {
-            let head_point = selection.head.to_buffer_point(buffer);
-            let line_len = buffer.line_len(head_point.row);
-            if line_len > 0 && head_point.column >= line_len {
-                SelectionOffsets {
-                    head: selection.head.saturating_sub(&CharOffset::from(1)),
-                    tail: selection.tail.saturating_sub(&CharOffset::from(1)),
-                }
-            } else {
-                selection
-            }
-        });
-        self.vim_set_selections(new_selections, AutoScrollBehavior::None, ctx);
-    }
-
-    fn set_visual_tails_to_heads(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_visual_tails = self.selections(ctx).iter().map(|s| s.head).collect();
-    }
-
-    fn enforce_normal_mode_line_cap(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.enforce_cursor_line_cap(ctx);
-    }
-
-    fn smart_indent_on_linewise_change(&self, _operand: &VimOperand) -> bool {
-        false
     }
 
     fn supports_operator(&self, operator: &VimOperator) -> bool {
