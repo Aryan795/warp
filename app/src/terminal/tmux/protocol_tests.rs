@@ -680,15 +680,141 @@ fn silent_bootstrap_framing_hides_setup_and_clears_before_prompt() {
     let framed = super::silent_history_isolated_script(ShellType::Zsh, body);
     let text = String::from_utf8_lossy(&framed);
     let echo_off = text.find("stty -echo").expect("echo off");
-    let hist = text.find("fc -p /dev/null").expect("history isolate");
+    let hist = text.find("HISTFILE=/dev/null").expect("history isolate");
     let marker = text.find("warp_bootstrapped").expect("bootstrap body");
     let clear = text.find("printf").expect("clear");
     let echo_on = text.rfind("stty echo").expect("echo on");
+    assert!(text.contains("setopt NO_BANG_HIST"));
+    assert!(!text.contains("fc -P") && !text.contains("fc -p"));
     assert!(echo_off < hist);
     assert!(hist < marker);
     assert!(marker < clear);
     assert!(clear < echo_on);
-    assert!(text[clear..echo_on].contains("[2J"));
+}
+
+#[cfg(unix)]
+#[test]
+fn silent_bootstrap_clear_printf_emits_csi_bytes() {
+    let framed = super::silent_history_isolated_script(ShellType::Bash, b":");
+    let text = String::from_utf8(framed).expect("utf8");
+    let printf_line = text
+        .lines()
+        .find(|line| line.contains("printf"))
+        .expect("printf clear line");
+    let output = Command::new("bash")
+        .args(["-c", printf_line])
+        .output()
+        .expect("run printf");
+    assert_eq!(
+        output.stdout.as_slice(),
+        [0x1b, 0x5b, 0x48, 0x1b, 0x5b, 0x32, 0x4a]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_silent_framed_bootstrap_exits_to_prompt_once() {
+    let Some(zsh) = optional_shell("zsh") else {
+        return;
+    };
+    let Ok(python) = Command::new("python3").arg("-c").arg("import pty").status() else {
+        return;
+    };
+    if !python.success() {
+        return;
+    }
+    let home = unique_temp_path("warp-tmux-zsh-silent-home");
+    std::fs::create_dir_all(&home).expect("zsh silent home");
+    let hist = home.join(".zsh_history");
+    std::fs::write(&hist, b"prior-user-cmd\n").expect("seed histfile");
+    let body = b"warp_silent_hook() { :; }\n";
+    let framed = super::silent_history_isolated_script(ShellType::Zsh, body);
+    let runner = format!(
+        r#"
+import os, pty, select, sys, time
+zsh = {zsh:?}
+script = sys.stdin.buffer.read()
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir({home:?})
+    os.environ["HOME"] = {home:?}
+    os.environ["HISTFILE"] = {hist:?}
+    os.environ["SAVEHIST"] = "1000"
+    os.execv(zsh, [zsh, "--no-rcs", "-i"])
+os.write(fd, script)
+time.sleep(0.2)
+os.write(fd, b"typeset -f warp_silent_hook >/dev/null && echo WARP_HOOK_OK\n")
+time.sleep(0.1)
+os.write(fd, b"SAVEHIST=0\necho WARP_SILENT_DONE\nexit\n")
+out = b""
+deadline = time.time() + 5
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+    if b"WARP_SILENT_DONE" in out:
+        break
+os.write(fd, b"exit\n")
+try:
+    os.waitpid(pid, 0)
+except ChildProcessError:
+    pass
+sys.stdout.buffer.write(out)
+"#,
+        zsh = zsh.display(),
+        home = home.display(),
+        hist = hist.display(),
+    );
+    let mut child = Command::new("python3")
+        .arg("-c")
+        .arg(&runner)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python pty runner");
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = std::io::Write::write_all(&mut stdin, &framed);
+    }
+    let output = child.wait_with_output().expect("wait python pty");
+    let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+    let text = String::from_utf8_lossy(&combined);
+    let fc_p_count = text.matches("fc -P").count();
+    assert!(
+        fc_p_count <= 1,
+        "fc -P must not loop, saw {fc_p_count}: {text:?}"
+    );
+    assert!(
+        !text.contains("warp_bootstrapped") && !text.contains("<< 'EOM'"),
+        "bootstrap markers must be absent: {text:?}"
+    );
+    assert!(
+        text.contains("WARP_HOOK_OK"),
+        "hook must be installed: {text:?}"
+    );
+    assert!(
+        text.contains("WARP_SILENT_DONE"),
+        "interactive zsh must reach a prompt and exit once: {text:?}"
+    );
+    let hist_bytes = std::fs::read(&hist).unwrap_or_default();
+    let entries = ShellType::Zsh.parse_history(&hist_bytes);
+    let joined = entries.join("\n");
+    assert!(
+        joined.contains("prior-user-cmd"),
+        "prior history must be restored: {joined:?}"
+    );
+    assert!(
+        !joined.contains("warp_silent_hook") && !joined.contains("HISTFILE=/dev/null"),
+        "bootstrap must not persist in history: {joined:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]

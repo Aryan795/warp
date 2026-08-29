@@ -769,26 +769,51 @@ fn history_isolated_script(shell_type: ShellType, body: &[u8]) -> Vec<u8> {
 
 // send-keys paste is echoed by the tty; disable echo and clear so setup never remains visible.
 pub(crate) fn silent_history_isolated_script(shell_type: ShellType, body: &[u8]) -> Vec<u8> {
-    let mut wrapped = Vec::new();
-    if !matches!(shell_type, ShellType::PowerShell) {
-        wrapped.extend_from_slice(b"stty -echo 2>/dev/null || true\n");
+    match shell_type {
+        ShellType::Zsh => silent_zsh_script(body),
+        ShellType::PowerShell => history_isolated_script(shell_type, body),
+        shell_type => silent_posix_script(shell_type, body),
     }
+}
+
+fn silent_posix_script(shell_type: ShellType, body: &[u8]) -> Vec<u8> {
+    let mut wrapped = b"stty -echo 2>/dev/null || true\n".to_vec();
+    wrapped.extend_from_slice(b"trap 'stty echo 2>/dev/null || true' EXIT INT TERM\n");
     wrapped.extend_from_slice(in_band_history_setup(shell_type));
     wrapped.extend_from_slice(body);
     if !wrapped.ends_with(b"\n") {
         wrapped.push(b'\n');
     }
-    if !matches!(shell_type, ShellType::PowerShell) {
-        wrapped.extend_from_slice(b"printf '\\033[H\\033[2J' 2>/dev/null || true\n");
-    }
+    wrapped.extend_from_slice(br"printf '\033[H\033[2J' 2>/dev/null || true");
+    wrapped.push(b'\n');
     wrapped.extend_from_slice(in_band_history_restore(shell_type));
-    if !matches!(shell_type, ShellType::PowerShell) {
-        if !wrapped.ends_with(b"\n") {
-            wrapped.push(b'\n');
-        }
-        wrapped.extend_from_slice(b"stty echo 2>/dev/null || true");
+    if !wrapped.ends_with(b"\n") {
+        wrapped.push(b'\n');
     }
+    wrapped.extend_from_slice(b"stty echo 2>/dev/null || true\n");
+    wrapped.extend_from_slice(b"trap - EXIT INT TERM");
     wrapped.extend_from_slice(shell_type.execute_command_bytes());
+    wrapped
+}
+
+fn silent_zsh_script(body: &[u8]) -> Vec<u8> {
+    let mut wrapped = b"setopt NO_BANG_HIST\n".to_vec();
+    wrapped.extend_from_slice(b"stty -echo 2>/dev/null || true\n");
+    wrapped.extend_from_slice(b"trap 'stty echo 2>/dev/null || true' EXIT INT TERM\n");
+    wrapped.extend_from_slice(
+        b"typeset __warp_histfile=${HISTFILE-}\ntypeset __warp_savehist=${SAVEHIST-0}\n",
+    );
+    wrapped.extend_from_slice(b"HISTFILE=/dev/null\nSAVEHIST=0\n");
+    wrapped.extend_from_slice(body);
+    if !wrapped.ends_with(b"\n") {
+        wrapped.push(b'\n');
+    }
+    wrapped.extend_from_slice(br"printf '\033[H\033[2J' 2>/dev/null || true");
+    wrapped.push(b'\n');
+    wrapped.extend_from_slice(b"HISTFILE=$__warp_histfile\nSAVEHIST=$__warp_savehist\n");
+    wrapped.extend_from_slice(b"unset __warp_histfile __warp_savehist\n");
+    wrapped.extend_from_slice(b"stty echo 2>/dev/null || true\n");
+    wrapped.extend_from_slice(b"trap - EXIT INT TERM\n");
     wrapped
 }
 

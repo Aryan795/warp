@@ -2303,10 +2303,7 @@ impl TerminalModel {
 
     fn enter_nested_tmux_alt_screen(&mut self, save_cursor_and_clear_screen: bool) {
         if self.tmux_saved_primary_grid.is_none() {
-            self.tmux_saved_primary_grid = Some(
-                self.alt_screen
-                    .replace_grid_with_blank(self.obfuscate_secrets),
-            );
+            self.tmux_saved_primary_grid = Some(self.alt_screen.replace_grid_with_blank());
         }
         self.alt_screen.reset_pending_lines_to_scroll();
         self.alt_screen

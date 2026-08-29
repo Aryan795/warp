@@ -32,7 +32,7 @@ use crate::terminal::model::ansi::{
 use crate::terminal::model::grid::grid_handler::{
     FragmentBoundary, GridHandler, Link, PerformResetGridChecks, PossiblePath, TermMode,
 };
-use crate::terminal::model::grid::{Dimensions, GridStorage};
+use crate::terminal::model::grid::{Dimensions, GridStorage, IndexRegion};
 use crate::terminal::model::index::{Point, Side, VisibleRow};
 use crate::terminal::model::iterm_image::ITermImage;
 use crate::terminal::model::secrets::ObfuscateSecrets;
@@ -120,22 +120,15 @@ impl AltScreen {
         &mut self.grid_handler
     }
 
-    pub(crate) fn replace_grid_with_blank(
-        &mut self,
-        obfuscate_secrets: ObfuscateSecrets,
-    ) -> GridHandler {
-        let blank = GridHandler::new(
-            SizeInfo::new_without_font_metrics(
-                self.grid_handler.visible_rows(),
-                self.grid_handler.columns(),
-            ),
-            0,
-            self.event_proxy.clone(),
-            true,
-            obfuscate_secrets,
-            PerformResetGridChecks::default(),
-        );
-        std::mem::replace(&mut self.grid_handler, blank)
+    pub(crate) fn replace_grid_with_blank(&mut self) -> GridHandler {
+        let primary = self.grid_handler.clone();
+        let bg = self.grid_handler.grid_storage().cursor().template.bg;
+        self.grid_handler
+            .grid_storage_mut()
+            .region_mut(..)
+            .each(|cell| *cell = bg.into());
+        self.grid_handler.clear_secrets();
+        primary
     }
 
     /// Resize terminal to new dimensions.

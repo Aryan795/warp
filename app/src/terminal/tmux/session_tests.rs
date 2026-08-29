@@ -351,6 +351,45 @@ fn presentation_nested_csi_47_uses_a_distinct_alt_grid() {
 }
 
 #[test]
+fn presentation_nested_alt_preserves_cell_metrics() {
+    use pathfinder_geometry::vector::vec2f;
+    use warpui::units::{IntoPixels as _, Pixels};
+
+    use crate::terminal::model::ansi::{Handler, Mode};
+    use crate::terminal::{SizeInfo, SizeUpdate, SizeUpdateReason};
+
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_presentation(true);
+    let last_size = SizeInfo::new_without_font_metrics(10, 7);
+    let new_size = SizeInfo::new(
+        vec2f(800.0, 480.0),
+        10.0.into_pixels(),
+        20.0.into_pixels(),
+        Pixels::zero(),
+        Pixels::zero(),
+    );
+    model.resize(SizeUpdate {
+        update_reason: SizeUpdateReason::Refresh,
+        last_size,
+        new_size,
+        new_gap_height: None,
+        natural_rows: new_size.rows(),
+        natural_cols: new_size.columns(),
+    });
+    model.set_mode(Mode::SwapScreen {
+        save_cursor_and_clear_screen: false,
+    });
+    let mut response = Vec::new();
+    model.text_area_size_pixels(&mut response);
+    assert_eq!(
+        response.as_slice(),
+        b"\x1b[4;480;800t",
+        "nested alt-screen must keep cell pixel metrics, got {:?}",
+        String::from_utf8_lossy(&response)
+    );
+}
+
+#[test]
 fn presentation_grid_clear_drops_bootstrap_markers() {
     let mut model = TerminalModel::mock(None, None);
     model.set_tmux_presentation(true);
