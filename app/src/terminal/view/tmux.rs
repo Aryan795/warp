@@ -2,6 +2,7 @@ use warpui::ViewContext;
 
 use super::TerminalView;
 use crate::features::FeatureFlag;
+use crate::terminal::shell::ShellType;
 use crate::terminal::tmux::transport::{TmuxCommandError, tmux_cc_shell_command};
 
 /// Stable tmux session name used so SSH reconnect can attach with `-A`.
@@ -19,11 +20,18 @@ impl TerminalView {
         }
 
         let size = self.size_info();
-        let command = match tmux_cc_shell_command(
+        let pane_shell = args.trim().is_empty().then(|| {
+            self.model
+                .lock()
+                .last_init_shell_type()
+                .unwrap_or(ShellType::Zsh)
+        });
+        let (command, expected_session_id) = match tmux_cc_shell_command(
             args,
             Some(IN_PLACE_TMUX_SESSION),
             size.columns(),
             size.rows(),
+            pane_shell,
         ) {
             Ok(command) => command,
             Err(TmuxCommandError::IsolatedSocketOverride) => {
@@ -33,6 +41,11 @@ impl TerminalView {
                 return;
             }
         };
+        if let Some(session_id) = expected_session_id {
+            let mut model = self.model.lock();
+            model.set_tmux_expected_session_id(Some(session_id));
+            model.register_session_id(session_id);
+        }
         self.write_to_pty(command.into_bytes(), ctx);
         ctx.notify();
     }

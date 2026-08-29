@@ -6,6 +6,9 @@ const SEND_KEYS_CHUNK_BYTES: usize = 128;
 /// enters control mode without `%layout-change` or `%window-pane-changed`.
 pub const LIST_WINDOWS_LAYOUT_COMMAND: &str = "list-windows -F '#{window_id} #{window_layout}'\n";
 
+/// Keep the isolated Warp server alive if the last pane exits while a control client is attached.
+pub const EXIT_EMPTY_OFF_COMMAND: &str = "set -s exit-empty off\n";
+
 pub fn refresh_client_command(columns: usize, rows: usize) -> String {
     format!("refresh-client -C {columns}x{rows}\n")
 }

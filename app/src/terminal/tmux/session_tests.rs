@@ -576,6 +576,29 @@ fn gateway_split_falls_back_to_focused_pane() {
 }
 
 #[test]
+fn expected_session_id_is_stored_on_gateway_model() {
+    use crate::terminal::model::session::SessionId;
+    let mut model = TerminalModel::mock(None, None);
+    let session_id = SessionId::from(99);
+    model.set_tmux_expected_session_id(Some(session_id));
+    assert_eq!(model.tmux_expected_session_id(), Some(session_id));
+}
+
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+#[test]
+fn in_place_bind_tracks_control_pane_and_expected_session() {
+    use crate::terminal::model::session::SessionId;
+    use crate::terminal::tmux::bridge::TmuxRuntime;
+    let session_id = SessionId::from(77);
+    let runtime = TmuxRuntime::new();
+    runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(session_id);
+    assert_eq!(runtime.tracked_control_pane().as_deref(), Some("%0"));
+    assert_eq!(runtime.tracked_expected_session(), Some(session_id));
+    runtime.unregister();
+}
+
+#[test]
 fn two_models_keep_independent_instance_ids() {
     let mut a = TerminalModel::mock(None, None);
     let mut b = TerminalModel::mock(None, None);

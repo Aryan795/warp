@@ -11,12 +11,12 @@ use warp_terminal::shell::ShellType;
 
 use super::{
     PaneBootstrap, capture_pane_command, cleanup_unspawned_dedicated_files, control_client_argv,
-    detach_client_command, in_band_init_bytes, kill_pane_command, kill_server_argv,
-    kill_server_command, kill_window_command, new_window_command, pane_bootstrap_for_shell,
-    pipe_pane_journal_command, refresh_client_command, register_dedicated_server,
-    resize_pane_command, schedule_kill_dedicated_server, select_pane_command,
-    select_window_command, send_keys_commands, split_stage_complete, split_window_command,
-    zsh_init_bytes,
+    detach_client_command, in_band_init_bytes, in_place_pane_spawn_argv, kill_pane_command,
+    kill_server_argv, kill_server_command, kill_window_command, new_window_command,
+    pane_bootstrap_for_shell, pipe_pane_journal_command, refresh_client_command,
+    register_dedicated_server, resize_pane_command, schedule_kill_dedicated_server,
+    select_pane_command, select_window_command, send_keys_commands, silent_bootstrap_bytes,
+    split_stage_complete, split_window_command, zsh_init_bytes,
 };
 use crate::terminal::tmux::parser::{PaneId, WindowId};
 
@@ -672,6 +672,168 @@ fn zsh_pane_bootstrap_keeps_init_script_for_send_keys() {
     assert!(
         !text[..ack_at].contains('\n'),
         "stage ack must run on the same line as init: {text}"
+    );
+}
+
+#[test]
+fn in_place_pane_spawn_uses_path_name_and_no_rcs() {
+    let (argv, session_id) = in_place_pane_spawn_argv(ShellType::Zsh);
+    assert_eq!(argv[0], "zsh");
+    assert!(argv.iter().any(|arg| arg.contains("--no-rcs")));
+    assert!(!argv[0].starts_with('/'));
+    assert_ne!(session_id.as_u64(), 0);
+    let (bash_argv, _) = in_place_pane_spawn_argv(ShellType::Bash);
+    assert_eq!(bash_argv[0], "bash");
+}
+
+#[cfg(unix)]
+#[test]
+fn product_path_tmux_cc_no_rcs_pane_survives_init_ack_bootstrap_and_detach() {
+    let Some(tmux) = super::resolve_tmux_binary() else {
+        return;
+    };
+    let Some(zsh) = optional_shell("zsh") else {
+        return;
+    };
+    let Ok(python) = Command::new("python3").arg("-c").arg("import pty").status() else {
+        return;
+    };
+    if !python.success() {
+        return;
+    }
+    let bootstrap = pane_bootstrap_for_shell(zsh.clone(), ShellType::Zsh);
+    let init_script = bootstrap.init_script.expect("zsh needs an init script");
+    let init = zsh_init_bytes(&init_script, ShellType::Zsh, bootstrap.session_id);
+    let bootstrap_bytes = silent_bootstrap_bytes(ShellType::Zsh);
+    let socket_name = format!(
+        "warp-cc-{}",
+        TEST_PATH_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let home = unique_temp_path("warp-tmux-cc-home");
+    std::fs::create_dir_all(&home).expect("tmux cc home");
+    let tmpdir = unique_temp_path("warp-tmux-cc-tmp");
+    std::fs::create_dir_all(&tmpdir).expect("tmux cc tmp");
+    let init_path = home.join("init.bin");
+    let boot_path = home.join("boot.bin");
+    std::fs::write(&init_path, &init).expect("write init payload");
+    std::fs::write(&boot_path, &bootstrap_bytes).expect("write bootstrap payload");
+    let runner = format!(
+        r##"
+import os, pty, select, signal, subprocess, sys, time
+tmux = {tmux:?}
+zsh = {zsh:?}
+socket = {socket_name:?}
+home = {home:?}
+tmpdir = {tmpdir:?}
+init_path = {init_path:?}
+boot_path = {boot_path:?}
+os.environ["HOME"] = home
+os.environ["TMUX_TMPDIR"] = tmpdir
+os.environ.pop("TMUX", None)
+def to_hex(data):
+    return " ".join(f"{{b:02x}}" for b in data)
+def chunks(hexs, n=128):
+    parts = hexs.split()
+    for i in range(0, len(parts), n):
+        yield " ".join(parts[i:i+n])
+init_hex = to_hex(open(init_path, "rb").read())
+boot_hex = to_hex(open(boot_path, "rb").read())
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(home)
+    os.execv(tmux, [tmux, "-f", "/dev/null", "-CC", "-L", socket, "new-session", "-A", "-s", "warp", "-n", "warp", "-x", "80", "-y", "24", "--", zsh, "-g", "--no-rcs", "-i"])
+out = b""
+deadline = time.time() + 8
+entered = False
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(fd, 65536)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+    if b"\x1bP1000p" in out:
+        entered = True
+        break
+if not entered:
+    sys.stdout.buffer.write(out)
+    sys.exit(2)
+os.write(fd, b"set -s exit-empty off\n")
+time.sleep(0.2)
+def drain(timeout):
+    global out
+    end = time.time() + timeout
+    while time.time() < end:
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            return
+        if not chunk:
+            return
+        out += chunk
+        end = time.time() + timeout
+for part in chunks(init_hex):
+    os.write(fd, f"send-keys -t %0 -H {{part}}\n".encode())
+    drain(0.05)
+drain(1.5)
+saw_init = b"InitShell" in out or b"496e69745368656c6c" in out
+saw_ack = b"9278;t;" in out
+for part in chunks(boot_hex):
+    os.write(fd, f"send-keys -t %0 -H {{part}}\n".encode())
+    drain(0.05)
+drain(8)
+saw_boot = b"Bootstrapped" in out or b"426f6f747374726170706564" in out
+listed = subprocess.run([tmux, "-L", socket, "list-sessions"], capture_output=True)
+panes = subprocess.run([tmux, "-L", socket, "list-panes", "-a", "-F", "#{{pane_dead}}"], capture_output=True, text=True)
+os.write(fd, b"detach-client\n")
+time.sleep(0.4)
+listed_after = subprocess.run([tmux, "-L", socket, "list-sessions"], capture_output=True)
+subprocess.run([tmux, "-L", socket, "kill-server"], capture_output=True)
+try:
+    os.kill(pid, signal.SIGKILL)
+except ProcessLookupError:
+    pass
+try:
+    os.waitpid(pid, 0)
+except ChildProcessError:
+    pass
+sys.stdout.buffer.write(out)
+print("LISTED", listed.returncode, file=sys.stderr)
+print("PANES", panes.stdout.strip(), file=sys.stderr)
+print("AFTER", listed_after.returncode, file=sys.stderr)
+print("INIT", int(saw_init), "ACK", int(saw_ack), "BOOT", int(saw_boot), file=sys.stderr)
+sys.exit(0 if saw_init and saw_ack and saw_boot and listed.returncode == 0 and listed_after.returncode == 0 and "0" in panes.stdout else 1)
+"##,
+        tmux = tmux.display(),
+        zsh = zsh.display(),
+        socket_name = socket_name,
+        home = home.display(),
+        tmpdir = tmpdir.display(),
+        init_path = init_path.display(),
+        boot_path = boot_path.display(),
+    );
+    let child = Command::new("python3")
+        .arg("-c")
+        .arg(&runner)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python tmux cc runner");
+    let output = child.wait_with_output().expect("wait python tmux cc");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&tmpdir);
+    let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+    let text = String::from_utf8_lossy(&combined);
+    assert!(
+        output.status.success(),
+        "product-path tmux -CC must keep pane/server through InitShell, ack, Bootstrapped, and detach: {text}"
     );
 }
 

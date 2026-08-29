@@ -326,6 +326,34 @@ fn enter_issues_list_windows_snapshot() {
 }
 
 #[test]
+fn enter_disables_exit_empty_before_snapshot() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    let items = io.feed(CONTROL_MODE_DCS);
+    let encoded: Vec<&[u8]> = items
+        .iter()
+        .filter_map(|item| match item {
+            TmuxFeedItem::EncodedPending(bytes) => Some(bytes.as_slice()),
+            _ => None,
+        })
+        .collect();
+    let exit_empty = encoded
+        .iter()
+        .position(|bytes| *bytes == crate::tmux::encode::EXIT_EMPTY_OFF_COMMAND.as_bytes())
+        .expect("exit-empty off");
+    let snapshot = encoded
+        .iter()
+        .position(|bytes| *bytes == crate::tmux::encode::LIST_WINDOWS_LAYOUT_COMMAND.as_bytes())
+        .expect("list-windows");
+    assert!(exit_empty < snapshot);
+    assert!(
+        !encoded
+            .iter()
+            .any(|bytes| bytes.starts_with(b"set -s exit-unattached"))
+    );
+}
+
+#[test]
 fn tmux_3_6a_new_session_without_layout_change_bootstraps_at0_percent0() {
     let mut io = TmuxIoState::new();
     io.enqueue_input(start_command());

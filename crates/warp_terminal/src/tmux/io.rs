@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use instant::Instant;
 
-use super::encode::{LIST_WINDOWS_LAYOUT_COMMAND, refresh_client_command, send_keys_command};
+use super::encode::{
+    EXIT_EMPTY_OFF_COMMAND, LIST_WINDOWS_LAYOUT_COMMAND, refresh_client_command, send_keys_command,
+};
 use super::parser::{ControlEvent, ControlModeParser, DecodeItem, PaneId, WindowId};
 
 const START_PENDING_TIMEOUT: Duration = Duration::from_secs(8);
@@ -27,6 +29,7 @@ pub fn is_tmux_client_command(bytes: &[u8]) -> bool {
         || bytes.starts_with(b"list-panes")
         || bytes.starts_with(b"display-message")
         || bytes.starts_with(b"send-keys")
+        || bytes.starts_with(b"set -s")
 }
 
 fn is_detach_client_command(bytes: &[u8]) -> bool {
@@ -430,6 +433,10 @@ impl TmuxIoState {
                     self.note_outgoing_command(command.as_bytes());
                 }
                 let mut items = vec![TmuxFeedItem::EnteredControl { refresh_client }];
+                self.note_outgoing_command(EXIT_EMPTY_OFF_COMMAND.as_bytes());
+                items.push(TmuxFeedItem::EncodedPending(
+                    EXIT_EMPTY_OFF_COMMAND.as_bytes().to_vec(),
+                ));
                 self.note_outgoing_command(LIST_WINDOWS_LAYOUT_COMMAND.as_bytes());
                 items.push(TmuxFeedItem::EncodedPending(
                     LIST_WINDOWS_LAYOUT_COMMAND.as_bytes().to_vec(),

@@ -1,7 +1,10 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use super::protocol::{PaneBootstrap, control_client_argv};
+use warp_core::SessionId;
+use warp_terminal::shell::ShellType;
+
+use super::protocol::{PaneBootstrap, control_client_argv, in_place_pane_spawn_argv};
 
 /// How a tmux `-CC` byte stream is obtained.
 ///
@@ -54,9 +57,19 @@ pub enum TmuxCommandError {
 /// `-A` attaches if `session_name` already exists so SSH reconnect can rediscover
 /// the Warp-managed session instead of creating a second one. Managed sessions
 /// always use the dedicated `-L warp-control-v1` server.
-pub fn in_place_tmux_cc_command(session_name: &str, columns: usize, rows: usize) -> String {
-    tmux_cc_shell_command("", Some(session_name), columns, rows)
-        .expect("bare /tmux never overrides the Warp socket")
+pub fn in_place_tmux_cc_command(
+    session_name: &str,
+    columns: usize,
+    rows: usize,
+    pane_shell: ShellType,
+) -> (String, SessionId) {
+    let (command, session_id) =
+        tmux_cc_shell_command("", Some(session_name), columns, rows, Some(pane_shell))
+            .expect("bare /tmux never overrides the Warp socket");
+    (
+        command,
+        session_id.expect("bare /tmux always includes a pane spawn"),
+    )
 }
 
 /// Build a `tmux -CC -L warp-control-v1 …` command from `/tmux` arguments.
@@ -65,17 +78,19 @@ pub fn tmux_cc_shell_command(
     default_session: Option<&str>,
     columns: usize,
     rows: usize,
-) -> Result<String, TmuxCommandError> {
+    pane_shell: Option<ShellType>,
+) -> Result<(String, Option<SessionId>), TmuxCommandError> {
     let tokens = tokenize_args(user_args);
-    let argv = tmux_cc_argv(
+    let (argv, expected_session_id) = tmux_cc_argv(
         &tokens,
         default_session.unwrap_or(DEFAULT_SESSION),
         columns,
         rows,
+        pane_shell,
     )?;
     let mut command = shell_join(&argv);
     command.push('\n');
-    Ok(command)
+    Ok((command, expected_session_id))
 }
 
 pub fn tmux_cc_argv(
@@ -83,7 +98,8 @@ pub fn tmux_cc_argv(
     default_session: &str,
     columns: usize,
     rows: usize,
-) -> Result<Vec<String>, TmuxCommandError> {
+    pane_shell: Option<ShellType>,
+) -> Result<(Vec<String>, Option<SessionId>), TmuxCommandError> {
     if user_tokens.iter().any(|token| is_socket_override(token)) {
         return Err(TmuxCommandError::IsolatedSocketOverride);
     }
@@ -112,7 +128,8 @@ pub fn tmux_cc_argv(
             "-y".to_owned(),
             rows.to_string(),
         ]);
-        return Ok(argv);
+        let expected_session_id = append_in_place_pane_spawn(&mut argv, pane_shell);
+        return Ok((argv, expected_session_id));
     }
     let mut command = command;
     if command[0] == "attach" {
@@ -124,7 +141,18 @@ pub fn tmux_cc_argv(
         maybe_insert_size(&mut command, columns, rows);
     }
     argv.extend(command);
-    Ok(argv)
+    Ok((argv, None))
+}
+
+fn append_in_place_pane_spawn(
+    argv: &mut Vec<String>,
+    pane_shell: Option<ShellType>,
+) -> Option<SessionId> {
+    let shell_type = pane_shell?;
+    let (pane_argv, session_id) = in_place_pane_spawn_argv(shell_type);
+    argv.push("--".to_owned());
+    argv.extend(pane_argv);
+    Some(session_id)
 }
 
 fn split_tmux_globals(tokens: &[String]) -> Result<(Vec<String>, Vec<String>), TmuxCommandError> {

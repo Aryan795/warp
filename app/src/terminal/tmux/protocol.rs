@@ -155,6 +155,17 @@ pub fn pane_bootstrap_for_shell(shell_path: PathBuf, shell_type: ShellType) -> P
     }
 }
 
+/// PATH-based pane argv for in-place `/tmux`, valid locally and on an already-remote shell.
+pub fn in_place_pane_spawn_argv(shell_type: ShellType) -> (Vec<String>, SessionId) {
+    let bootstrap = pane_bootstrap_for_shell(PathBuf::from(shell_type.name()), shell_type);
+    let argv = bootstrap
+        .command_argv()
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    (argv, bootstrap.session_id)
+}
+
 /// Dedicated tmux server socket under Warp's cache directory.
 pub fn dedicated_socket_path(session_id: SessionId) -> PathBuf {
     cache_dir()

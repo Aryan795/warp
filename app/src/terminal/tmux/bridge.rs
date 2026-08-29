@@ -839,6 +839,10 @@ impl TmuxRuntime {
         }
     }
 
+    pub fn tracked_expected_session(&self) -> Option<SessionId> {
+        self.inner.lock().tracked_expected_session
+    }
+
     pub fn tracked_control_pane(&self) -> Option<String> {
         self.inner.lock().tracked_control_pane.clone()
     }

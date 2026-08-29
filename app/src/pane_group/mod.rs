@@ -4273,7 +4273,10 @@ impl PaneGroup {
         };
         let session_id = runtime
             .early_init_session_id(tmux_pane_id)
+            .or_else(|| model.lock().tmux_expected_session_id())
             .unwrap_or_else(warp_terminal::bootstrap::generate_session_id);
+        runtime.note_tracked_control_pane(tmux_pane_id);
+        runtime.set_tracked_expected_session(session_id);
         if let Some(claim) = runtime.begin_pane_bootstrap(tmux_pane_id, session_id) {
             let mut locked = model.lock();
             locked.register_session_id(claim.session_id);
