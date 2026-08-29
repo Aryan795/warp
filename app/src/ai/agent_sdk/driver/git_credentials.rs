@@ -1016,7 +1016,8 @@ fn ipv6_address_is_public(address: Ipv6Addr) -> bool {
     }
     let segments = address.segments();
     (segments[0] & 0xe000) == 0x2000
-        && !(segments[0] == 0x2001 && segments[1] <= 0x01ff)
+        && !(segments[0] == 0x2001
+            && (segments[1] <= 0x01ff || segments[1] == 0x0db8))
         && segments[0] != 0x2002
         && !(segments[0] == 0x3fff && segments[1] & 0xf000 == 0)
 }
