@@ -407,6 +407,9 @@ pub(crate) fn prepare_repository_credentials(repositories: &[SourceRepo]) -> Res
         .write()
         .map_err(|_| anyhow::anyhow!("Task repository credential state is unavailable"))?;
     bindings.clear();
+    if credentials.is_empty() {
+        return Ok(());
+    }
 
     let has_self_hosted_gitlab = credentials.iter().any(is_self_hosted_gitlab_credential);
     for repository in repositories {
@@ -738,14 +741,15 @@ pub(crate) fn configure_repository_credentials(
     repository: &SourceRepo,
 ) -> Result<()> {
     let credentials = task_credentials_snapshot()?;
-    let credential = binding_credential_for_repository(&credentials, repository)?;
-    let (name, email) = identity_of(credential.as_ref());
-    run_repository_git_config(repository_dir, "user.name", &name)?;
-    run_repository_git_config(repository_dir, "user.email", &email)?;
-
-    let Some(credential) = credential.filter(is_gitlab_credential) else {
+    let Some(credential) = binding_credential_for_repository(&credentials, repository)? else {
         return Ok(());
     };
+    let (name, email) = identity_of(Some(&credential));
+    run_repository_git_config(repository_dir, "user.name", &name)?;
+    run_repository_git_config(repository_dir, "user.email", &email)?;
+    if !is_gitlab_credential(&credential) {
+        return Ok(());
+    }
     let config_dir = repository_glab_config_dir(repository_dir)?;
     write_glab_config_for_credential(&credential, &config_dir)?;
     run_repository_git_config(
