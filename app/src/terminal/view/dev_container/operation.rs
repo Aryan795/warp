@@ -6,6 +6,8 @@ use uuid::Uuid;
 use warpui::{Entity, ModelContext};
 
 use super::registry::DevContainerBuildKey;
+#[cfg(unix)]
+use crate::terminal::local_tty::ProcessGroupCancel;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DevContainerBuildPhase {
@@ -50,6 +52,17 @@ struct DevContainerBuildCancelState {
 #[derive(Clone)]
 pub(crate) struct DevContainerBuildCancel {
     inner: Arc<Mutex<DevContainerBuildCancelState>>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupCancel for DevContainerBuildCancel {
+    fn register_process_group(&self, id: u32) -> bool {
+        DevContainerBuildCancel::register_process_group(self, id)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        DevContainerBuildCancel::is_cancelled(self)
+    }
 }
 
 impl DevContainerBuildCancel {

@@ -375,3 +375,83 @@ fn dev_container_rm_args_remove_the_given_container_path() {
         ]
     );
 }
+
+struct StagingCancel {
+    inner: parking_lot::Mutex<(bool, Option<u32>)>,
+}
+
+impl StagingCancel {
+    fn new() -> Self {
+        Self {
+            inner: parking_lot::Mutex::new((false, None)),
+        }
+    }
+
+    fn process_group_id(&self) -> Option<u32> {
+        self.inner.lock().1
+    }
+
+    fn cancel_and_take_process_group(&self) -> Option<u32> {
+        let mut inner = self.inner.lock();
+        inner.0 = true;
+        inner.1.take()
+    }
+}
+
+impl ProcessGroupCancel for StagingCancel {
+    fn register_process_group(&self, id: u32) -> bool {
+        let mut inner = self.inner.lock();
+        if inner.0 {
+            return false;
+        }
+        inner.1 = Some(id);
+        true
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.inner.lock().0
+    }
+}
+
+#[test]
+fn close_during_staging_cancels_in_flight_docker_command() {
+    use std::sync::Arc;
+
+    use instant::Instant;
+
+    let cancel = Arc::new(StagingCancel::new());
+    let started = Instant::now();
+    futures_lite::future::block_on(async {
+        let cancel_for_cmd = cancel.clone();
+        let args = [
+            OsString::from("-c"),
+            OsString::from("import time; time.sleep(30)"),
+        ];
+        let cmd_fut = run_dev_container_docker_output(
+            Path::new("python3"),
+            &args,
+            Some(cancel_for_cmd.as_ref()),
+        );
+        let kill_fut = async {
+            loop {
+                if cancel.process_group_id().is_some() {
+                    break;
+                }
+                futures_lite::future::yield_now().await;
+            }
+            if let Some(process_group_id) = cancel.cancel_and_take_process_group() {
+                terminate_staging_process_group(process_group_id);
+            }
+        };
+        let (result, _) = futures::join!(cmd_fut, kill_fut);
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "close during staging must interrupt in-flight command: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            result.is_err() || result.is_ok_and(|output| !output.status.success()),
+            "cancelled staging command must not succeed"
+        );
+    });
+}

@@ -670,13 +670,28 @@ impl TerminalView {
                     // this closure runs on the main thread, and blocking it for that long
                     // right after `devcontainer up` would freeze the UI.
                     #[cfg(unix)]
-                    let staging_future = crate::terminal::local_tty::prepare_dev_container(
-                        docker_path.clone(),
-                        container_id.clone(),
-                        remote_user.clone(),
-                        sandbox_id.clone(),
-                        session_id,
-                    )
+                    let staging_future = {
+                        let cancel = me.dev_container_build.as_ref().map(|operation| {
+                            operation.read(ctx, |operation, _| operation.cancel_handle())
+                        });
+                        let docker_path = docker_path.clone();
+                        let container_id = container_id.clone();
+                        let remote_user = remote_user.clone();
+                        let sandbox_id = sandbox_id.clone();
+                        async move {
+                            crate::terminal::local_tty::prepare_dev_container(
+                                docker_path,
+                                container_id,
+                                remote_user,
+                                sandbox_id,
+                                session_id,
+                                cancel.as_ref().map(|cancel| {
+                                    cancel as &dyn crate::terminal::local_tty::ProcessGroupCancel
+                                }),
+                            )
+                            .await
+                        }
+                    }
                     .boxed();
                     #[cfg(not(unix))]
                     let staging_future = futures::future::ready(Err(anyhow::Error::msg(
