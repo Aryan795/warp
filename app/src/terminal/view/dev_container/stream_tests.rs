@@ -89,9 +89,8 @@ fn drain_marks_stdout_oversized_past_one_mib() {
 
 #[test]
 fn drain_reaches_failed_without_waiting_for_descendant_holding_pipes() {
-    use std::time::Instant;
-
     use command::r#async::Command;
+    use instant::Instant;
 
     block_on(async {
         let mut command = Command::new_with_process_group("python3");
