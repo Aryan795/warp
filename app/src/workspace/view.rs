@@ -12857,18 +12857,19 @@ impl Workspace {
                 runtime.start_app_bind_deadline();
             }
         }
-        let (presentation_window, root) = crate::root_view::open_new_with_workspace_source(
-            crate::root_view::NewWorkspaceSource::Session {
-                options: Box::new(NewTerminalOptions {
-                    tmux_presentation: true,
-                    tmux_gateway_window: Some(gateway_window),
-                    tmux_instance_id: instance_id,
-                    hide_homepage: true,
-                    ..Default::default()
-                }),
-            },
-            ctx,
-        );
+        let (presentation_window, root) =
+            crate::root_view::open_new_with_workspace_source_without_activating(
+                crate::root_view::NewWorkspaceSource::Session {
+                    options: Box::new(NewTerminalOptions {
+                        tmux_presentation: true,
+                        tmux_gateway_window: Some(gateway_window),
+                        tmux_instance_id: instance_id,
+                        hide_homepage: true,
+                        ..Default::default()
+                    }),
+                },
+                ctx,
+            );
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         {
             use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
@@ -13193,6 +13194,7 @@ impl Workspace {
         }
     }
 
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
     fn ensure_tmux_window_tab(&mut self, window_id: &str, ctx: &mut ViewContext<Self>) {
         if self
             .tabs
@@ -13209,27 +13211,18 @@ impl Workspace {
             unbound.tmux_window_id = Some(window_id.to_owned());
             return;
         }
+        let runtime = self.tmux_runtime(ctx.window_id());
+        let tmux_gateway_window = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.gateway_window());
+        let tmux_instance_id = runtime.as_ref().map(|runtime| runtime.id().as_u64());
         self.add_tab_with_pane_layout(
-            PanesLayout::SingleTerminal(Box::new({
-                #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-                let runtime = self.tmux_runtime(ctx.window_id());
-                #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-                let tmux_gateway_window = runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.gateway_window());
-                #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-                let tmux_instance_id = runtime.as_ref().map(|runtime| runtime.id().as_u64());
-                #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
-                let tmux_gateway_window = None;
-                #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
-                let tmux_instance_id = None;
-                NewTerminalOptions {
-                    tmux_presentation: true,
-                    tmux_gateway_window,
-                    tmux_instance_id,
-                    hide_homepage: true,
-                    ..Default::default()
-                }
+            PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
+                tmux_presentation: true,
+                tmux_gateway_window,
+                tmux_instance_id,
+                hide_homepage: true,
+                ..Default::default()
             })),
             Arc::new(HashMap::new()),
             None,
@@ -13240,6 +13233,7 @@ impl Workspace {
         }
     }
 
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
     fn apply_tmux_layout(&mut self, window_id: &str, layout: &str, ctx: &mut ViewContext<Self>) {
         self.ensure_tmux_window_tab(window_id, ctx);
         let Some(parsed) = warp_terminal::tmux::parse_window_layout(layout) else {
@@ -13366,17 +13360,12 @@ impl Workspace {
         let gateway = runtime.gateway_window();
         let presentation = runtime.presentation_window().or(Some(ctx.window_id()));
         runtime.mark_presentation_ready();
-        if let Some(presentation) = presentation {
-            ctx.windows().show_window_and_focus_app(presentation);
-        }
-        if let Some(gateway) = gateway {
-            ctx.windows().hide_window(gateway);
-        }
+        self.activate_tmux_presentation_window(presentation, gateway, ctx);
     }
 
     #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
     fn complete_tmux_presentation_open(
-        &self,
+        &mut self,
         instance_id: Option<u64>,
         gateway_window: WindowId,
         ctx: &mut ViewContext<Self>,
@@ -13386,11 +13375,38 @@ impl Workspace {
             && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
         {
             runtime.mark_presentation_ready();
-            if let Some(presentation) = runtime.presentation_window() {
-                ctx.windows().show_window_and_focus_app(presentation);
-            }
+            self.activate_tmux_presentation_window(
+                runtime.presentation_window(),
+                Some(gateway_window),
+                ctx,
+            );
+            return;
         }
         ctx.windows().hide_window(gateway_window);
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn activate_tmux_presentation_window(
+        &mut self,
+        presentation: Option<WindowId>,
+        gateway: Option<WindowId>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(presentation) = presentation {
+            ctx.windows().show_window_and_focus_app(presentation);
+            if presentation == ctx.window_id() {
+                self.focus_active_tab(ctx);
+            } else if let Some(workspace) =
+                crate::workspace::WorkspaceRegistry::as_ref(ctx).get(presentation, ctx)
+            {
+                workspace.update(ctx, |workspace, ctx| {
+                    workspace.focus_active_tab(ctx);
+                });
+            }
+        }
+        if let Some(gateway) = gateway {
+            ctx.windows().hide_window(gateway);
+        }
     }
 
     #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
@@ -13428,11 +13444,6 @@ impl Workspace {
         if runtime.app_bind_deadline_elapsed(instant::Instant::now()) {
             self.fail_tmux_presentation(ctx);
         }
-    }
-
-    #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
-    fn maybe_complete_tmux_presentation(&mut self, ctx: &mut ViewContext<Self>) {
-        let _ = ctx;
     }
 
     #[cfg(test)]
@@ -13526,29 +13537,23 @@ impl Workspace {
         (window_id, pane_id)
     }
 
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
     fn apply_tmux_command_end(
         &mut self,
         payload: &[String],
         capture_pane: Option<&str>,
         ctx: &mut ViewContext<Self>,
     ) {
-        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+        if let Some(pane_id) = capture_pane
+            && let Some(runtime) = self.tmux_runtime(ctx.window_id())
         {
-            if let Some(pane_id) = capture_pane
-                && let Some(runtime) = self.tmux_runtime(ctx.window_id())
-            {
-                let bytes = payload.join("\n").into_bytes();
-                if !runtime.deliver_output(
-                    &crate::terminal::tmux::parser::PaneId::from(pane_id),
-                    &bytes,
-                ) {
-                    self.fail_tmux_presentation(ctx);
-                }
+            let bytes = payload.join("\n").into_bytes();
+            if !runtime.deliver_output(
+                &crate::terminal::tmux::parser::PaneId::from(pane_id),
+                &bytes,
+            ) {
+                self.fail_tmux_presentation(ctx);
             }
-        }
-        #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
-        {
-            let _ = (payload, capture_pane, ctx);
         }
     }
 

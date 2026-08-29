@@ -262,6 +262,7 @@ pub(crate) struct TmuxPresentationBinding {
     is_presentation: bool,
     pane_id: Option<String>,
     split_target_pane: Option<String>,
+    #[cfg(all(unix, feature = "local_tty"))]
     instance_id: Option<u64>,
 }
 
@@ -4078,6 +4079,7 @@ impl PaneGroup {
             is_presentation: model.is_tmux_presentation(),
             pane_id: model.tmux_pane_id().map(str::to_owned),
             split_target_pane: model.tmux_split_target_pane().map(str::to_owned),
+            #[cfg(all(unix, feature = "local_tty"))]
             instance_id: model.tmux_instance_id(),
         })
     }
@@ -4120,6 +4122,7 @@ impl PaneGroup {
             .is_some_and(|binding| binding.is_tmux)
     }
 
+    #[cfg(all(unix, feature = "local_tty"))]
     fn write_tmux_command(
         &self,
         bytes: Vec<u8>,

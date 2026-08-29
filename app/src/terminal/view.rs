@@ -8471,7 +8471,7 @@ impl TerminalView {
     }
 
     pub fn is_input_box_visible(&self, model: &TerminalModel, app: &AppContext) -> bool {
-        if model.is_read_only() {
+        if model.is_read_only() || model.is_tmux_presentation() {
             return false;
         }
         // Warp's own headless TUI (`warp_tui`) is itself an agent surface, so
@@ -9325,7 +9325,7 @@ impl TerminalView {
     /// Receiving the warpui::Event::KeyDown event from a child element.
     /// Generally, this should be control characters rather than printable characters.
     fn keydown_on_terminal(&mut self, characters: &str, ctx: &mut ViewContext<Self>) {
-        if self.is_long_running() {
+        if self.is_long_running() || self.model.lock().is_tmux_presentation() {
             self.highlighted_link.invalidate();
             self.report_possible_typeahead(characters);
             self.write_user_bytes_to_pty(characters.as_bytes().to_vec(), ctx);
@@ -9345,6 +9345,9 @@ impl TerminalView {
     fn should_write_typed_chars_to_pty(&self, ctx: &mut ViewContext<Self>) -> bool {
         // Lock the model once and hold it throughout the function
         let model = self.model.lock();
+        if model.is_tmux_presentation() {
+            return true;
+        }
 
         // If the active block hasn't started yet, we don't want to write to the pty.
         // Note that we check block started and NOT block.is_long_running(), because
@@ -21371,6 +21374,7 @@ impl TerminalView {
             let block_list = model.block_list();
 
             let has_bootstrapped = model.block_list().is_bootstrapping_precmd_done();
+            let is_tmux_presentation = model.is_tmux_presentation();
 
             let has_active_user_terminal_command = block_list.active_block().is_active_and_long_running()
                 && !block_list.active_block().is_agent_in_control()
@@ -21405,7 +21409,9 @@ impl TerminalView {
                 && (are_blocks_selected || is_text_selected)
                 && selection_holds_focus;
 
-            has_active_user_terminal_command || has_block_or_text_selection_in_shell_mode
+            has_active_user_terminal_command
+                || has_block_or_text_selection_in_shell_mode
+                || is_tmux_presentation
         };
         let blocked_cli_subagent_view = {
             let model = self.model.lock();
