@@ -15438,9 +15438,9 @@ impl TerminalView {
                 if let Some(id) = instance_id
                     && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
                 {
-                    runtime.note_shell_type(shell_type);
-                    let _ = runtime.on_init_shell(&pane_id, session_id);
+                    let _ = runtime.note_early_init_shell(&pane_id, session_id, shell_type);
                     self.flush_pending_tmux_silent_bootstrap(&runtime, ctx);
+                    self.flush_queued_tmux_pane_bootstrap(shell_type, ctx);
                 }
             }
             #[cfg(feature = "remote_tty")]

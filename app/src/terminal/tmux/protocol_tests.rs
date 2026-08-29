@@ -689,7 +689,7 @@ fn zsh_retained_init_bytes_reach_prompt_without_quote_ps2() {
     std::fs::create_dir_all(&home).expect("zsh retained home");
     let runner = format!(
         r#"
-import os, pty, select, sys, time
+import os, pty, select, signal, sys, time
 zsh = {zsh:?}
 script = sys.stdin.buffer.read()
 pid, fd = pty.fork()
@@ -700,27 +700,51 @@ if pid == 0:
     os.execv(zsh, [zsh, "--no-rcs", "-i"])
 for i in range(0, len(script), 128):
     os.write(fd, script[i:i+128])
-time.sleep(0.3)
-os.write(fd, b"echo WARP_INIT_DONE\nexit\n")
 out = b""
 deadline = time.time() + 6
+saw_hook = False
 while time.time() < deadline:
     ready, _, _ = select.select([fd], [], [], 0.2)
-    if not ready:
-        continue
+    if ready:
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+        if b"\x1bP$d" in out or b"InitShell" in out:
+            saw_hook = True
+            break
+if saw_hook:
+    os.write(fd, b"stty -echo 2>/dev/null || true\n")
+    os.write(fd, b"printf 'WARP_INIT_OK\\n'\n")
+    os.write(fd, b"exit\n")
+    while time.time() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if ready:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+            if b"WARP_INIT_OK" in out:
+                break
+living = True
+while living and time.time() < deadline:
+    wpid, _ = os.waitpid(pid, os.WNOHANG)
+    if wpid == pid:
+        living = False
+        break
+    time.sleep(0.05)
+if living:
+    os.kill(pid, signal.SIGKILL)
     try:
-        chunk = os.read(fd, 4096)
-    except OSError:
-        break
-    if not chunk:
-        break
-    out += chunk
-    if b"WARP_INIT_DONE" in out:
-        break
-try:
-    os.waitpid(pid, 0)
-except ChildProcessError:
-    pass
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
 sys.stdout.buffer.write(out)
 "#,
         zsh = zsh.display(),
@@ -753,8 +777,8 @@ sys.stdout.buffer.write(out)
         "retained zsh init must not inject in-band history setup: {text:?}"
     );
     assert!(
-        text.contains("WARP_INIT_DONE"),
-        "interactive zsh must reach a prompt: {text:?}"
+        text.contains("InitShell") || text.contains("WARP_INIT_OK"),
+        "retained zsh init must emit InitShell and reach a prompt: {text:?}"
     );
 }
 

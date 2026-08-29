@@ -12917,7 +12917,12 @@ impl Workspace {
             let presentation = runtime.presentation_window();
             let gateway = runtime.gateway_window();
             let bound_id = runtime.id().as_u64();
-            if let Some(presentation) = presentation {
+            if let Some(gateway) = gateway {
+                ctx.windows().show_window_and_focus_app(gateway);
+            }
+            if let Some(presentation) =
+                presentation.filter(|id| *id != current_window || gateway.is_some())
+            {
                 let windows: Vec<_> = crate::workspace::WorkspaceRegistry::as_ref(ctx)
                     .all_workspaces(ctx)
                     .into_iter()
@@ -12928,9 +12933,6 @@ impl Workspace {
                         ctx.close_window();
                     });
                 }
-            }
-            if let Some(gateway) = gateway.filter(|gateway| *gateway != current_window) {
-                ctx.windows().show_window_and_focus_app(gateway);
             }
             runtime.unregister();
             self.clear_gateway_tmux_instance_id(bound_id, gateway, ctx);
@@ -13380,9 +13382,7 @@ impl Workspace {
                 Some(gateway_window),
                 ctx,
             );
-            return;
         }
-        ctx.windows().hide_window(gateway_window);
     }
 
     #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
@@ -13392,19 +13392,20 @@ impl Workspace {
         gateway: Option<WindowId>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if let Some(presentation) = presentation {
-            ctx.windows().show_window_and_focus_app(presentation);
-            if presentation == ctx.window_id() {
-                self.focus_active_tab(ctx);
-            } else if let Some(workspace) =
-                crate::workspace::WorkspaceRegistry::as_ref(ctx).get(presentation, ctx)
-            {
-                workspace.update(ctx, |workspace, ctx| {
-                    workspace.focus_active_tab(ctx);
-                });
-            }
+        let Some(presentation) = presentation else {
+            return;
+        };
+        ctx.windows().show_window_and_focus_app(presentation);
+        if presentation == ctx.window_id() {
+            self.focus_active_tab(ctx);
+        } else if let Some(workspace) =
+            crate::workspace::WorkspaceRegistry::as_ref(ctx).get(presentation, ctx)
+        {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.focus_active_tab(ctx);
+            });
         }
-        if let Some(gateway) = gateway {
+        if let Some(gateway) = gateway.filter(|gateway| *gateway != presentation) {
             ctx.windows().hide_window(gateway);
         }
     }
