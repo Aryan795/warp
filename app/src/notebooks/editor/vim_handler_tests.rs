@@ -27,7 +27,7 @@ fn prepare_notebook(editor: &ViewHandle<RichTextEditorView>, markdown: &str, app
         view.set_interaction_state(InteractionState::Editable, ctx);
         view.reset_with_markdown(markdown, ctx);
         view.model.update(ctx, |model, ctx| {
-            model.vim_jump_to_first_line(ctx);
+            vim::handler::jump_to_first_line(model, false, ctx);
         });
     });
 }
@@ -151,15 +151,15 @@ fn notebook_vim_charwise_delete_yank_change() {
         prepare_notebook(&editor, "hello world", &mut app);
 
         vim_type(&editor, "dw", &mut app);
-        assert_eq!(markdown(&editor, &app), " world");
+        assert_eq!(markdown(&editor, &app), "world");
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
         let yanked = unnamed_register(&mut app).expect("dw yanks the deleted word");
-        assert_eq!(yanked.text, "hello");
+        assert_eq!(yanked.text, "hello ");
         assert_eq!(yanked.motion_type, MotionType::Charwise);
 
         vim_type(&editor, "yw", &mut app);
         vim_type(&editor, "P", &mut app);
-        assert_eq!(markdown(&editor, &app), " world world");
+        assert_eq!(markdown(&editor, &app), "worldworld");
 
         prepare_notebook(&editor, "hello world", &mut app);
         vim_type(&editor, "cw", &mut app);

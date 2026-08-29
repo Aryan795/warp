@@ -5,12 +5,15 @@ use string_offset::CharOffset;
 use crate::find_char::vim_find_char_on_line;
 use crate::paragraph_iterator::{find_next_paragraph_end, find_previous_paragraph_start};
 use crate::vim::{
-    CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion, InsertPosition,
-    LineMotion, ModeTransition, MotionType, TextObjectInclusion, TextObjectType, VimMode,
-    VimMotion, VimOperand, VimOperator, VimTextObject, WordMotion,
+    BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
+    InsertPosition, LineMotion, ModeTransition, MotionType, TextObjectInclusion, TextObjectType,
+    VimMode, VimMotion, VimOperand, VimOperator, VimTextObject, WordMotion,
 };
 use crate::word_iterator::vim_word_iterator_from_offset;
-use crate::{vim_a_word, vim_inner_word};
+use crate::{
+    vim_a_block, vim_a_paragraph, vim_a_quote, vim_a_word, vim_find_matching_bracket,
+    vim_inner_block, vim_inner_paragraph, vim_inner_quote, vim_inner_word,
+};
 
 /// Text yanked by an operator, including whether it should paste linewise.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -131,12 +134,10 @@ impl VimSnapshot {
     fn point(&self, offset: CharOffset) -> (u32, u32) {
         let mut row = 1u32;
         let mut col = 0u32;
-        let target = offset
-            .as_usize()
-            .min(self.chars.len().saturating_sub(1).max(1));
+        let target = offset.as_usize();
         for (i, c) in self.chars.iter().enumerate().skip(1) {
             if i >= target {
-                break;
+                return (row, col);
             }
             if *c == '\n' {
                 row += 1;
@@ -151,15 +152,13 @@ impl VimSnapshot {
     fn offset_at(&self, row: u32, col: u32) -> CharOffset {
         let mut cur_row = 1u32;
         let mut cur_col = 0u32;
-        let mut last = CharOffset::from(1);
         for (i, c) in self.chars.iter().enumerate().skip(1) {
-            last = CharOffset::from(i);
             if cur_row == row && cur_col == col {
-                return last;
+                return CharOffset::from(i);
             }
             if *c == '\n' {
                 if cur_row == row {
-                    return last;
+                    return CharOffset::from(i);
                 }
                 cur_row += 1;
                 cur_col = 0;
@@ -167,7 +166,7 @@ impl VimSnapshot {
                 cur_col += 1;
             }
         }
-        last
+        CharOffset::from(self.chars.len())
     }
 
     fn line_len(&self, row: u32) -> u32 {
@@ -259,17 +258,32 @@ impl VimSnapshot {
         }
     }
 
-    fn extend_linewise(&mut self, include_newline: bool) {
-        let max = self.max_offset();
+    fn extend_linewise(&mut self, include_newline: bool, consume_preceding_at_eof: bool) {
+        let insertion_end = CharOffset::from(self.chars.len());
+        let ends_with_newline = self.plain_text().ends_with('\n');
         let updates: Vec<_> = self
             .carets
             .iter()
             .map(|caret| {
-                let start = self.line_start(caret.head.min(caret.tail));
+                let mut start = self.line_start(caret.head.min(caret.tail));
                 let end_pos = caret.head.max(caret.tail);
                 let mut end = self.line_end(end_pos);
-                if include_newline && end < max {
+                if include_newline && end < insertion_end {
                     end += 1;
+                }
+                if consume_preceding_at_eof
+                    && include_newline
+                    && end >= insertion_end
+                    && start.as_usize() > 1
+                {
+                    start = CharOffset::from(start.as_usize() - 1);
+                }
+                if include_newline
+                    && ends_with_newline
+                    && start == insertion_end
+                    && end == insertion_end
+                {
+                    start = CharOffset::from(insertion_end.as_usize().saturating_sub(1).max(1));
                 }
                 (start, end)
             })
@@ -439,12 +453,18 @@ pub trait VimBufferOps {
                 if start > end {
                     std::mem::swap(&mut start, &mut end);
                 }
-                if end < max {
+                if end < max
+                    && (motion_type != MotionType::Linewise
+                        || snap.char_at(end).is_some_and(|c| c != '\n'))
+                {
                     end += 1;
                 }
                 if motion_type == MotionType::Linewise {
                     start = snap.line_start(start);
-                    end = snap.line_end(end);
+                    let (_, end_col) = snap.point(end);
+                    if end_col != 0 {
+                        end = snap.line_end(end);
+                    }
                     if include_newline && end < max {
                         end += 1;
                     }
@@ -462,9 +482,10 @@ pub trait VimBufferOps {
     fn clear_selections(&mut self, ctx: &mut Self::Ctx<'_>) {
         let mut snap = self.snapshot(ctx);
         if let Some(first) = snap.carets.first().copied() {
+            let start = first.head.min(first.tail);
             snap.carets = vec![VimCaret {
-                head: first.head,
-                tail: first.head,
+                head: start,
+                tail: start,
             }];
             self.set_selections(&snap.carets, ctx);
         }
@@ -557,7 +578,10 @@ pub trait VimBufferOps {
         match operand {
             VimOperand::Motion { motion, .. } => match motion {
                 VimMotion::Character(m) => move_char_snapshot(&mut snap, operand_count, m, true),
-                VimMotion::Word(m) => move_word_snapshot(&mut snap, operand_count, m, true),
+                VimMotion::Word(m) => {
+                    move_word_snapshot(&mut snap, operand_count, m, true);
+                    apply_word_operator_quirks(&mut snap, operand_count, m);
+                }
                 VimMotion::Line(m) => move_line_snapshot(&mut snap, operand_count, m, true),
                 VimMotion::FirstNonWhitespace(m) => {
                     move_first_nonwhitespace_snapshot(&mut snap, operand_count, m, true);
@@ -565,24 +589,32 @@ pub trait VimBufferOps {
                 VimMotion::Paragraph(direction) => {
                     move_paragraph_snapshot(&mut snap, operand_count, direction, true);
                 }
-                VimMotion::JumpToLastLine => jump_last_snapshot(&mut snap),
-                VimMotion::JumpToFirstLine => jump_first_snapshot(&mut snap),
+                VimMotion::JumpToLastLine => jump_last_snapshot(&mut snap, true),
+                VimMotion::JumpToFirstLine => jump_first_snapshot(&mut snap, true),
                 VimMotion::FindChar(m) => find_char_snapshot(&mut snap, operand_count, m, true),
                 VimMotion::JumpToLine(line_number) => {
                     let row = (*line_number).max(1).min(snap.max_row());
-                    snap.map_heads(|s, _| s.offset_at(row, 0), false);
+                    snap.map_heads(|s, _| s.offset_at(row, 0), true);
                 }
-                VimMotion::JumpToMatchingBracket | VimMotion::JumpToUnmatchedBracket(_) => {}
+                VimMotion::JumpToMatchingBracket => {
+                    jump_matching_bracket_snapshot(&mut snap, true, true);
+                }
+                VimMotion::JumpToUnmatchedBracket(bracket) => {
+                    jump_unmatched_bracket_snapshot(&mut snap, bracket, true);
+                }
             },
             VimOperand::Line => {
                 if operand_count > 1 {
                     move_vertical_snapshot(&mut snap, operand_count - 1, Direction::Forward, true);
                 }
-                snap.extend_linewise(operator.includes_trailing_newline());
+                snap.extend_linewise(
+                    operator.includes_trailing_newline(),
+                    *operator == VimOperator::Delete,
+                );
             }
             VimOperand::TextObject(object) => {
                 if self.supports_text_objects() {
-                    select_text_object_snapshot(&mut snap, object);
+                    select_text_object_snapshot(&mut snap, object, Some(operator));
                 }
             }
         }
@@ -591,7 +623,10 @@ pub trait VimBufferOps {
             ..
         } = operand
         {
-            snap.extend_linewise(operator.includes_trailing_newline());
+            snap.extend_linewise(
+                operator.includes_trailing_newline(),
+                *operator == VimOperator::Delete,
+            );
         }
         self.set_selections(&snap.carets, ctx);
     }
@@ -662,6 +697,51 @@ fn move_vertical_snapshot(snap: &mut VimSnapshot, count: u32, direction: Directi
         },
         keep,
     );
+}
+
+fn apply_word_operator_quirks(snap: &mut VimSnapshot, count: u32, motion: &WordMotion) {
+    let max = CharOffset::from(snap.chars.len());
+    let updates: Vec<_> = snap
+        .carets
+        .iter()
+        .map(|caret| {
+            let mut caret = *caret;
+            match motion.direction {
+                Direction::Forward => {
+                    if motion.bound == crate::vim::WordBound::End {
+                        if caret.head < max {
+                            caret.head += 1;
+                        }
+                    } else if motion.bound == crate::vim::WordBound::Start && count == 1 {
+                        let start = caret.tail.min(caret.head);
+                        let end = caret.tail.max(caret.head);
+                        let s = start.as_usize().max(1);
+                        let e = end.as_usize().min(snap.chars.len());
+                        if s < e
+                            && let Some(newline_at) =
+                                snap.chars[s..e].iter().position(|c| *c == '\n')
+                        {
+                            caret.head = CharOffset::from(s + newline_at);
+                        }
+                    }
+                }
+                Direction::Backward => {
+                    if motion.bound == crate::vim::WordBound::Start && count == 1 {
+                        let origin = caret.tail.max(caret.head);
+                        if snap.char_at(CharOffset::from(origin.as_usize().saturating_sub(1)))
+                            == Some('\n')
+                            && origin.as_usize() >= 2
+                            && snap.char_at(CharOffset::from(origin.as_usize() - 2)) != Some('\n')
+                        {
+                            caret.tail = CharOffset::from(origin.as_usize() - 1);
+                        }
+                    }
+                }
+            }
+            caret
+        })
+        .collect();
+    snap.carets = updates;
 }
 
 fn move_word_snapshot(snap: &mut VimSnapshot, count: u32, motion: &WordMotion, keep: bool) {
@@ -748,13 +828,86 @@ fn move_paragraph_snapshot(snap: &mut VimSnapshot, count: u32, direction: &Direc
     );
 }
 
-fn jump_first_snapshot(snap: &mut VimSnapshot) {
-    snap.map_heads(|_, _| CharOffset::from(1), false);
+fn jump_first_snapshot(snap: &mut VimSnapshot, keep: bool) {
+    snap.map_heads(|_, _| CharOffset::from(1), keep);
 }
 
-fn jump_last_snapshot(snap: &mut VimSnapshot) {
-    let max = snap.max_offset();
-    snap.map_heads(|_, _| max, false);
+fn jump_last_snapshot(snap: &mut VimSnapshot, keep: bool) {
+    if snap.plain_text().ends_with('\n') {
+        let empty_last_line = CharOffset::from(snap.chars.len());
+        snap.map_heads(|_, _| empty_last_line, keep);
+    } else {
+        let row = snap.max_row();
+        snap.map_heads(|s, _| s.first_nonwhitespace(s.offset_at(row, 0)), keep);
+    }
+}
+
+fn zero_based(offset: CharOffset) -> CharOffset {
+    CharOffset::from(offset.as_usize().saturating_sub(1))
+}
+
+fn one_based(offset: CharOffset) -> CharOffset {
+    CharOffset::from(offset.as_usize() + 1)
+}
+
+fn jump_matching_bracket_snapshot(snap: &mut VimSnapshot, keep: bool, include_match: bool) {
+    let text = snap.plain_text();
+    let insertion_end = CharOffset::from(snap.chars.len());
+    let updates: Vec<_> = snap
+        .carets
+        .iter()
+        .map(|caret| {
+            let origin = caret.head;
+            let (row, col) = snap.point(origin);
+            let line_len = snap.line_len(row);
+            let mut found = None;
+            for delta in 0..=line_len.saturating_sub(col) {
+                let offset = origin + delta as usize;
+                let Some(c) = snap.char_at(offset) else {
+                    break;
+                };
+                if c == '\n' {
+                    break;
+                }
+                if let Ok(bracket) = BracketChar::try_from(c)
+                    && let Some(matched) =
+                        vim_find_matching_bracket(text.as_str(), &bracket, zero_based(offset))
+                {
+                    found = Some(one_based(matched));
+                    break;
+                }
+            }
+            let Some(matched) = found else {
+                return *caret;
+            };
+            let start = matched.min(origin);
+            let mut end = matched.max(origin);
+            if include_match && end < insertion_end {
+                end += 1;
+            }
+            VimCaret {
+                head: if keep || include_match { end } else { matched },
+                tail: if keep || include_match {
+                    start
+                } else {
+                    matched
+                },
+            }
+        })
+        .collect();
+    snap.carets = updates;
+}
+
+fn jump_unmatched_bracket_snapshot(snap: &mut VimSnapshot, bracket: &BracketChar, keep: bool) {
+    let text = snap.plain_text();
+    snap.map_heads(
+        |_, head| {
+            vim_find_matching_bracket(text.as_str(), bracket, zero_based(head))
+                .map(one_based)
+                .unwrap_or(head)
+        },
+        keep,
+    );
 }
 
 fn find_char_snapshot(
@@ -778,22 +931,50 @@ fn find_char_snapshot(
     );
 }
 
-fn select_text_object_snapshot(snap: &mut VimSnapshot, object: &VimTextObject) {
+fn select_text_object_snapshot(
+    snap: &mut VimSnapshot,
+    object: &VimTextObject,
+    operator: Option<&VimOperator>,
+) {
     let text = snap.plain_text();
+    let preserve_leading_padding = matches!(operator, Some(VimOperator::Change));
     for caret in &mut snap.carets {
-        let zero = CharOffset::from(caret.head.as_usize().saturating_sub(1));
+        let zero = zero_based(caret.head);
         let range = match object.object_type {
             TextObjectType::Word(word_type) => match object.inclusion {
                 TextObjectInclusion::Inner => vim_inner_word(text.as_str(), zero, word_type),
                 TextObjectInclusion::Around => vim_a_word(text.as_str(), zero, word_type),
             },
-            _ => None,
+            TextObjectType::Quote(quote_type) => match object.inclusion {
+                TextObjectInclusion::Inner => vim_inner_quote(text.as_str(), zero, quote_type),
+                TextObjectInclusion::Around => vim_a_quote(text.as_str(), zero, quote_type),
+            },
+            TextObjectType::Block(bracket_type) => match object.inclusion {
+                TextObjectInclusion::Inner => {
+                    vim_inner_block(text.as_str(), zero, bracket_type, preserve_leading_padding)
+                }
+                TextObjectInclusion::Around => vim_a_block(text.as_str(), zero, bracket_type),
+            },
+            TextObjectType::Paragraph => match object.inclusion {
+                TextObjectInclusion::Inner => vim_inner_paragraph(text.as_str(), zero),
+                TextObjectInclusion::Around => vim_a_paragraph(text.as_str(), zero),
+            },
         };
         if let Some(range) = range {
-            caret.tail = CharOffset::from(range.start.as_usize() + 1);
-            caret.head = CharOffset::from(range.end.as_usize() + 1);
+            caret.tail = one_based(range.start);
+            caret.head = one_based(range.end);
         }
     }
+}
+
+fn apply_snapshot_motion<B: VimBufferOps>(
+    buffer: &mut B,
+    ctx: &mut B::Ctx<'_>,
+    f: impl FnOnce(&mut VimSnapshot),
+) {
+    let mut snap = buffer.snapshot(ctx);
+    f(&mut snap);
+    buffer.set_selections(&snap.carets, ctx);
 }
 
 /// Shared caret navigation used by view `VimHandler` impls.
@@ -801,85 +982,135 @@ pub fn move_char<B: VimBufferOps>(
     buffer: &mut B,
     count: u32,
     motion: &CharacterMotion,
+    keep_selection: bool,
     ctx: &mut B::Ctx<'_>,
 ) {
-    let mut snap = buffer.snapshot(ctx);
-    move_char_snapshot(&mut snap, count, motion, false);
-    buffer.set_selections(&snap.carets, ctx);
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        move_char_snapshot(snap, count, motion, keep_selection);
+    });
 }
 
 pub fn move_word<B: VimBufferOps>(
     buffer: &mut B,
     count: u32,
     motion: &WordMotion,
+    keep_selection: bool,
     ctx: &mut B::Ctx<'_>,
 ) {
-    let mut snap = buffer.snapshot(ctx);
-    move_word_snapshot(&mut snap, count, motion, false);
-    buffer.set_selections(&snap.carets, ctx);
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        move_word_snapshot(snap, count, motion, keep_selection);
+    });
 }
 
 pub fn move_line<B: VimBufferOps>(
     buffer: &mut B,
     count: u32,
     motion: &LineMotion,
+    keep_selection: bool,
     ctx: &mut B::Ctx<'_>,
 ) {
-    let mut snap = buffer.snapshot(ctx);
-    move_line_snapshot(&mut snap, count, motion, false);
-    buffer.set_selections(&snap.carets, ctx);
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        move_line_snapshot(snap, count, motion, keep_selection);
+    });
 }
 
 pub fn move_first_nonwhitespace<B: VimBufferOps>(
     buffer: &mut B,
     count: u32,
     motion: &FirstNonWhitespaceMotion,
+    keep_selection: bool,
     ctx: &mut B::Ctx<'_>,
 ) {
-    let mut snap = buffer.snapshot(ctx);
-    move_first_nonwhitespace_snapshot(&mut snap, count, motion, false);
-    buffer.set_selections(&snap.carets, ctx);
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        move_first_nonwhitespace_snapshot(snap, count, motion, keep_selection);
+    });
 }
 
 pub fn move_paragraph<B: VimBufferOps>(
     buffer: &mut B,
     count: u32,
     direction: &Direction,
+    keep_selection: bool,
     ctx: &mut B::Ctx<'_>,
 ) {
-    let mut snap = buffer.snapshot(ctx);
-    move_paragraph_snapshot(&mut snap, count, direction, false);
-    buffer.set_selections(&snap.carets, ctx);
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        move_paragraph_snapshot(snap, count, direction, keep_selection);
+    });
 }
 
 pub fn find_char<B: VimBufferOps>(
     buffer: &mut B,
     occurrence_count: u32,
     motion: &FindCharMotion,
+    keep_selection: bool,
     ctx: &mut B::Ctx<'_>,
 ) {
-    let mut snap = buffer.snapshot(ctx);
-    find_char_snapshot(&mut snap, occurrence_count, motion, false);
-    buffer.set_selections(&snap.carets, ctx);
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        find_char_snapshot(snap, occurrence_count, motion, keep_selection);
+    });
 }
 
-pub fn jump_to_first_line<B: VimBufferOps>(buffer: &mut B, ctx: &mut B::Ctx<'_>) {
-    let mut snap = buffer.snapshot(ctx);
-    jump_first_snapshot(&mut snap);
-    buffer.set_selections(&snap.carets, ctx);
+pub fn jump_to_first_line<B: VimBufferOps>(
+    buffer: &mut B,
+    keep_selection: bool,
+    ctx: &mut B::Ctx<'_>,
+) {
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        jump_first_snapshot(snap, keep_selection);
+    });
 }
 
-pub fn jump_to_last_line<B: VimBufferOps>(buffer: &mut B, ctx: &mut B::Ctx<'_>) {
-    let mut snap = buffer.snapshot(ctx);
-    jump_last_snapshot(&mut snap);
-    buffer.set_selections(&snap.carets, ctx);
+pub fn jump_to_last_line<B: VimBufferOps>(
+    buffer: &mut B,
+    keep_selection: bool,
+    ctx: &mut B::Ctx<'_>,
+) {
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        jump_last_snapshot(snap, keep_selection);
+    });
 }
 
-pub fn jump_to_line<B: VimBufferOps>(buffer: &mut B, line_number: u32, ctx: &mut B::Ctx<'_>) {
-    let mut snap = buffer.snapshot(ctx);
-    let row = line_number.max(1).min(snap.max_row());
-    snap.map_heads(|s, _| s.offset_at(row, 0), false);
-    buffer.set_selections(&snap.carets, ctx);
+pub fn jump_to_line<B: VimBufferOps>(
+    buffer: &mut B,
+    line_number: u32,
+    keep_selection: bool,
+    ctx: &mut B::Ctx<'_>,
+) {
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        let row = line_number.max(1).min(snap.max_row());
+        snap.map_heads(|s, _| s.offset_at(row, 0), keep_selection);
+    });
+}
+
+pub fn jump_to_matching_bracket<B: VimBufferOps>(
+    buffer: &mut B,
+    keep_selection: bool,
+    ctx: &mut B::Ctx<'_>,
+) {
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        jump_matching_bracket_snapshot(snap, keep_selection, false);
+    });
+}
+
+pub fn jump_to_unmatched_bracket<B: VimBufferOps>(
+    buffer: &mut B,
+    bracket: &BracketChar,
+    keep_selection: bool,
+    ctx: &mut B::Ctx<'_>,
+) {
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        jump_unmatched_bracket_snapshot(snap, bracket, keep_selection);
+    });
+}
+
+pub fn select_text_object<B: VimBufferOps>(
+    buffer: &mut B,
+    object: &VimTextObject,
+    ctx: &mut B::Ctx<'_>,
+) {
+    apply_snapshot_motion(buffer, ctx, |snap| {
+        select_text_object_snapshot(snap, object, None);
+    });
 }
 
 /// Apply a normal-mode operator (`d`/`c`/`y`/case/comment/indent) to `operand`.

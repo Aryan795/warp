@@ -2193,13 +2193,18 @@ impl View for CodeEditorView {
         // Align Vim visual tails with the render state's selection coordinate system.
         // The render model stores selection head/tail as (buffer_offset - 1), so apply the same
         // transformation to the visual tails to avoid off-by-one mismatches when highlighting.
-        let vim_visual_tails = self
-            .model
-            .as_ref(app)
-            .vim_visual_tails()
-            .iter()
-            .map(|t| t.saturating_sub(&CharOffset::from(1)))
-            .collect::<Vec<_>>();
+        let vim_visual_tails = if matches!(self.vim_mode(app), Some(VimMode::Visual(_))) {
+            self.model
+                .as_ref(app)
+                .buffer_selection_model()
+                .as_ref(app)
+                .selection_offsets()
+                .iter()
+                .map(|selection| selection.tail.saturating_sub(&CharOffset::from(1)))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let editor_rich_content = RichTextElement::<Self>::new(
             render_state.clone(),
             self.self_handle.clone(),

@@ -2,11 +2,13 @@ use string_offset::CharOffset;
 
 use crate::handler::{
     CaseTransform, VimBufferOps, VimCaret, VimSnapshot, YankedText, apply_mode_change,
-    apply_operator, apply_visual_operator, apply_visual_paste, operand_motion_type,
+    apply_operator, apply_visual_operator, apply_visual_paste, jump_to_matching_bracket, move_char,
+    operand_motion_type,
 };
 use crate::vim::{
-    Direction, InsertPosition, ModeTransition, MotionType, TextObjectInclusion, TextObjectType,
-    VimMode, VimOperand, VimOperator, VimTextObject, WordBound, WordMotion, WordType,
+    CharacterMotion, Direction, InsertPosition, ModeTransition, MotionType, TextObjectInclusion,
+    TextObjectType, VimMode, VimOperand, VimOperator, VimTextObject, WordBound, WordMotion,
+    WordType,
 };
 
 struct FakeBuffer {
@@ -271,4 +273,57 @@ fn mode_change_applies_insert_exit_and_visual_tails() {
 #[test]
 fn case_transform_toggle_swaps_case() {
     assert_eq!(CaseTransform::Toggle.apply_to("AbC"), "aBc");
+}
+
+#[test]
+fn line_end_insert_appends_after_last_character() {
+    let mut buffer = FakeBuffer {
+        text: "hello".into(),
+        carets: vec![VimCaret {
+            head: CharOffset::from(1),
+            tail: CharOffset::from(1),
+        }],
+        ..FakeBuffer::default()
+    };
+    apply_mode_change(
+        &mut buffer,
+        &VimMode::Normal,
+        &ModeTransition {
+            mode: VimMode::Insert,
+            position: InsertPosition::LineEnd,
+        },
+        &mut (),
+    );
+    assert_eq!(buffer.carets[0].head, CharOffset::from(6));
+    buffer.insert_text("x", &mut ());
+    assert_eq!(buffer.text, "hellox");
+}
+
+#[test]
+fn visual_move_char_keeps_origin_tail() {
+    let mut buffer = FakeBuffer {
+        text: "hello".into(),
+        carets: vec![VimCaret {
+            head: CharOffset::from(1),
+            tail: CharOffset::from(1),
+        }],
+        ..FakeBuffer::default()
+    };
+    move_char(&mut buffer, 2, &CharacterMotion::Right, true, &mut ());
+    assert_eq!(buffer.carets[0].tail, CharOffset::from(1));
+    assert_eq!(buffer.carets[0].head, CharOffset::from(3));
+}
+
+#[test]
+fn matching_bracket_jump_lands_on_pair() {
+    let mut buffer = FakeBuffer {
+        text: "(ab)".into(),
+        carets: vec![VimCaret {
+            head: CharOffset::from(1),
+            tail: CharOffset::from(1),
+        }],
+        ..FakeBuffer::default()
+    };
+    jump_to_matching_bracket(&mut buffer, false, &mut ());
+    assert_eq!(buffer.carets[0].head, CharOffset::from(4));
 }

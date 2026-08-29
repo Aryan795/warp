@@ -111,7 +111,6 @@ pub struct NotebooksEditorModel {
     /// Context used to generate clickable file path links for notebooks.
     file_link_resolution_context: Option<FileLinkResolutionContext>,
     default_mermaid_display_mode: MarkdownDisplayMode,
-    vim_visual_tails: Vec<CharOffset>,
     #[allow(dead_code)]
     vim_selection_stash: Option<Vec1<SelectionOffsets>>,
 }
@@ -234,7 +233,6 @@ impl NotebooksEditorModel {
             resize_tx,
             file_link_resolution_context: None,
             default_mermaid_display_mode: MarkdownDisplayMode::Raw,
-            vim_visual_tails: Vec::new(),
             vim_selection_stash: None,
         }
     }

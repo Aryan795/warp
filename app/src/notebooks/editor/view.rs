@@ -2783,13 +2783,18 @@ impl View for RichTextEditorView {
             ..Default::default()
         };
 
-        let vim_visual_tails = self
-            .model
-            .as_ref(app)
-            .vim_visual_tails()
-            .iter()
-            .map(|t| t.saturating_sub(&CharOffset::from(1)))
-            .collect::<Vec<_>>();
+        let vim_visual_tails = if matches!(self.vim_mode(app), Some(VimMode::Visual(_))) {
+            self.model
+                .as_ref(app)
+                .buffer_selection_model()
+                .as_ref(app)
+                .selection_offsets()
+                .iter()
+                .map(|selection| selection.tail.saturating_sub(&CharOffset::from(1)))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let rich_text = RichTextElement::<Self>::new(
             render_state.clone(),
             self.self_handle.clone(),

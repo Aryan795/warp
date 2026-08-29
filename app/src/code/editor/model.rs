@@ -4330,60 +4330,6 @@ impl VimBufferOps for CodeEditorModel {
     fn smart_indent_on_linewise_change(&self, _operand: &VimOperand) -> bool {
         true
     }
-
-    fn select_for_operand(
-        &mut self,
-        operator: &VimOperator,
-        operand_count: u32,
-        operand: &VimOperand,
-        ctx: &mut Self::Ctx<'_>,
-    ) {
-        self.vim_select_for_operand(operator, operand_count, operand, ctx);
-    }
-
-    fn expand_visual_selection(
-        &mut self,
-        motion_type: MotionType,
-        include_newline: bool,
-        ctx: &mut Self::Ctx<'_>,
-    ) {
-        self.vim_visual_selection_range(motion_type, include_newline, ctx);
-    }
-
-    fn apply_insert_position(&mut self, position: &InsertPosition, ctx: &mut Self::Ctx<'_>) {
-        match position {
-            InsertPosition::AtCursor => {}
-            InsertPosition::AfterCursor => {
-                self.vim_move_horizontal_by_offset(1, &Direction::Forward, false, true, ctx);
-            }
-            InsertPosition::LineFirstNonWhitespace => {
-                self.vim_move_to_first_nonwhitespace(false, ctx);
-            }
-            InsertPosition::LineEnd => {
-                self.vim_move_to_line_bound(LineBound::End, false, ctx);
-            }
-            InsertPosition::LineAbove => {
-                self.vim_newline(true, ctx);
-            }
-            InsertPosition::LineBelow => {
-                self.vim_newline(false, ctx);
-            }
-        }
-    }
-
-    fn move_left_exiting_insert(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_move_horizontal_by_offset(1, &Direction::Backward, false, true, ctx);
-    }
-
-    fn set_visual_tails_to_heads(&mut self, ctx: &mut Self::Ctx<'_>) {
-        self.vim_set_visual_tail_to_selection_heads(ctx);
-    }
-
-    fn enforce_normal_mode_line_cap(&mut self, ctx: &mut Self::Ctx<'_>) {
-        if self.vim_needs_line_capping(ctx) {
-            self.vim_enforce_cursor_line_cap(ctx);
-        }
-    }
 }
 
 impl CoreEditorModel for CodeEditorModel {

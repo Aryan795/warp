@@ -2053,6 +2053,7 @@ impl VimHandler for EditorView {
         &mut self,
         character_count: u32,
         motion: &CharacterMotion,
+        _keep_selection: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         // Analogous to how right-arrow accepts an autosuggestion, do this for `l`.
@@ -2123,7 +2124,13 @@ impl VimHandler for EditorView {
         });
     }
 
-    fn navigate_word(&mut self, word_count: u32, motion: &WordMotion, ctx: &mut ViewContext<Self>) {
+    fn navigate_word(
+        &mut self,
+        word_count: u32,
+        motion: &WordMotion,
+        _keep_selection: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let WordMotion {
             direction,
             bound,
@@ -2137,7 +2144,13 @@ impl VimHandler for EditorView {
         }
     }
 
-    fn navigate_line(&mut self, line_count: u32, motion: &LineMotion, ctx: &mut ViewContext<Self>) {
+    fn navigate_line(
+        &mut self,
+        line_count: u32,
+        motion: &LineMotion,
+        _keep_selection: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
         match motion {
             LineMotion::Start => self.move_to_line_start(ctx),
             LineMotion::FirstNonWhitespace => {
@@ -2163,6 +2176,7 @@ impl VimHandler for EditorView {
         &mut self,
         count: u32,
         motion: &FirstNonWhitespaceMotion,
+        _keep_selection: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         self.change_selections(ctx, |editor_model, ctx| {
@@ -2173,7 +2187,7 @@ impl VimHandler for EditorView {
                     editor_model.move_down_by_offset(count - 1, ctx)
                 }
             };
-            editor_model.cursor_line_start_non_whitespace(false /* keep_selection */, ctx);
+            editor_model.cursor_line_start_non_whitespace(false, ctx);
         });
     }
 
@@ -2181,15 +2195,11 @@ impl VimHandler for EditorView {
         &mut self,
         occurrence_count: u32,
         motion: &FindCharMotion,
+        _keep_selection: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         self.change_selections(ctx, |editor_model, ctx| {
-            editor_model.vim_find_char(
-                false, /* keep_selection */
-                occurrence_count,
-                motion,
-                ctx,
-            );
+            editor_model.vim_find_char(false, occurrence_count, motion, ctx);
         });
     }
 
@@ -2197,6 +2207,7 @@ impl VimHandler for EditorView {
         &mut self,
         count: u32,
         direction: &Direction,
+        _keep_selection: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         self.change_selections(ctx, |editor_model, ctx| {
@@ -2502,18 +2513,23 @@ impl VimHandler for EditorView {
         ctx.emit(Event::ExCommand);
     }
 
-    fn jump_to_first_line(&mut self, ctx: &mut ViewContext<Self>) {
+    fn jump_to_first_line(&mut self, _keep_selection: bool, ctx: &mut ViewContext<Self>) {
         self.cursor_top(ctx);
     }
 
-    fn jump_to_last_line(&mut self, ctx: &mut ViewContext<Self>) {
+    fn jump_to_last_line(&mut self, _keep_selection: bool, ctx: &mut ViewContext<Self>) {
         self.change_selections(ctx, |editor_model, ctx| {
-            editor_model.move_to_buffer_end(false /* keep_selection */, ctx);
-            editor_model.cursor_line_start(false /* keep_selection */, ctx);
+            editor_model.move_to_buffer_end(false, ctx);
+            editor_model.cursor_line_start(false, ctx);
         });
     }
 
-    fn jump_to_line(&mut self, line_number: u32, ctx: &mut ViewContext<Self>) {
+    fn jump_to_line(
+        &mut self,
+        line_number: u32,
+        _keep_selection: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
         self.change_selections(ctx, |editor_model, ctx| {
             let max_row = editor_model.buffer(ctx).max_point().row;
             let row = line_number.saturating_sub(1).min(max_row);
@@ -2522,17 +2538,20 @@ impl VimHandler for EditorView {
         });
     }
 
-    fn jump_to_matching_bracket(&mut self, ctx: &mut ViewContext<Self>) {
+    fn jump_to_matching_bracket(&mut self, _keep_selection: bool, ctx: &mut ViewContext<Self>) {
         self.change_selections(ctx, |editor_model, ctx| {
-            editor_model.vim_move_cursor_to_matching_bracket(/* keep_selection */ false, ctx);
+            editor_model.vim_move_cursor_to_matching_bracket(false, ctx);
         });
     }
 
-    fn jump_to_unmatched_bracket(&mut self, bracket: &BracketChar, ctx: &mut ViewContext<Self>) {
+    fn jump_to_unmatched_bracket(
+        &mut self,
+        bracket: &BracketChar,
+        _keep_selection: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
         self.change_selections(ctx, |editor_model, ctx| {
-            editor_model.vim_move_cursor_to_unmatched_bracket(
-                bracket, /* keep_selection */ false, ctx,
-            );
+            editor_model.vim_move_cursor_to_unmatched_bracket(bracket, false, ctx);
         });
     }
 
