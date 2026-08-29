@@ -997,3 +997,55 @@ fn coalesced_stale_and_live_acks_complete_retry_once() {
     assert_eq!(runtime.bootstrap_script_count("%0"), 1);
     assert_eq!(runtime.take_pending_silent_bootstrap().len(), 1);
 }
+
+#[test]
+fn timeout_clears_accepted_init_shell_so_recovery_does_not_reuse_it() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(sid(1));
+    let first = runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
+    assert_eq!(runtime.on_init_shell("%0", sid(1)), Some(ShellType::Zsh));
+    let BootstrapTimeoutResult::Retry(retry) =
+        runtime.handle_bootstrap_timeout("%0", first.generation)
+    else {
+        panic!("expected retry");
+    };
+    assert!(matches!(
+        runtime.handle_bootstrap_timeout("%0", retry.generation),
+        BootstrapTimeoutResult::Failed
+    ));
+    let recovery = runtime
+        .begin_pane_bootstrap("%0", sid(9))
+        .expect("recover from failed");
+    assert_eq!(recovery.session_id, sid(9));
+    assert_ne!(recovery.session_id, sid(1));
+    assert!(runtime.early_init_session_id("%0").is_none());
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(1), ShellType::Zsh)
+            .is_none()
+    );
+    assert!(runtime.on_stage_complete("%0", sid(1)).is_none());
+    assert!(!runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.on_init_shell("%0", sid(9)), Some(ShellType::Zsh));
+    assert_eq!(
+        runtime.on_stage_complete("%0", sid(9)),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert!(runtime.on_stage_complete("%0", sid(1)).is_none());
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+}
+
+#[test]
+fn tracked_zsh_pane_owns_retained_init_not_in_band_staging() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    assert!(runtime.control_pane_owns_retained_init("%0"));
+    assert!(!runtime.control_pane_owns_retained_init("%1"));
+    runtime.note_shell_type(ShellType::Bash);
+    assert!(!runtime.control_pane_owns_retained_init("%0"));
+}

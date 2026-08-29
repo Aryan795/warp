@@ -718,6 +718,7 @@ impl TmuxRuntime {
         };
         inner.tracked_expected_session = None;
         inner.early_stage_complete.remove(pane_id);
+        inner.early_init_shell.remove(pane_id);
         if retried {
             inner.pane_bootstrap.insert(
                 pane_id.to_owned(),
@@ -823,6 +824,11 @@ impl TmuxRuntime {
 
     pub fn tracked_control_pane(&self) -> Option<String> {
         self.inner.lock().tracked_control_pane.clone()
+    }
+
+    pub fn control_pane_owns_retained_init(&self, pane_id: &str) -> bool {
+        self.tracked_control_pane().as_deref() == Some(pane_id)
+            && self.shell_type() == Some(ShellType::Zsh)
     }
 
     pub fn bootstrap_failed_client_event() -> TmuxClientEvent {

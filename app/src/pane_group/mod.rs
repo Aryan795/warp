@@ -4306,6 +4306,10 @@ impl PaneGroup {
             }
             return;
         }
+        if runtime.control_pane_owns_retained_init(tmux_pane_id) {
+            self.schedule_tmux_pane_bootstrap_timeout(&runtime, tmux_pane_id, ctx);
+            return;
+        }
         if let Some(session_id) = runtime.early_init_session_id(tmux_pane_id)
             && let Some(shell_type) = runtime.shell_type()
         {

@@ -854,6 +854,7 @@ __warp_silent_cleanup() {
   stty echo 2>/dev/null || true
 }
 setopt NO_BANG_HIST
+unsetopt HIST_FCNTL_LOCK 2>/dev/null || true
 trap '__warp_silent_cleanup' EXIT INT TERM
 HISTFILE=/dev/null
 SAVEHIST=0

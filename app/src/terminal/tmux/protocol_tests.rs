@@ -724,6 +724,10 @@ fn silent_bootstrap_framing_hides_setup_and_clears_before_prompt() {
     let clear = text.rfind("printf").expect("clear");
     let echo_on = text.rfind("stty echo").expect("echo restore");
     assert!(text.contains("setopt NO_BANG_HIST"));
+    let fcntl = text
+        .find("unsetopt HIST_FCNTL_LOCK")
+        .expect("fcntl lock off");
+    assert!(fcntl < hist);
     assert!(text.contains("__warp_histfile_set"));
     assert!(text.contains("__warp_banghist"));
     assert!(text.contains("(( ${+__warp_silent_cleaned} )) && return"));
