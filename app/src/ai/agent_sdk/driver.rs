@@ -916,6 +916,37 @@ enum RunSelect {
     Signal(InterruptSignal),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EndOfRunAction {
+    Snapshot,
+    Recording,
+    UnregisterHandlers,
+    UnregisterConsumers,
+    Cleanup,
+    FlushStatus,
+    SendResult,
+    Reraise(InterruptSignal),
+}
+
+#[derive(Clone)]
+struct InterruptFlags {
+    term: Arc<std::sync::atomic::AtomicBool>,
+    int: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl InterruptFlags {
+    fn pending(&self) -> Option<InterruptSignal> {
+        use std::sync::atomic::Ordering;
+        if self.term.load(Ordering::Acquire) {
+            Some(InterruptSignal::Term)
+        } else if self.int.load(Ordering::Acquire) {
+            Some(InterruptSignal::Int)
+        } else {
+            None
+        }
+    }
+}
+
 fn run_end_cause(select: &RunSelect) -> RunEndCause {
     match select {
         RunSelect::Finished(Err(AgentDriverError::SandboxDeadlineReached { .. })) => {
@@ -936,14 +967,6 @@ fn artifact_flush_for(cause: RunEndCause) -> ArtifactFlush {
     }
 }
 
-fn resumes_default_signal_action(cause: RunEndCause) -> bool {
-    matches!(cause, RunEndCause::Signal(_))
-}
-
-fn finishes_remaining_teardown_before_reraise(cause: RunEndCause) -> bool {
-    matches!(cause, RunEndCause::Signal(InterruptSignal::Term))
-}
-
 const fn should_attempt_handoff_snapshot(
     oz_handoff_enabled: bool,
     has_task_id: bool,
@@ -952,37 +975,117 @@ const fn should_attempt_handoff_snapshot(
     oz_handoff_enabled && has_task_id && !snapshot_disabled
 }
 
+fn push_artifact_actions(
+    actions: &mut Vec<EndOfRunAction>,
+    flush: ArtifactFlush,
+    snapshot_allowed: bool,
+) {
+    match flush {
+        ArtifactFlush::RecordingThenSnapshot => {
+            actions.push(EndOfRunAction::Recording);
+            if snapshot_allowed {
+                actions.push(EndOfRunAction::Snapshot);
+            }
+        }
+        ArtifactFlush::SnapshotThenRecording => {
+            if snapshot_allowed {
+                actions.push(EndOfRunAction::Snapshot);
+            }
+            actions.push(EndOfRunAction::Recording);
+        }
+        ArtifactFlush::SnapshotOnly => {
+            if snapshot_allowed {
+                actions.push(EndOfRunAction::Snapshot);
+            }
+        }
+    }
+}
+
+fn end_of_run_actions(cause: RunEndCause, snapshot_allowed: bool) -> Vec<EndOfRunAction> {
+    let mut actions = Vec::new();
+    match cause {
+        RunEndCause::Signal(signal) => {
+            push_artifact_actions(&mut actions, artifact_flush_for(cause), snapshot_allowed);
+            actions.push(EndOfRunAction::UnregisterHandlers);
+            if matches!(signal, InterruptSignal::Term) {
+                actions.push(EndOfRunAction::UnregisterConsumers);
+                actions.push(EndOfRunAction::Cleanup);
+            }
+            actions.push(EndOfRunAction::Reraise(signal));
+        }
+        RunEndCause::Completed | RunEndCause::SandboxDeadline => {
+            actions.push(EndOfRunAction::UnregisterHandlers);
+            actions.push(EndOfRunAction::UnregisterConsumers);
+            push_artifact_actions(&mut actions, artifact_flush_for(cause), snapshot_allowed);
+            actions.push(EndOfRunAction::FlushStatus);
+            actions.push(EndOfRunAction::SendResult);
+            actions.push(EndOfRunAction::Cleanup);
+        }
+    }
+    actions
+}
+
+async fn select_run_outcome<RunFut, TimerFut, SignalFut>(
+    run: RunFut,
+    timer: TimerFut,
+    signal: SignalFut,
+    flags: Option<&InterruptFlags>,
+    on_free_plan: bool,
+) -> RunSelect
+where
+    RunFut: Future<Output = Result<(), AgentDriverError>>,
+    TimerFut: Future<Output = ()>,
+    SignalFut: Future<Output = InterruptSignal>,
+{
+    let run = run.fuse();
+    let timer = timer.fuse();
+    let signal = signal.fuse();
+    futures::pin_mut!(run, timer, signal);
+    let selected = futures::select_biased! {
+        signal = signal => RunSelect::Signal(signal),
+        r = run => RunSelect::Finished(r),
+        _ = timer => RunSelect::Finished(Err(AgentDriverError::SandboxDeadlineReached {
+            on_free_plan,
+        })),
+    };
+    match flags.and_then(InterruptFlags::pending) {
+        Some(signal) => RunSelect::Signal(signal),
+        None => selected,
+    }
+}
+
 #[cfg(unix)]
 fn watch_interrupt_signals() -> (
     impl Future<Output = InterruptSignal>,
+    InterruptFlags,
     Vec<signal_hook::SigId>,
 ) {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
 
-    let term_flag = Arc::new(AtomicBool::new(false));
-    let int_flag = Arc::new(AtomicBool::new(false));
+    let flags = InterruptFlags {
+        term: Arc::new(AtomicBool::new(false)),
+        int: Arc::new(AtomicBool::new(false)),
+    };
     let mut sig_ids = Vec::new();
     if let Ok(id) =
-        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term_flag))
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flags.term))
     {
         sig_ids.push(id);
     }
-    if let Ok(id) = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&int_flag))
+    if let Ok(id) = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flags.int))
     {
         sig_ids.push(id);
     }
+    let wait_flags = flags.clone();
     let fut = async move {
         loop {
-            if term_flag.load(Ordering::Acquire) {
-                return InterruptSignal::Term;
-            }
-            if int_flag.load(Ordering::Acquire) {
-                return InterruptSignal::Int;
+            if let Some(signal) = wait_flags.pending() {
+                return signal;
             }
             Timer::after(Duration::from_millis(100)).await;
         }
     };
-    (fut, sig_ids)
+    (fut, flags, sig_ids)
 }
 
 #[cfg(unix)]
@@ -1455,43 +1558,51 @@ impl AgentDriver {
                     // signal_hook::flag polling (100ms async sleep, no CPU cost) on
                     // Unix; pending forever on non-Unix platforms. Ids are held so the
                     // flag handlers can be unregistered after the snapshot attempt.
+                    // `select_run_outcome` polls the signal arm first and re-checks the
+                    // recorded flags so a concurrently-ready run/timer cannot swallow an
+                    // already-observed interrupt.
                     #[cfg(unix)]
-                    let (signal_fut, registered_signal_ids) = watch_interrupt_signals();
+                    let (signal_fut, interrupt_flags, registered_signal_ids) =
+                        watch_interrupt_signals();
                     #[cfg(not(unix))]
                     let signal_fut = future::pending::<InterruptSignal>();
+                    #[cfg(unix)]
+                    let interrupt_flags = Some(&interrupt_flags);
+                    #[cfg(not(unix))]
+                    let interrupt_flags = None;
 
-                    // `select!` resolves exactly one arm and drops the other future(s), so a
-                    // `run_internal` completion that lands first (reporting its own terminal
-                    // task state, e.g. SUCCEEDED) can never be overwritten by this branch: the
-                    // timer future is simply dropped without ever producing this error.
-                    let select = futures::select! {
-                        r = Self::run_internal(task, foreground.clone()).fuse() => {
-                            RunSelect::Finished(r)
-                        }
-                        _ = timer_fut.fuse() => {
+                    let select = select_run_outcome(
+                        Self::run_internal(task, foreground.clone()),
+                        timer_fut,
+                        signal_fut,
+                        interrupt_flags,
+                        on_free_plan,
+                    )
+                    .await;
+                    match &select {
+                        RunSelect::Finished(Err(AgentDriverError::SandboxDeadlineReached {
+                            ..
+                        })) => {
                             log::info!(
                                 "Sandbox deadline approaching (WARP_SANDBOX_DEADLINE); \
                                  aborting run_internal to allow recording finalization"
                             );
-                            RunSelect::Finished(Err(AgentDriverError::SandboxDeadlineReached {
-                                on_free_plan,
-                            }))
                         }
-                        signal = signal_fut.fuse() => {
-                            match signal {
-                                InterruptSignal::Term => log::warn!(
-                                    "SIGTERM received; aborting run_internal to save a \
-                                     handoff snapshot before remaining teardown (limited \
-                                     grace period before SIGKILL)"
-                                ),
-                                InterruptSignal::Int => log::warn!(
-                                    "SIGINT received; aborting run_internal to save a \
-                                     handoff snapshot before restoring default terminate"
-                                ),
-                            }
-                            RunSelect::Signal(signal)
+                        RunSelect::Signal(InterruptSignal::Term) => {
+                            log::warn!(
+                                "SIGTERM received; aborting run_internal to save a \
+                                 handoff snapshot before remaining teardown (limited \
+                                 grace period before SIGKILL)"
+                            );
                         }
-                    };
+                        RunSelect::Signal(InterruptSignal::Int) => {
+                            log::warn!(
+                                "SIGINT received; aborting run_internal to save a \
+                                 handoff snapshot before restoring default terminate"
+                            );
+                        }
+                        RunSelect::Finished(_) => {}
+                    }
                     #[cfg(unix)]
                     {
                         (select, registered_signal_ids)
@@ -1503,68 +1614,78 @@ impl AgentDriver {
                 };
 
                 #[cfg(unix)]
-                let (select_result, registered_signal_ids) = select_result;
+                let (select_result, mut registered_signal_ids) = select_result;
                 #[cfg(not(unix))]
                 let select_result = select_result;
 
                 let cause = run_end_cause(&select_result);
-                let flush = artifact_flush_for(cause);
-
-                if resumes_default_signal_action(cause) {
-                    // Snapshot first (and, for SIGTERM, recording afterward) while the
-                    // flag handlers are still installed, so a repeated SIGTERM cannot
-                    // default-terminate us before the handoff snapshot finishes.
-                    Self::flush_end_of_run_artifacts(&foreground, flush).await;
-                    #[cfg(unix)]
-                    unregister_signal_ids(registered_signal_ids);
-                    if finishes_remaining_teardown_before_reraise(cause) {
-                        Self::unregister_end_of_run_consumers(&foreground).await;
-                        Self::cleanup(foreground.clone()).await;
-                    }
-                    #[cfg(unix)]
-                    {
-                        let RunSelect::Signal(signal) = select_result else {
-                            unreachable!("signal teardown requires a signal");
-                        };
-                        restore_default_and_reraise(signal);
-                    }
-                    #[cfg(not(unix))]
-                    unreachable!("Unix signals are not delivered on this platform");
-                }
-
-                #[cfg(unix)]
-                unregister_signal_ids(registered_signal_ids);
-
-                let RunSelect::Finished(result) = select_result else {
-                    unreachable!("non-signal teardown requires a finished run");
+                let snapshot_disabled = foreground
+                    .spawn(|me, _| me.snapshot_disabled)
+                    .await
+                    .unwrap_or(true);
+                let snapshot_allowed = should_attempt_handoff_snapshot(
+                    FeatureFlag::OzHandoff.is_enabled(),
+                    task_id.is_some(),
+                    snapshot_disabled,
+                );
+                let actions = end_of_run_actions(cause, snapshot_allowed);
+                let mut finished_result: Option<Result<(), AgentDriverError>> = match select_result
+                {
+                    RunSelect::Finished(result) => Some(result),
+                    RunSelect::Signal(_) => None,
                 };
+                let mut result_tx = Some(tx);
 
-                Self::unregister_end_of_run_consumers(&foreground).await;
-
-                // The caller may terminate the process as soon as it receives
-                // `result`, so all durable artifact work must finish before the
-                // send below. This also waits for work already started by an
-                // early exit or cancellation path.
-                Self::flush_end_of_run_artifacts(&foreground, flush).await;
-
-                // Guarantee the server task row reaches a terminal state before
-                // the caller can terminate the process (see the doc comment on
-                // `run`). Must run before the send below.
-                if let Some(task_id) = task_id {
-                    Self::flush_task_status_before_exit(
-                        task_id,
-                        result.is_ok(),
-                        &server_api,
-                        &foreground,
-                    )
-                    .await;
+                for action in actions {
+                    match action {
+                        EndOfRunAction::Snapshot => {
+                            Self::run_snapshot_upload(&foreground).await;
+                        }
+                        EndOfRunAction::Recording => {
+                            Self::finalize_run_recording(&foreground).await;
+                        }
+                        EndOfRunAction::UnregisterHandlers => {
+                            #[cfg(unix)]
+                            unregister_signal_ids(std::mem::take(&mut registered_signal_ids));
+                        }
+                        EndOfRunAction::UnregisterConsumers => {
+                            Self::unregister_end_of_run_consumers(&foreground).await;
+                        }
+                        EndOfRunAction::Cleanup => {
+                            Self::cleanup(foreground.clone()).await;
+                        }
+                        EndOfRunAction::FlushStatus => {
+                            if let Some(task_id) = task_id {
+                                Self::flush_task_status_before_exit(
+                                    task_id,
+                                    finished_result.as_ref().is_some_and(Result::is_ok),
+                                    &server_api,
+                                    &foreground,
+                                )
+                                .await;
+                            }
+                        }
+                        EndOfRunAction::SendResult => {
+                            let result = finished_result
+                                .take()
+                                .unwrap_or(Err(AgentDriverError::InvalidRuntimeState));
+                            if let Some(tx) = result_tx.take()
+                                && tx.send(result).is_err()
+                            {
+                                report_error!("Caller did not wait for agent driver to finish");
+                            }
+                        }
+                        EndOfRunAction::Reraise(signal) => {
+                            #[cfg(unix)]
+                            restore_default_and_reraise(signal);
+                            #[cfg(not(unix))]
+                            {
+                                let _ = signal;
+                                unreachable!("Unix signals are not delivered on this platform");
+                            }
+                        }
+                    }
                 }
-
-                if tx.send(result).is_err() {
-                    report_error!("Caller did not wait for agent driver to finish");
-                }
-
-                Self::cleanup(foreground).await;
             },
             |_, _, _| {},
         );
@@ -4897,22 +5018,6 @@ impl AgentDriver {
                 "Recording finalization completed before agent driver exit \
                  (reason={actual_reason:?}): {finalization_result:?}"
             );
-        }
-    }
-
-    async fn flush_end_of_run_artifacts(foreground: &ModelSpawner<Self>, flush: ArtifactFlush) {
-        match flush {
-            ArtifactFlush::RecordingThenSnapshot => {
-                Self::finalize_run_recording(foreground).await;
-                Self::run_snapshot_upload(foreground).await;
-            }
-            ArtifactFlush::SnapshotThenRecording => {
-                Self::run_snapshot_upload(foreground).await;
-                Self::finalize_run_recording(foreground).await;
-            }
-            ArtifactFlush::SnapshotOnly => {
-                Self::run_snapshot_upload(foreground).await;
-            }
         }
     }
 

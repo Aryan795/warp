@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::Local;
@@ -33,15 +33,15 @@ use warpui::r#async::Timer;
 use warpui::{App, SingletonEntity as _};
 
 use super::{
-    AgentDriver, AgentDriverError, AgentRunPrompt, ArtifactFlush, CLIAgentSessionStatus,
-    IdleTimeoutSender, InterruptSignal, LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV,
-    LEGACY_OZ_PARENT_STATE_ROOT_ENV, MANAGED_MCP_RESOLVE_MAX_ATTEMPTS,
-    OZ_MESSAGE_LISTENER_MANAGED_EXTERNALLY_ENV, OZ_MESSAGE_LISTENER_STATE_ROOT_ENV,
-    PlatformErrorCode, RunEndCause, RunSelect, SDKConversationOutputStatus,
-    WARP_MESSAGE_LISTENER_STATE_ROOT_ENV, artifact_flush_for, build_secret_env_vars,
-    finishes_remaining_teardown_before_reraise, idle_window_for_cli_session_status,
-    idle_window_for_terminal_status, resumes_default_signal_action, run_end_cause,
-    setup_failure_status_update, should_attempt_handoff_snapshot, terminal_status_log_outcome,
+    AgentDriver, AgentDriverError, AgentRunPrompt, CLIAgentSessionStatus, EndOfRunAction,
+    IdleTimeoutSender, InterruptFlags, InterruptSignal,
+    LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV, LEGACY_OZ_PARENT_STATE_ROOT_ENV,
+    MANAGED_MCP_RESOLVE_MAX_ATTEMPTS, OZ_MESSAGE_LISTENER_MANAGED_EXTERNALLY_ENV,
+    OZ_MESSAGE_LISTENER_STATE_ROOT_ENV, PlatformErrorCode, RunEndCause,
+    SDKConversationOutputStatus, WARP_MESSAGE_LISTENER_STATE_ROOT_ENV, build_secret_env_vars,
+    end_of_run_actions, idle_window_for_cli_session_status, idle_window_for_terminal_status,
+    run_end_cause, select_run_outcome, setup_failure_status_update,
+    should_attempt_handoff_snapshot, terminal_status_log_outcome,
 };
 use crate::ai::agent::conversation::ConversationStatus;
 use crate::ai::agent::task::TaskId;
@@ -2747,57 +2747,121 @@ fn openai_api_key_exports_only_api_key_not_base_url() {
     );
 }
 
+fn recorded_interrupt_flags(term: bool, int: bool) -> InterruptFlags {
+    InterruptFlags {
+        term: Arc::new(AtomicBool::new(term)),
+        int: Arc::new(AtomicBool::new(int)),
+    }
+}
+
+fn drive_end_of_run(cause: RunEndCause, snapshot_allowed: bool) -> Vec<EndOfRunAction> {
+    let actions = end_of_run_actions(cause, snapshot_allowed);
+    let mut invoked = Vec::new();
+    for action in actions {
+        invoked.push(action);
+        if matches!(action, EndOfRunAction::Reraise(_)) {
+            break;
+        }
+    }
+    invoked
+}
+
 #[test]
-fn sigterm_prioritizes_handoff_snapshot_before_recording() {
-    let cause = run_end_cause(&RunSelect::Signal(InterruptSignal::Term));
-    assert_eq!(cause, RunEndCause::Signal(InterruptSignal::Term));
+fn recorded_sigterm_wins_when_run_and_deadline_are_also_ready() {
+    let flags = recorded_interrupt_flags(true, false);
+    let selected = block_on(select_run_outcome(
+        std::future::ready(Ok(())),
+        std::future::ready(()),
+        std::future::pending::<InterruptSignal>(),
+        Some(&flags),
+        false,
+    ));
     assert_eq!(
-        artifact_flush_for(cause),
-        ArtifactFlush::SnapshotThenRecording
+        run_end_cause(&selected),
+        RunEndCause::Signal(InterruptSignal::Term)
     );
-    assert!(resumes_default_signal_action(cause));
-    assert!(finishes_remaining_teardown_before_reraise(cause));
 }
 
 #[test]
-fn sigint_saves_handoff_snapshot_without_recording() {
-    let cause = run_end_cause(&RunSelect::Signal(InterruptSignal::Int));
-    assert_eq!(cause, RunEndCause::Signal(InterruptSignal::Int));
-    assert_eq!(artifact_flush_for(cause), ArtifactFlush::SnapshotOnly);
-    assert!(resumes_default_signal_action(cause));
-    assert!(!finishes_remaining_teardown_before_reraise(cause));
-}
-
-#[test]
-fn sandbox_deadline_still_finalizes_recording_then_snapshot() {
-    let cause = run_end_cause(&RunSelect::Finished(Err(
-        AgentDriverError::SandboxDeadlineReached {
-            on_free_plan: false,
-        },
-    )));
-    assert_eq!(cause, RunEndCause::SandboxDeadline);
+fn select_biased_prefers_ready_sigint_over_ready_run() {
+    let selected = block_on(select_run_outcome(
+        std::future::ready(Ok(())),
+        std::future::pending::<()>(),
+        std::future::ready(InterruptSignal::Int),
+        None,
+        false,
+    ));
     assert_eq!(
-        artifact_flush_for(cause),
-        ArtifactFlush::RecordingThenSnapshot
+        run_end_cause(&selected),
+        RunEndCause::Signal(InterruptSignal::Int)
     );
-    assert!(!resumes_default_signal_action(cause));
-    assert!(!finishes_remaining_teardown_before_reraise(cause));
 }
 
 #[test]
-fn completed_run_finalizes_recording_then_snapshot() {
-    let cause = run_end_cause(&RunSelect::Finished(Ok(())));
-    assert_eq!(cause, RunEndCause::Completed);
+fn sigterm_invokes_snapshot_then_recording_then_reraise() {
     assert_eq!(
-        artifact_flush_for(cause),
-        ArtifactFlush::RecordingThenSnapshot
+        drive_end_of_run(RunEndCause::Signal(InterruptSignal::Term), true),
+        vec![
+            EndOfRunAction::Snapshot,
+            EndOfRunAction::Recording,
+            EndOfRunAction::UnregisterHandlers,
+            EndOfRunAction::UnregisterConsumers,
+            EndOfRunAction::Cleanup,
+            EndOfRunAction::Reraise(InterruptSignal::Term),
+        ]
     );
-    assert!(!resumes_default_signal_action(cause));
 }
 
 #[test]
-fn handoff_snapshot_runs_for_cloud_task_when_enabled() {
-    assert!(should_attempt_handoff_snapshot(true, true, false));
+fn sigint_invokes_snapshot_only_then_reraise() {
+    assert_eq!(
+        drive_end_of_run(RunEndCause::Signal(InterruptSignal::Int), true),
+        vec![
+            EndOfRunAction::Snapshot,
+            EndOfRunAction::UnregisterHandlers,
+            EndOfRunAction::Reraise(InterruptSignal::Int),
+        ]
+    );
+}
+
+#[test]
+fn sandbox_deadline_invokes_recording_then_snapshot_without_reraise() {
+    let invoked = drive_end_of_run(RunEndCause::SandboxDeadline, true);
+    assert_eq!(
+        invoked,
+        vec![
+            EndOfRunAction::UnregisterHandlers,
+            EndOfRunAction::UnregisterConsumers,
+            EndOfRunAction::Recording,
+            EndOfRunAction::Snapshot,
+            EndOfRunAction::FlushStatus,
+            EndOfRunAction::SendResult,
+            EndOfRunAction::Cleanup,
+        ]
+    );
+}
+
+#[test]
+fn deadline_timer_is_selected_when_no_interrupt_is_recorded() {
+    let selected = block_on(select_run_outcome(
+        std::future::pending::<Result<(), AgentDriverError>>(),
+        std::future::ready(()),
+        std::future::pending::<InterruptSignal>(),
+        None,
+        false,
+    ));
+    assert_eq!(run_end_cause(&selected), RunEndCause::SandboxDeadline);
+}
+
+#[test]
+fn handoff_snapshot_gate_omits_snapshot_on_sigterm() {
+    let invoked = drive_end_of_run(RunEndCause::Signal(InterruptSignal::Term), false);
+    assert!(!invoked.contains(&EndOfRunAction::Snapshot));
+    assert!(invoked.contains(&EndOfRunAction::Recording));
+    assert_eq!(
+        invoked.last(),
+        Some(&EndOfRunAction::Reraise(InterruptSignal::Term))
+    );
 }
 
 #[test]
