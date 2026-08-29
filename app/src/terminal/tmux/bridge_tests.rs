@@ -1173,3 +1173,30 @@ fn pane_unregister_clears_retained_zsh_init_ownership() {
     runtime.unregister_pane("%0");
     assert!(!runtime.control_pane_owns_retained_init("%0"));
 }
+
+#[test]
+fn ready_expected_id_rejects_replayed_initshell_with_different_shell() {
+    let runtime = runtime();
+    runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(sid(7));
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(7), ShellType::Zsh),
+        Some(ShellType::Zsh)
+    );
+    runtime.begin_pane_bootstrap("%0", sid(7)).expect("stage");
+    assert_eq!(
+        runtime.on_stage_complete("%0", sid(7)),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.shell_type(), Some(ShellType::Zsh));
+    assert!(runtime.early_init_session_id("%0").is_none());
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(7), ShellType::Bash)
+            .is_none()
+    );
+    assert_eq!(runtime.shell_type(), Some(ShellType::Zsh));
+    assert!(runtime.early_init_session_id("%0").is_none());
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+}

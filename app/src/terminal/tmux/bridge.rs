@@ -628,6 +628,9 @@ impl TmuxRuntime {
         inner.early_init_shell.remove(pane_id);
         inner.early_stage_complete.remove(pane_id);
         Self::clear_retained_zsh_init_locked(inner, Some(pane_id));
+        if matches_expected {
+            inner.tracked_expected_session = None;
+        }
         let model = inner.panes.get(pane_id).map(|sink| sink.model.clone());
         Some((shell_type, staged_id, model))
     }
