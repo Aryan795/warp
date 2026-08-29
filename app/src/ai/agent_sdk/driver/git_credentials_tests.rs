@@ -207,10 +207,9 @@ fn ordinary_glab_wrapper_discovers_each_checkout_config() {
     let existing_paths = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .unwrap_or_default();
-    let path = std::env::join_paths(
-        std::iter::once(temp.path().to_path_buf()).chain(existing_paths),
-    )
-    .unwrap();
+    let path =
+        std::env::join_paths(std::iter::once(temp.path().to_path_buf()).chain(existing_paths))
+            .unwrap();
 
     let mut selected_tokens = Vec::new();
     for (name, credential) in [
@@ -262,7 +261,6 @@ fn ordinary_glab_wrapper_discovers_each_checkout_config() {
 
     assert_eq!(selected_tokens, ["token-one", "token-two"]);
 }
-
 
 #[test]
 fn diagnostics_do_not_expose_tokens_hosts_or_identity() {
@@ -320,11 +318,9 @@ fn git_preflight_script_checks_exact_remote_urls_without_local_checkouts() {
 #[test]
 fn task_git_configuration_is_environment_scoped_and_path_aware() {
     let home = Path::new("/home/agent");
-    let entries = task_git_config_entries(
-        &[gitlab_credential("one", "group/one", "token-one")],
-        home,
-    )
-    .unwrap();
+    let entries =
+        task_git_config_entries(&[gitlab_credential("one", "group/one", "token-one")], home)
+            .unwrap();
 
     assert_eq!(
         entries,
@@ -400,12 +396,8 @@ fn refresh_replaces_the_complete_credential_set_and_revokes_omitted_tokens() {
     let _guard = CREDENTIAL_STATE_TEST_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
-    replace_task_credentials(&[gitlab_credential(
-        "gitlab",
-        "group/one",
-        "old-gitlab-token",
-    )])
-    .unwrap();
+    replace_task_credentials(&[gitlab_credential("gitlab", "group/one", "old-gitlab-token")])
+        .unwrap();
     let glab_dir = home.join("repository-glab");
     std::fs::create_dir_all(&glab_dir).unwrap();
     std::fs::write(glab_dir.join("config.yml"), "old-gitlab-token").unwrap();
@@ -433,7 +425,8 @@ fn refresh_replaces_the_complete_credential_set_and_revokes_omitted_tokens() {
     let store = std::fs::read_to_string(task_credentials_file(home)).unwrap();
     assert!(store.contains("github-token"));
     assert!(!store.contains("old-gitlab-token"));
-    let gh_config = std::fs::read_to_string(task_gh_config_dir(home).join(GH_HOSTS_FILENAME)).unwrap();
+    let gh_config =
+        std::fs::read_to_string(task_gh_config_dir(home).join(GH_HOSTS_FILENAME)).unwrap();
     assert!(gh_config.contains("github-token"));
     assert!(!gh_config.contains("old-gitlab-token"));
 

@@ -48,10 +48,7 @@ fn legacy_git_credential_id_does_not_expose_the_host() {
 
     assert!(id.starts_with("legacy:"));
     assert!(!id.contains("customer-gitlab.example.com"));
-    assert_eq!(
-        id,
-        legacy_git_credential_id("CUSTOMER-GITLAB.EXAMPLE.COM")
-    );
+    assert_eq!(id, legacy_git_credential_id("CUSTOMER-GITLAB.EXAMPLE.COM"));
     assert_ne!(id, legacy_git_credential_id("other.example.com"));
 }
 
