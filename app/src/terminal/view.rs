@@ -21902,6 +21902,20 @@ impl TerminalView {
                 }
                 self.find_and_start_dev_container(ctx);
             }
+            InputEvent::DevContainerConfigSelected {
+                workspace_folder,
+                config_path,
+            } => {
+                if !FeatureFlag::LocalDevContainer.is_enabled() {
+                    log::warn!("Local dev container feature flag is disabled");
+                    return;
+                }
+                self.resolve_dev_container_cli_and_bring_up(
+                    workspace_folder.clone(),
+                    config_path.clone(),
+                    ctx,
+                );
+            }
             InputEvent::ExitCloudModeAndStartLocalAgent { initial_prompt } => {
                 let origin = AgentViewEntryOrigin::Input {
                     was_prompt_autodetected: false,

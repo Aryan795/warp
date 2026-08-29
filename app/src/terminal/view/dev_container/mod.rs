@@ -11,7 +11,7 @@
 #[cfg(all(feature = "local_tty", not(feature = "remote_tty")))]
 use std::collections::HashMap;
 #[cfg(feature = "local_tty")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "local_tty")]
 use std::sync::mpsc::SyncSender;
 
@@ -180,10 +180,13 @@ fn create_dev_container_view(
 impl TerminalView {
     /// Entry point for the `/devcontainer` slash command.
     ///
-    /// Finds `.devcontainer/devcontainer.json` for the active session's
-    /// directory, resolves the `devcontainer` CLI, and (if both succeed)
-    /// hands off to [`Self::bring_up_dev_container`]. Never opens a pane
-    /// itself: a pane only appears once the container is confirmed running.
+    /// Discovers `devcontainer.json` candidates for the active session's directory (see
+    /// [`discover_dev_container_configs`]). With none, shows an error toast. With exactly one,
+    /// proceeds directly, same as if there were only ever one supported config. With more than
+    /// one, opens the inline Dev Container config selector and waits for a choice (see
+    /// [`crate::terminal::input::Input::open_dev_container_config_selector`]); the eventual
+    /// selection re-enters this flow via [`Self::resolve_dev_container_cli_and_bring_up`]. Never
+    /// opens a pane itself: a pane only appears once the container is confirmed running.
     pub(crate) fn find_and_start_dev_container(&self, ctx: &mut ViewContext<Self>) {
         #[cfg(feature = "local_tty")]
         {
@@ -199,59 +202,30 @@ impl TerminalView {
                 return;
             };
 
-            let devcontainer_config = workspace_folder.join(".devcontainer/devcontainer.json");
-            if !devcontainer_config.is_file() {
-                self.show_dev_container_toast(
-                    format!(
-                        "No .devcontainer/devcontainer.json found in {}",
-                        workspace_folder.display()
-                    ),
-                    ToastFlavor::Error,
-                    ctx,
-                );
-                return;
-            }
-
-            self.show_dev_container_toast(
-                format!(
-                    "Building dev container for {}… this can take a few minutes.",
-                    workspace_folder.display()
-                ),
-                ToastFlavor::Default,
-                ctx,
-            );
-
-            let devcontainer_cli_future = resolve_devcontainer_cli_path(ctx);
-            let docker_cli_future = resolve_docker_cli_path(ctx);
-            ctx.spawn(
-                async move { (devcontainer_cli_future.await, docker_cli_future.await) },
-                move |me, (devcontainer_path, docker_path), ctx| {
-                    let Some(devcontainer_path) = devcontainer_path else {
-                        me.show_dev_container_toast(
-                            "devcontainer CLI not found on PATH. Install it with \
-                         `npm install -g @devcontainers/cli` and try again."
-                                .to_owned(),
-                            ToastFlavor::Error,
-                            ctx,
-                        );
-                        return;
-                    };
-                    let Some(docker_path) = docker_path else {
-                        me.show_dev_container_toast(
-                            "docker CLI not found on PATH.".to_owned(),
-                            ToastFlavor::Error,
-                            ctx,
-                        );
-                        return;
-                    };
-                    me.bring_up_dev_container(
-                        workspace_folder,
-                        devcontainer_path,
-                        docker_path,
+            let mut configs = discover_dev_container_configs(&workspace_folder);
+            match configs.len() {
+                0 => {
+                    self.show_dev_container_toast(
+                        format!(
+                            "No devcontainer.json found in {} (checked \
+                             .devcontainer/devcontainer.json, \
+                             .devcontainer/*/devcontainer.json, and .devcontainer.json)",
+                            workspace_folder.display()
+                        ),
+                        ToastFlavor::Error,
                         ctx,
                     );
-                },
-            );
+                }
+                1 => {
+                    let config_path = configs.pop().expect("len() == 1");
+                    self.resolve_dev_container_cli_and_bring_up(workspace_folder, config_path, ctx);
+                }
+                _ => {
+                    self.input.update(ctx, |input, ctx| {
+                        input.open_dev_container_config_selector(workspace_folder, configs, ctx);
+                    });
+                }
+            }
         }
         #[cfg(not(feature = "local_tty"))]
         {
@@ -260,15 +234,69 @@ impl TerminalView {
         }
     }
 
-    /// Runs `devcontainer up` for `workspace_folder`. Only opens a pane once
-    /// `up` reports success *and* [`Self::preflight_and_attach_dev_container`]
-    /// has both verified the container is attachable and staged the
-    /// init/bootstrap scripts into it; shows an error toast (never a pane)
-    /// otherwise.
+    /// Resolves the `devcontainer`/`docker` CLI paths and shows the "building" toast, then hands
+    /// off to [`Self::bring_up_dev_container`] for `config_path`. Shared by the single-config
+    /// path in [`Self::find_and_start_dev_container`] and by the config selector's `Selected`
+    /// event (routed here via `InputEvent::DevContainerConfigSelected`).
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn resolve_dev_container_cli_and_bring_up(
+        &self,
+        workspace_folder: PathBuf,
+        config_path: PathBuf,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.show_dev_container_toast(
+            format!(
+                "Building dev container for {}… this can take a few minutes.",
+                workspace_folder.display()
+            ),
+            ToastFlavor::Default,
+            ctx,
+        );
+
+        let devcontainer_cli_future = resolve_devcontainer_cli_path(ctx);
+        let docker_cli_future = resolve_docker_cli_path(ctx);
+        ctx.spawn(
+            async move { (devcontainer_cli_future.await, docker_cli_future.await) },
+            move |me, (devcontainer_path, docker_path), ctx| {
+                let Some(devcontainer_path) = devcontainer_path else {
+                    me.show_dev_container_toast(
+                        "devcontainer CLI not found on PATH. Install it with \
+                         `npm install -g @devcontainers/cli` and try again."
+                            .to_owned(),
+                        ToastFlavor::Error,
+                        ctx,
+                    );
+                    return;
+                };
+                let Some(docker_path) = docker_path else {
+                    me.show_dev_container_toast(
+                        "docker CLI not found on PATH.".to_owned(),
+                        ToastFlavor::Error,
+                        ctx,
+                    );
+                    return;
+                };
+                me.bring_up_dev_container(
+                    workspace_folder,
+                    config_path,
+                    devcontainer_path,
+                    docker_path,
+                    ctx,
+                );
+            },
+        );
+    }
+
+    /// Runs `devcontainer up` for `workspace_folder` against `config_path`. Only opens a pane
+    /// once `up` reports success *and* [`Self::preflight_and_attach_dev_container`] has both
+    /// verified the container is attachable and staged the init/bootstrap scripts into it; shows
+    /// an error toast (never a pane) otherwise.
     #[cfg(feature = "local_tty")]
     fn bring_up_dev_container(
         &self,
         workspace_folder: PathBuf,
+        config_path: PathBuf,
         devcontainer_path: PathBuf,
         docker_path: PathBuf,
         ctx: &mut ViewContext<Self>,
@@ -290,6 +318,8 @@ impl TerminalView {
                     .arg("up")
                     .arg("--workspace-folder")
                     .arg(&workspace_folder)
+                    .arg("--config")
+                    .arg(&config_path)
                     .output()
                     .await
             }
@@ -636,6 +666,46 @@ fn parse_dev_container_up_stdout(stdout: &[u8]) -> Option<DevContainerUpResult> 
     let stdout_text = String::from_utf8_lossy(stdout);
     let last_line = stdout_text.lines().next_back()?.trim();
     serde_json::from_str(last_line).ok()
+}
+
+/// Finds `devcontainer.json` candidates for `workspace_folder`, in the order the
+/// [devcontainers spec](https://containers.dev/implementors/spec/#devcontainerjson) resolves
+/// them: `.devcontainer/devcontainer.json`, then any `.devcontainer/<folder>/devcontainer.json`
+/// (sorted by folder name, for a stable and predictable selector order), then a workspace-root
+/// `.devcontainer.json`.
+///
+/// A repo with more than one candidate needs the caller to ask the user which one to use (see
+/// [`TerminalView::find_and_start_dev_container`]) and to pass the chosen path explicitly via
+/// `devcontainer up --config`, since the CLI's own default resolution only ever considers the
+/// first two of these three locations.
+#[cfg(feature = "local_tty")]
+fn discover_dev_container_configs(workspace_folder: &Path) -> Vec<PathBuf> {
+    let mut configs = Vec::new();
+
+    let devcontainer_dir = workspace_folder.join(".devcontainer");
+    let top_level_config = devcontainer_dir.join("devcontainer.json");
+    if top_level_config.is_file() {
+        configs.push(top_level_config);
+    }
+
+    if let Ok(entries) = std::fs::read_dir(&devcontainer_dir) {
+        let mut nested_configs: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .map(|dir| dir.join("devcontainer.json"))
+            .filter(|path| path.is_file())
+            .collect();
+        nested_configs.sort();
+        configs.extend(nested_configs);
+    }
+
+    let root_config = workspace_folder.join(".devcontainer.json");
+    if root_config.is_file() {
+        configs.push(root_config);
+    }
+
+    configs
 }
 
 #[cfg(all(test, feature = "local_tty"))]

@@ -245,24 +245,38 @@ fn dev_container_chmod_args_lock_the_init_script_to_owner_read_only() {
 #[test]
 fn dev_container_cp_args_also_work_for_the_bootstrap_script_path() {
     let starter = dev_container_starter(None);
-    let host_path = starter.host_bootstrap_script_path();
-    let args = dev_container_cp_args(
-        &starter.container_id,
-        &host_path,
-        &starter.container_bootstrap_script_path(),
-    );
+    let host_path = host_bootstrap_script_path_for_content_hash("abcdef0123456789");
+    let container_path = container_bootstrap_script_path_for_content_hash("abcdef0123456789");
+    let args = dev_container_cp_args(&starter.container_id, &host_path, &container_path);
 
     assert_eq!(
         args,
         vec![
             std::ffi::OsString::from("cp"),
             std::ffi::OsString::from(&host_path),
-            std::ffi::OsString::from(format!(
-                "abc123:{}",
-                starter.container_bootstrap_script_path()
-            )),
+            std::ffi::OsString::from(format!("abc123:{container_path}")),
         ]
     );
+}
+
+#[test]
+fn bootstrap_script_paths_are_keyed_by_content_hash_not_sandbox() {
+    // Same hash in, same paths out, regardless of which sandbox asks -- this is the whole
+    // point: every session on a build stages the same bootstrap bytes at the same path.
+    assert_eq!(
+        host_bootstrap_script_path_for_content_hash("deadbeef"),
+        host_bootstrap_script_path_for_content_hash("deadbeef")
+    );
+    assert_ne!(
+        host_bootstrap_script_path_for_content_hash("deadbeef"),
+        host_bootstrap_script_path_for_content_hash("cafef00d")
+    );
+    assert!(
+        host_bootstrap_script_path_for_content_hash("deadbeef")
+            .to_string_lossy()
+            .contains("deadbeef")
+    );
+    assert!(container_bootstrap_script_path_for_content_hash("deadbeef").contains("deadbeef"));
 }
 
 #[test]
@@ -308,14 +322,39 @@ fn dev_container_default_user_args_do_not_force_root_unlike_chown_args() {
 #[test]
 fn dev_container_init_script_sources_the_staged_bootstrap_script() {
     let starter = dev_container_starter(None);
-    let script = dev_container_init_script(&starter.sandbox_id, starter.session_id());
+    let container_bootstrap_path = container_bootstrap_script_path_for_content_hash("deadbeef");
+    let script = dev_container_init_script(starter.session_id(), &container_bootstrap_path);
 
     // The bootstrap script is `source`d directly from a file the container
     // already has, rather than typed into the pty by Warp later.
-    assert!(script.contains(&format!(
-        "source '{}'\n",
-        starter.container_bootstrap_script_path()
-    )));
+    assert!(script.contains(&format!("source '{container_bootstrap_path}'\n")));
+}
+
+#[test]
+fn content_hash_is_stable_and_content_sensitive() {
+    assert_eq!(content_hash(b"same bytes"), content_hash(b"same bytes"));
+    assert_ne!(content_hash(b"these bytes"), content_hash(b"other bytes"));
+}
+
+#[test]
+fn dev_container_bootstrap_exists_args_check_unqualified() {
+    let starter = dev_container_starter(None);
+    let container_path = container_bootstrap_script_path_for_content_hash("deadbeef");
+    let args = dev_container_bootstrap_exists_args(&starter.container_id, &container_path);
+
+    // Deliberately no `-u 0`: existence in `/tmp` doesn't require any special
+    // privilege, unlike the chown/chmod/rm helpers.
+    assert!(!args.iter().any(|arg| arg == "-u"));
+    assert_eq!(
+        args,
+        vec![
+            std::ffi::OsString::from("exec"),
+            std::ffi::OsString::from("abc123"),
+            std::ffi::OsString::from("test"),
+            std::ffi::OsString::from("-e"),
+            std::ffi::OsString::from(&container_path),
+        ]
+    );
 }
 
 #[test]

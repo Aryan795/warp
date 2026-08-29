@@ -21,6 +21,7 @@ use mio::unix::SourceFd;
 use nix::pty::openpty;
 use nix::sys::termios::{self, InputFlags, SetArg};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use signal_hook_mio::v1_0::Signals;
 use warp_core::channel::ChannelState;
 use warp_core::cli_agent_protocol::{
@@ -37,8 +38,8 @@ use super::{ChildEvent, EventedPty, EventedReadWrite, PtyOptions, SizeInfo};
 use crate::ASSETS;
 use crate::bootstrap::{raw_init_shell_script_for_shell, script_for_shell};
 use crate::local_tty::dev_container::{
-    DevContainerShellStarter, container_bootstrap_script_path_for_sandbox_id,
-    container_init_script_path_for_sandbox_id, host_bootstrap_script_path_for_sandbox_id,
+    DevContainerShellStarter, container_bootstrap_script_path_for_content_hash,
+    container_init_script_path_for_sandbox_id, host_bootstrap_script_path_for_content_hash,
     host_init_script_path_for_sandbox_id,
 };
 use crate::local_tty::docker_sandbox::{DOCKER_SANDBOX_HOME_DIR, DockerSandboxShellStarter};
@@ -234,6 +235,25 @@ fn dev_container_rm_args(container_id: &str, container_path: &str) -> Vec<std::f
         std::ffi::OsString::from(container_id),
         std::ffi::OsString::from("rm"),
         std::ffi::OsString::from("-f"),
+        std::ffi::OsString::from(container_path),
+    ]
+}
+
+/// Args for `docker exec <container> test -e <path>`, used to check whether
+/// the content-hashed bootstrap script is already present before staging it
+/// again. Deliberately unqualified (no `-u 0`, unlike the chown/chmod/rm
+/// helpers): checking existence needs no special privilege, and the file is
+/// always world-readable up to the point [`dev_container_chmod_args`] locks
+/// it down, so any user can see it either way.
+fn dev_container_bootstrap_exists_args(
+    container_id: &str,
+    container_path: &str,
+) -> Vec<std::ffi::OsString> {
+    vec![
+        std::ffi::OsString::from("exec"),
+        std::ffi::OsString::from(container_id),
+        std::ffi::OsString::from("test"),
+        std::ffi::OsString::from("-e"),
         std::ffi::OsString::from(container_path),
     ]
 }
@@ -1311,6 +1331,31 @@ async fn run_dev_container_docker_command(docker_path: &Path, args: Vec<OsString
     Ok(())
 }
 
+/// Whether `container_path` already exists in `container_id`. Used to skip
+/// re-staging the content-hashed bootstrap script: since the same hash always
+/// means the same bytes, two sessions racing this check both land on the same
+/// end state (the file copied, chowned, and chmodded identically) regardless
+/// of who wins, so the check-then-copy race is harmless.
+///
+/// A launch failure (docker missing, container gone, etc.) is treated the
+/// same as "doesn't exist" rather than propagated: this is purely an
+/// optimization, so the caller should fall back to staging again rather than
+/// aborting the whole Dev Container attach over the probe itself failing.
+async fn dev_container_bootstrap_already_staged(
+    docker_path: &Path,
+    container_id: &str,
+    container_path: &str,
+) -> bool {
+    AsyncCommand::new(docker_path)
+        .args(dev_container_bootstrap_exists_args(
+            container_id,
+            container_path,
+        ))
+        .output()
+        .await
+        .is_ok_and(|output| output.status.success())
+}
+
 /// Stages `contents` on the host at `host_path`, `docker cp`s it into the
 /// container at `container_path`, then chowns it to `target_user` and locks
 /// it down to owner-read-only. Used for both the small init script (which
@@ -1432,7 +1477,17 @@ pub async fn prepare_dev_container(
         None => resolve_default_container_user(&docker_path, &container_id).await?,
     };
 
-    let init_script = dev_container_init_script(&sandbox_id, session_id);
+    // The bootstrap script (unlike the init script) takes no session-specific input, so its
+    // container path is keyed by a hash of its own contents instead of `sandbox_id`: every
+    // session on this Warp build stages the exact same bytes, so this makes that copy
+    // write-once-per-build rather than accumulating a fresh ~80KB file per session in a
+    // long-lived container. See `dev_container_init_script` for the `source` line.
+    let bootstrap_script = script_for_shell(ShellType::Bash, &ASSETS);
+    let bootstrap_hash = content_hash(&bootstrap_script);
+    let container_bootstrap_path =
+        container_bootstrap_script_path_for_content_hash(&bootstrap_hash);
+
+    let init_script = dev_container_init_script(session_id, &container_bootstrap_path);
     stage_and_secure_dev_container_file(
         &docker_path,
         &container_id,
@@ -1443,41 +1498,50 @@ pub async fn prepare_dev_container(
     )
     .await?;
 
-    // The same bootstrap script every local bash session gets, staged as a
-    // file instead of typed into the pty. See `dev_container_init_script`.
-    let bootstrap_script = script_for_shell(ShellType::Bash, &ASSETS);
-    stage_and_secure_dev_container_file(
+    if !dev_container_bootstrap_already_staged(
         &docker_path,
         &container_id,
-        &host_bootstrap_script_path_for_sandbox_id(&sandbox_id),
-        &bootstrap_script,
-        &container_bootstrap_script_path_for_sandbox_id(&sandbox_id),
-        &target_user,
+        &container_bootstrap_path,
     )
-    .await?;
+    .await
+    {
+        stage_and_secure_dev_container_file(
+            &docker_path,
+            &container_id,
+            &host_bootstrap_script_path_for_content_hash(&bootstrap_hash),
+            &bootstrap_script,
+            &container_bootstrap_path,
+            &target_user,
+        )
+        .await?;
+    }
 
     Ok(())
 }
 
+/// A short, stable identifier for `contents`, hex-encoded. Used to give the Dev Container
+/// bootstrap script a fixed, content-addressed path instead of a fresh one per session; not a
+/// security boundary, so 8 bytes of SHA-256 is plenty to avoid accidental collisions here.
+fn content_hash(contents: &[u8]) -> String {
+    hex::encode(&Sha256::digest(contents)[..8])
+}
+
 /// Builds the Dev Container init script: the normal shell init script
 /// (sends the `InitShell` hook), then a `source` of the full bootstrap
-/// script `prepare_dev_container` stages alongside it. Window size isn't
-/// set here: `docker exec -it` sizes the container's pty from the pane's
-/// own pty and keeps it in sync on every resize, so there's no stale value
-/// to seed.
+/// script staged at `container_bootstrap_path` (see [`prepare_dev_container`]).
+/// Window size isn't set here: `docker exec -it` sizes the container's pty
+/// from the pane's own pty and keeps it in sync on every resize, so
+/// there's no stale value to seed.
 ///
 /// Sourcing the bootstrap script here — rather than relying on Warp to type
 /// it into the pty once it sees the `InitShell` hook, as happens for local
 /// shells — means the entire bootstrap (`InitShell`, rcfile sourcing,
 /// `Bootstrapped`) runs as one `--rcfile` execution the container reads from
 /// disk, with nothing crossing the `docker exec` relay as typed input.
-fn dev_container_init_script(sandbox_id: &str, session_id: SessionId) -> String {
+fn dev_container_init_script(session_id: SessionId, container_bootstrap_path: &str) -> String {
     let bootstrap_path_quoted = format!(
         "'{}'",
-        shell_escape_single_quotes(
-            &container_bootstrap_script_path_for_sandbox_id(sandbox_id),
-            ShellType::Bash
-        )
+        shell_escape_single_quotes(container_bootstrap_path, ShellType::Bash)
     );
     format!(
         "{}\nsource {bootstrap_path_quoted}\n",

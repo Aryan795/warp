@@ -169,3 +169,91 @@ fn parse_dev_container_up_stdout_returns_none_for_empty_or_malformed_input() {
     assert!(parse_dev_container_up_stdout(b"").is_none());
     assert!(parse_dev_container_up_stdout(b"not json").is_none());
 }
+
+#[test]
+fn discover_dev_container_configs_finds_nothing_when_no_devcontainer_json_exists() {
+    let workspace = tempfile::tempdir().expect("create temp workspace");
+    assert!(discover_dev_container_configs(workspace.path()).is_empty());
+}
+
+#[test]
+fn discover_dev_container_configs_finds_the_top_level_config() {
+    let workspace = tempfile::tempdir().expect("create temp workspace");
+    let devcontainer_dir = workspace.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).expect("create .devcontainer");
+    let config_path = devcontainer_dir.join("devcontainer.json");
+    std::fs::write(&config_path, "{}").expect("write devcontainer.json");
+
+    assert_eq!(
+        discover_dev_container_configs(workspace.path()),
+        vec![config_path]
+    );
+}
+
+#[test]
+fn discover_dev_container_configs_finds_the_root_level_config() {
+    let workspace = tempfile::tempdir().expect("create temp workspace");
+    let config_path = workspace.path().join(".devcontainer.json");
+    std::fs::write(&config_path, "{}").expect("write .devcontainer.json");
+
+    assert_eq!(
+        discover_dev_container_configs(workspace.path()),
+        vec![config_path]
+    );
+}
+
+#[test]
+fn discover_dev_container_configs_finds_nested_configs_sorted_by_folder_name() {
+    let workspace = tempfile::tempdir().expect("create temp workspace");
+    let devcontainer_dir = workspace.path().join(".devcontainer");
+    for folder in ["web", "api"] {
+        let nested_dir = devcontainer_dir.join(folder);
+        std::fs::create_dir_all(&nested_dir).expect("create nested devcontainer folder");
+        std::fs::write(nested_dir.join("devcontainer.json"), "{}")
+            .expect("write nested devcontainer.json");
+    }
+
+    assert_eq!(
+        discover_dev_container_configs(workspace.path()),
+        vec![
+            devcontainer_dir.join("api").join("devcontainer.json"),
+            devcontainer_dir.join("web").join("devcontainer.json"),
+        ]
+    );
+}
+
+#[test]
+fn discover_dev_container_configs_finds_all_three_shapes_together_in_spec_order() {
+    let workspace = tempfile::tempdir().expect("create temp workspace");
+    let devcontainer_dir = workspace.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).expect("create .devcontainer");
+    std::fs::write(devcontainer_dir.join("devcontainer.json"), "{}")
+        .expect("write top-level devcontainer.json");
+    let nested_dir = devcontainer_dir.join("web");
+    std::fs::create_dir_all(&nested_dir).expect("create nested devcontainer folder");
+    std::fs::write(nested_dir.join("devcontainer.json"), "{}")
+        .expect("write nested devcontainer.json");
+    std::fs::write(workspace.path().join(".devcontainer.json"), "{}")
+        .expect("write root-level .devcontainer.json");
+
+    assert_eq!(
+        discover_dev_container_configs(workspace.path()),
+        vec![
+            devcontainer_dir.join("devcontainer.json"),
+            nested_dir.join("devcontainer.json"),
+            workspace.path().join(".devcontainer.json"),
+        ]
+    );
+}
+
+#[test]
+fn discover_dev_container_configs_ignores_non_directory_entries_in_devcontainer_dir() {
+    let workspace = tempfile::tempdir().expect("create temp workspace");
+    let devcontainer_dir = workspace.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).expect("create .devcontainer");
+    // A stray file (e.g. a Dockerfile referenced by the top-level config) should not be
+    // mistaken for a nested config folder.
+    std::fs::write(devcontainer_dir.join("Dockerfile"), "FROM scratch").expect("write stray file");
+
+    assert!(discover_dev_container_configs(workspace.path()).is_empty());
+}

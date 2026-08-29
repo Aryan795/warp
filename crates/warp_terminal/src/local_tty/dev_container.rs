@@ -55,21 +55,26 @@ pub fn container_init_script_path_for_sandbox_id(sandbox_id: &str) -> String {
     format!("/tmp/.warp-devcontainer-init-{sandbox_id}.sh")
 }
 
-/// Host path where Warp stages a Dev Container session's full bootstrap
-/// script (the same script content used for local shells) before copying it
-/// into the container with `docker cp`, keyed by `sandbox_id` for the same
-/// reason as [`host_init_script_path_for_sandbox_id`].
-pub fn host_bootstrap_script_path_for_sandbox_id(sandbox_id: &str) -> PathBuf {
+/// Host path where Warp stages the Dev Container bootstrap script (the same
+/// script content used for local shells) before copying it into a container
+/// with `docker cp`. Keyed by a hash of the script's own contents rather
+/// than by session: unlike the init script, the bootstrap script takes no
+/// session-specific input, so every session on a given Warp build stages
+/// and copies the exact same bytes. Keying by content hash makes that copy
+/// write-once-per-build instead of accumulating a fresh ~80KB file per
+/// session in a long-lived container.
+pub fn host_bootstrap_script_path_for_content_hash(content_hash: &str) -> PathBuf {
     dev_container_host_root()
         .join("init")
-        .join(format!("{sandbox_id}-bootstrap.sh"))
+        .join(format!("bootstrap-{content_hash}.sh"))
 }
 
-/// Path *inside the container* that the full bootstrap script is copied to.
-/// The init script's `--rcfile` content `source`s this path directly, so the
-/// large bootstrap script never has to be typed into the live pty.
-pub fn container_bootstrap_script_path_for_sandbox_id(sandbox_id: &str) -> String {
-    format!("/tmp/.warp-devcontainer-bootstrap-{sandbox_id}.sh")
+/// Path *inside the container* that the bootstrap script is copied to. The
+/// init script's `--rcfile` content `source`s this path directly, so the
+/// large bootstrap script never has to be typed into the live pty. Keyed
+/// the same way as [`host_bootstrap_script_path_for_content_hash`].
+pub fn container_bootstrap_script_path_for_content_hash(content_hash: &str) -> String {
+    format!("/tmp/.warp-devcontainer-bootstrap-{content_hash}.sh")
 }
 
 /// Wraps a [`DirectShellStarter`] and adds Dev Container-specific parameters.
@@ -156,16 +161,5 @@ impl DevContainerShellStarter {
     /// Path inside the container the init script is copied to.
     pub fn container_init_script_path(&self) -> String {
         container_init_script_path_for_sandbox_id(&self.sandbox_id)
-    }
-
-    /// Host path where this session's full bootstrap script is staged before
-    /// `docker cp`.
-    pub fn host_bootstrap_script_path(&self) -> PathBuf {
-        host_bootstrap_script_path_for_sandbox_id(&self.sandbox_id)
-    }
-
-    /// Path inside the container the full bootstrap script is copied to.
-    pub fn container_bootstrap_script_path(&self) -> String {
-        container_bootstrap_script_path_for_sandbox_id(&self.sandbox_id)
     }
 }
