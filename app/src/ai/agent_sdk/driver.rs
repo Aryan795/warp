@@ -875,6 +875,7 @@ pub enum AgentDriverError {
 enum InterruptSignal {
     /// SIGTERM from instance teardown, container stop, or worker termination.
     Term,
+    /// SIGINT from Ctrl-C.
     Int,
 }
 
@@ -888,8 +889,7 @@ impl InterruptSignal {
     }
 }
 
-/// Why `run_internal` stopped. Drives artifact flush order and whether the process
-/// re-raises a Unix signal instead of returning to the caller.
+/// Why `run_internal` stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RunEndCause {
     /// `run_internal` returned on its own (success or a non-signal error).
@@ -900,32 +900,9 @@ enum RunEndCause {
     Signal(InterruptSignal),
 }
 
-/// Order of durable artifact work after `run_internal` stops.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ArtifactFlush {
-    RecordingThenSnapshot,
-    /// Handoff snapshot first so it wins the short SIGTERM→SIGKILL window; video
-    /// recording follows if time remains.
-    SnapshotThenRecording,
-    /// Handoff snapshot only; skip video so Ctrl-C can resume default terminate promptly.
-    SnapshotOnly,
-}
-
 enum RunSelect {
     Finished(Result<(), AgentDriverError>),
     Signal(InterruptSignal),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EndOfRunAction {
-    Snapshot,
-    Recording,
-    UnregisterHandlers,
-    UnregisterConsumers,
-    Cleanup,
-    FlushStatus,
-    SendResult,
-    Reraise(InterruptSignal),
 }
 
 #[derive(Clone)]
@@ -957,72 +934,12 @@ fn run_end_cause(select: &RunSelect) -> RunEndCause {
     }
 }
 
-fn artifact_flush_for(cause: RunEndCause) -> ArtifactFlush {
-    match cause {
-        RunEndCause::Completed | RunEndCause::SandboxDeadline => {
-            ArtifactFlush::RecordingThenSnapshot
-        }
-        RunEndCause::Signal(InterruptSignal::Term) => ArtifactFlush::SnapshotThenRecording,
-        RunEndCause::Signal(InterruptSignal::Int) => ArtifactFlush::SnapshotOnly,
-    }
-}
-
 const fn should_attempt_handoff_snapshot(
     oz_handoff_enabled: bool,
     has_task_id: bool,
     snapshot_disabled: bool,
 ) -> bool {
     oz_handoff_enabled && has_task_id && !snapshot_disabled
-}
-
-fn push_artifact_actions(
-    actions: &mut Vec<EndOfRunAction>,
-    flush: ArtifactFlush,
-    snapshot_allowed: bool,
-) {
-    match flush {
-        ArtifactFlush::RecordingThenSnapshot => {
-            actions.push(EndOfRunAction::Recording);
-            if snapshot_allowed {
-                actions.push(EndOfRunAction::Snapshot);
-            }
-        }
-        ArtifactFlush::SnapshotThenRecording => {
-            if snapshot_allowed {
-                actions.push(EndOfRunAction::Snapshot);
-            }
-            actions.push(EndOfRunAction::Recording);
-        }
-        ArtifactFlush::SnapshotOnly => {
-            if snapshot_allowed {
-                actions.push(EndOfRunAction::Snapshot);
-            }
-        }
-    }
-}
-
-fn end_of_run_actions(cause: RunEndCause, snapshot_allowed: bool) -> Vec<EndOfRunAction> {
-    let mut actions = Vec::new();
-    match cause {
-        RunEndCause::Signal(signal) => {
-            push_artifact_actions(&mut actions, artifact_flush_for(cause), snapshot_allowed);
-            actions.push(EndOfRunAction::UnregisterHandlers);
-            if matches!(signal, InterruptSignal::Term) {
-                actions.push(EndOfRunAction::UnregisterConsumers);
-                actions.push(EndOfRunAction::Cleanup);
-            }
-            actions.push(EndOfRunAction::Reraise(signal));
-        }
-        RunEndCause::Completed | RunEndCause::SandboxDeadline => {
-            actions.push(EndOfRunAction::UnregisterHandlers);
-            actions.push(EndOfRunAction::UnregisterConsumers);
-            push_artifact_actions(&mut actions, artifact_flush_for(cause), snapshot_allowed);
-            actions.push(EndOfRunAction::FlushStatus);
-            actions.push(EndOfRunAction::SendResult);
-            actions.push(EndOfRunAction::Cleanup);
-        }
-    }
-    actions
 }
 
 async fn select_run_outcome<RunFut, TimerFut, SignalFut>(
@@ -1055,56 +972,140 @@ where
 }
 
 #[cfg(unix)]
+struct InterruptWatch {
+    sig_ids: Vec<signal_hook::SigId>,
+}
+
+#[cfg(unix)]
+impl InterruptWatch {
+    fn unregister(self) {
+        for id in self.sig_ids {
+            signal_hook::low_level::unregister(id);
+        }
+    }
+}
+
+#[cfg(unix)]
 fn watch_interrupt_signals() -> (
     impl Future<Output = InterruptSignal>,
     InterruptFlags,
-    Vec<signal_hook::SigId>,
+    InterruptWatch,
 ) {
+    use std::os::unix::net::UnixStream;
     use std::sync::atomic::AtomicBool;
 
+    use signal_hook::flag;
+    use signal_hook::low_level::pipe;
+
+    let shutdown_armed = Arc::new(AtomicBool::new(false));
     let flags = InterruptFlags {
         term: Arc::new(AtomicBool::new(false)),
         int: Arc::new(AtomicBool::new(false)),
     };
     let mut sig_ids = Vec::new();
-    if let Ok(id) =
-        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flags.term))
-    {
-        sig_ids.push(id);
+
+    for (signal, pending) in [
+        (signal_hook::consts::SIGTERM, &flags.term),
+        (signal_hook::consts::SIGINT, &flags.int),
+    ] {
+        // First delivery starts graceful snapshot; a second emulates default terminate so a
+        // stuck snapshot cannot trap Ctrl-C / SIGTERM.
+        if let Ok(id) = flag::register_conditional_default(signal, Arc::clone(&shutdown_armed)) {
+            sig_ids.push(id);
+        }
+        if let Ok(id) = flag::register(signal, Arc::clone(&shutdown_armed)) {
+            sig_ids.push(id);
+        }
+        if let Ok(id) = flag::register(signal, Arc::clone(pending)) {
+            sig_ids.push(id);
+        }
     }
-    if let Ok(id) = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flags.int))
-    {
-        sig_ids.push(id);
-    }
+
+    let (tx, rx) = oneshot::channel();
     let wait_flags = flags.clone();
-    let fut = async move {
-        loop {
-            if let Some(signal) = wait_flags.pending() {
-                return signal;
+    match UnixStream::pair() {
+        Ok((read, write)) => {
+            let mut registered_pipe = false;
+            if let Ok(write_term) = write.try_clone()
+                && let Ok(id) = pipe::register(signal_hook::consts::SIGTERM, write_term)
+            {
+                sig_ids.push(id);
+                registered_pipe = true;
             }
-            Timer::after(Duration::from_millis(100)).await;
+            if let Ok(id) = pipe::register(signal_hook::consts::SIGINT, write) {
+                sig_ids.push(id);
+                registered_pipe = true;
+            }
+            if registered_pipe {
+                spawn_pipe_interrupt_waiter(read, wait_flags, tx);
+            } else {
+                spawn_poll_interrupt_waiter(wait_flags, tx);
+            }
+        }
+        Err(_) => spawn_poll_interrupt_waiter(wait_flags, tx),
+    }
+
+    let fut = async move {
+        match rx.await {
+            Ok(signal) => signal,
+            Err(_) => future::pending().await,
         }
     };
-    (fut, flags, sig_ids)
+    (fut, flags, InterruptWatch { sig_ids })
 }
 
 #[cfg(unix)]
-fn unregister_signal_ids(sig_ids: Vec<signal_hook::SigId>) {
-    for id in sig_ids {
-        signal_hook::low_level::unregister(id);
-    }
+fn spawn_pipe_interrupt_waiter(
+    mut read: std::os::unix::net::UnixStream,
+    flags: InterruptFlags,
+    tx: oneshot::Sender<InterruptSignal>,
+) {
+    use std::io::Read as _;
+
+    thread::spawn(move || {
+        let mut buf = [0u8; 8];
+        loop {
+            if let Some(signal) = flags.pending() {
+                let _ = tx.send(signal);
+                return;
+            }
+            match read.read(&mut buf) {
+                Ok(0) => {
+                    if let Some(signal) = flags.pending() {
+                        let _ = tx.send(signal);
+                    }
+                    return;
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => {
+                    if let Some(signal) = flags.pending() {
+                        let _ = tx.send(signal);
+                    }
+                    return;
+                }
+            }
+        }
+    });
 }
 
 #[cfg(unix)]
-fn restore_default_and_reraise(signal: InterruptSignal) -> ! {
-    let raw = signal.as_raw();
-    // SAFETY: switching to SIG_DFL so `raise` delivers kernel default terminate
-    // instead of re-entering the flag handler we just unregistered.
-    unsafe {
-        libc::signal(raw, libc::SIG_DFL);
-    }
-    let _ = signal_hook::low_level::raise(raw);
-    std::process::exit(128 + raw);
+fn spawn_poll_interrupt_waiter(flags: InterruptFlags, tx: oneshot::Sender<InterruptSignal>) {
+    thread::spawn(move || {
+        loop {
+            if let Some(signal) = flags.pending() {
+                let _ = tx.send(signal);
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    });
+}
+
+#[cfg(unix)]
+fn emulate_default_and_exit(signal: InterruptSignal) -> ! {
+    let _ = signal_hook::low_level::emulate_default_handler(signal.as_raw());
+    signal_hook::low_level::abort();
 }
 
 /// User-facing message for [`AgentDriverError::SandboxDeadlineReached`].
@@ -1484,8 +1485,8 @@ impl AgentDriver {
                 // Docker Sandbox and Namespace. The sandbox deadline is set to
                 // MaxInstanceRuntime + SandboxShutdownWarningWindow (5 min); this timer
                 // fires SandboxShutdownWarningWindow before that hard kill, giving the
-                // normal AgentDriver teardown path — recording upload, snapshot upload —
-                // time to complete while the agent is still running.
+                // normal AgentDriver teardown path — snapshot then recording — time to
+                // complete while the agent is still running.
                 //
                 // Secondary: SIGTERM / SIGINT detection (Unix only).
                 //
@@ -1495,11 +1496,9 @@ impl AgentDriver {
                 // self-hosted workers being terminated. When the deadline timer is
                 // active it fires 5 minutes earlier and wins this race, but SIGTERM is
                 // the primary signal whenever WARP_SANDBOX_DEADLINE is absent or the
-                // shutdown was not deadline-driven. SIGINT (Ctrl-C) is intercepted the
-                // same way so a handoff snapshot can be saved before default terminate.
-                // Handlers stay registered through the snapshot so a repeated SIGTERM
-                // cannot default-terminate the process before that work finishes; they
-                // are then unregistered and the signal is re-raised.
+                // shutdown was not deadline-driven. SIGINT (Ctrl-C) uses the same killed
+                // path so a handoff snapshot can be saved before default terminate. A
+                // second SIGINT/SIGTERM emulates the default action immediately.
                 //
                 // When WARP_SANDBOX_DEADLINE is absent and no interrupt arrives,
                 // run_internal runs to completion as before (local and self-hosted runs
@@ -1553,17 +1552,14 @@ impl AgentDriver {
                         .map(|w| Either::Left(Timer::after(w).map(|_| ())))
                         .unwrap_or_else(|| Either::Right(future::pending::<()>()));
 
-                    // Interrupt future: catches SIGTERM (instance teardown, container
-                    // stops, self-hosted worker termination) and SIGINT (Ctrl-C). Uses
-                    // signal_hook::flag polling (100ms async sleep, no CPU cost) on
-                    // Unix; pending forever on non-Unix platforms. Ids are held so the
-                    // flag handlers can be unregistered after the snapshot attempt.
-                    // `select_run_outcome` polls the signal arm first and re-checks the
-                    // recorded flags so a concurrently-ready run/timer cannot swallow an
-                    // already-observed interrupt.
+                    // Interrupt future: SIGTERM (instance teardown, container stops,
+                    // self-hosted worker termination) and SIGINT (Ctrl-C). Unix uses
+                    // signal-hook's self-pipe to wake an async oneshot; other platforms
+                    // pend forever. `select_run_outcome` prefers the signal arm and
+                    // re-checks recorded flags so a concurrently-ready run/timer cannot
+                    // swallow an already-observed interrupt.
                     #[cfg(unix)]
-                    let (signal_fut, interrupt_flags, registered_signal_ids) =
-                        watch_interrupt_signals();
+                    let (signal_fut, interrupt_flags, interrupt_watch) = watch_interrupt_signals();
                     #[cfg(not(unix))]
                     let signal_fut = future::pending::<InterruptSignal>();
                     #[cfg(unix)]
@@ -1605,7 +1601,7 @@ impl AgentDriver {
                     }
                     #[cfg(unix)]
                     {
-                        (select, registered_signal_ids)
+                        (select, interrupt_watch)
                     }
                     #[cfg(not(unix))]
                     {
@@ -1614,7 +1610,7 @@ impl AgentDriver {
                 };
 
                 #[cfg(unix)]
-                let (select_result, registered_signal_ids) = select_result;
+                let (select_result, interrupt_watch) = select_result;
                 #[cfg(not(unix))]
                 let select_result = select_result;
 
@@ -1628,63 +1624,44 @@ impl AgentDriver {
                     task_id.is_some(),
                     snapshot_disabled,
                 );
-                let actions = end_of_run_actions(cause, snapshot_allowed);
-                let mut finished_result = match select_result {
-                    RunSelect::Finished(result) => Some(result),
-                    RunSelect::Signal(_) => None,
-                };
-                let mut result_tx = Some(tx);
-                #[cfg(unix)]
-                let mut registered_signal_ids = registered_signal_ids;
 
-                for action in actions {
-                    match action {
-                        EndOfRunAction::Snapshot => {
-                            Self::run_snapshot_upload(&foreground).await;
+                match cause {
+                    RunEndCause::Signal(signal) => {
+                        // Keep handlers registered so a second SIGINT/SIGTERM can still
+                        // emulate default terminate if snapshot/recording gets stuck.
+                        Self::save_run_artifacts(&foreground, snapshot_allowed).await;
+                        #[cfg(unix)]
+                        emulate_default_and_exit(signal);
+                        #[cfg(not(unix))]
+                        {
+                            let _ = signal;
+                            unreachable!("Unix signals are not delivered on this platform");
                         }
-                        EndOfRunAction::Recording => {
-                            Self::finalize_run_recording(&foreground).await;
+                    }
+                    RunEndCause::Completed | RunEndCause::SandboxDeadline => {
+                        #[cfg(unix)]
+                        interrupt_watch.unregister();
+                        Self::unregister_end_of_run_consumers(&foreground).await;
+                        Self::save_run_artifacts(&foreground, snapshot_allowed).await;
+                        if let Some(task_id) = task_id {
+                            Self::flush_task_status_before_exit(
+                                task_id,
+                                matches!(&select_result, RunSelect::Finished(Ok(()))),
+                                &server_api,
+                                &foreground,
+                            )
+                            .await;
                         }
-                        EndOfRunAction::UnregisterHandlers => {
-                            #[cfg(unix)]
-                            unregister_signal_ids(std::mem::take(&mut registered_signal_ids));
-                        }
-                        EndOfRunAction::UnregisterConsumers => {
-                            Self::unregister_end_of_run_consumers(&foreground).await;
-                        }
-                        EndOfRunAction::Cleanup => {
-                            Self::cleanup(foreground.clone()).await;
-                        }
-                        EndOfRunAction::FlushStatus => {
-                            if let Some(task_id) = task_id {
-                                Self::flush_task_status_before_exit(
-                                    task_id,
-                                    finished_result.as_ref().is_some_and(Result::is_ok),
-                                    &server_api,
-                                    &foreground,
-                                )
-                                .await;
+                        let result = match select_result {
+                            RunSelect::Finished(result) => result,
+                            RunSelect::Signal(_) => {
+                                unreachable!("signal shutdown is handled above")
                             }
+                        };
+                        if tx.send(result).is_err() {
+                            report_error!("Caller did not wait for agent driver to finish");
                         }
-                        EndOfRunAction::SendResult => {
-                            let result = finished_result
-                                .take()
-                                .unwrap_or(Err(AgentDriverError::InvalidRuntimeState));
-                            if let Some(tx) = result_tx.take()
-                                && tx.send(result).is_err()
-                            {
-                                report_error!("Caller did not wait for agent driver to finish");
-                            }
-                        }
-                        EndOfRunAction::Reraise(signal) => {
-                            #[cfg(unix)]
-                            restore_default_and_reraise(signal);
-                            #[cfg(not(unix))]
-                            {
-                                let _ = signal;
-                                unreachable!("Unix signals are not delivered on this platform");
-                            }
-                        }
+                        Self::cleanup(foreground.clone()).await;
                     }
                 }
             },
@@ -4998,6 +4975,13 @@ impl AgentDriver {
         let _ = foreground
             .spawn(|me, ctx| me.unregister_streamer_consumer(ctx))
             .await;
+    }
+
+    async fn save_run_artifacts(foreground: &ModelSpawner<Self>, snapshot_allowed: bool) {
+        if snapshot_allowed {
+            Self::run_snapshot_upload(foreground).await;
+        }
+        Self::finalize_run_recording(foreground).await;
     }
 
     async fn finalize_run_recording(foreground: &ModelSpawner<Self>) {
