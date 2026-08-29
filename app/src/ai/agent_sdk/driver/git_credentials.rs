@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -40,8 +40,8 @@ const NETWORK_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const NETWORK_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 static TASK_CREDENTIALS: RwLock<Vec<GitCredential>> = RwLock::new(Vec::new());
-static REPOSITORY_BINDINGS: RwLock<HashMap<(CodeForge, String), String>> =
-    RwLock::new(HashMap::new());
+static REPOSITORY_BINDINGS: LazyLock<RwLock<HashMap<(CodeForge, String), String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 static GLAB_CONFIGS: RwLock<Vec<RegisteredGlabConfig>> = RwLock::new(Vec::new());
 
 #[derive(Clone)]
@@ -257,11 +257,12 @@ fn credential_origin(credential: &GitCredential) -> Result<Url> {
             .map_err(|_| anyhow::anyhow!("Invalid task Git credential port"))?;
     }
     let prefix = normalized_relative_prefix(&credential.relative_url_prefix)?;
-    origin.set_path(if prefix.is_empty() {
-        "/"
+    let path = if prefix.is_empty() {
+        "/".to_string()
     } else {
-        &format!("/{prefix}/")
-    });
+        format!("/{prefix}/")
+    };
+    origin.set_path(&path);
     Ok(origin)
 }
 

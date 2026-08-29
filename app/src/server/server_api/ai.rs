@@ -2834,7 +2834,6 @@ impl AIClient for ServerApi {
         &self,
         task_id: String,
         workload_token: String,
-        accepts_partial_refresh: bool,
     ) -> anyhow::Result<TaskGitCredentialsResponse, anyhow::Error> {
         match self
             .get_task_git_credentials_current(task_id.clone(), workload_token.clone())

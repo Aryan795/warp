@@ -204,12 +204,11 @@ fn ordinary_glab_wrapper_discovers_each_checkout_config() {
     .unwrap();
     let wrapper = temp.path().join("glab");
     write_executable_file(&wrapper, &glab_wrapper_script(&fake_glab)).unwrap();
+    let existing_paths = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
     let path = std::env::join_paths(
-        std::iter::once(temp.path().to_path_buf()).chain(
-            std::env::var_os("PATH")
-                .into_iter()
-                .flat_map(|path| std::env::split_paths(&path)),
-        ),
+        std::iter::once(temp.path().to_path_buf()).chain(existing_paths),
     )
     .unwrap();
 

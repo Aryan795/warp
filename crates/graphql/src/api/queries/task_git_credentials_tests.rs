@@ -18,6 +18,11 @@ fn request_context() -> RequestContext {
     }
 }
 
+fn query_selects_field(query: &str, field: &str) -> bool {
+    query
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| token == field)
+}
 #[test]
 fn current_query_selects_authority_fields() {
     let operation = TaskGitCredentials::build(TaskGitCredentialsVariables {
@@ -43,7 +48,7 @@ fn current_query_selects_authority_fields() {
         "token",
     ] {
         assert!(
-            operation.query.contains(field),
+            query_selects_field(&operation.query, field),
             "current query must select {field}"
         );
     }
@@ -70,7 +75,7 @@ fn legacy_query_omits_authority_fields() {
         "projectPaths",
     ] {
         assert!(
-            !operation.query.contains(field),
+            !query_selects_field(&operation.query, field),
             "legacy query must not select {field}"
         );
     }
