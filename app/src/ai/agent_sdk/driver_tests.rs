@@ -2813,6 +2813,25 @@ fn handoff_snapshot_is_skipped_when_no_snapshot_is_set() {
 }
 
 #[cfg(unix)]
+#[test]
+fn unregistering_interrupt_watch_stops_the_fallback_waiter() {
+    let flags = recorded_interrupt_flags(false, false);
+    let closed = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = oneshot::channel();
+    let waiter = super::spawn_poll_interrupt_waiter(flags, tx, Arc::clone(&closed));
+    super::InterruptWatch {
+        sig_ids: Vec::new(),
+        closed,
+        waiter,
+    }
+    .unregister();
+    assert!(
+        block_on(rx).is_err(),
+        "fallback waiter should exit without delivering a signal"
+    );
+}
+
+#[cfg(unix)]
 const SIGNAL_CHILD_ENV: &str = "WARP_AGENT_DRIVER_SIGNAL_CHILD";
 #[cfg(unix)]
 const SIGNAL_LOG_ENV: &str = "WARP_AGENT_DRIVER_SIGNAL_LOG";
@@ -2831,7 +2850,6 @@ fn signal_lifecycle_child() -> ! {
         "int" | "int-hang" => InterruptSignal::Int,
         other => panic!("unknown child kind {other}"),
     };
-    let log_path = std::env::var(SIGNAL_LOG_ENV).unwrap();
     let ready_path = std::env::var(SIGNAL_READY_ENV).unwrap();
 
     let (signal_fut, flags, _watch) = super::watch_interrupt_signals();
@@ -2846,18 +2864,16 @@ fn signal_lifecycle_child() -> ! {
     ));
     assert_eq!(run_end_cause(&selected), RunEndCause::Signal(expected));
 
-    let mut log = fs::File::create(&log_path).unwrap();
     if kind == "int-hang" {
-        writeln!(log, "snapshot_start").unwrap();
+        let log_path = std::env::var(SIGNAL_LOG_ENV).unwrap();
+        let mut log = fs::File::create(&log_path).unwrap();
+        writeln!(log, "shutdown_started").unwrap();
         log.sync_all().unwrap();
         let continue_path = std::env::var(SIGNAL_CONTINUE_ENV).unwrap();
         while !Path::new(&continue_path).exists() {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    writeln!(log, "snapshot").unwrap();
-    writeln!(log, "recording").unwrap();
-    log.sync_all().unwrap();
     let RunEndCause::Signal(signal) = run_end_cause(&selected) else {
         std::process::exit(1);
     };
@@ -2871,7 +2887,7 @@ fn spawn_signal_lifecycle_child(
     first_sig: i32,
     second_sig: Option<i32>,
     expected_sig: i32,
-    expected_log: &str,
+    expected_log: Option<&str>,
 ) {
     use std::os::unix::process::ExitStatusExt as _;
 
@@ -2930,13 +2946,13 @@ fn spawn_signal_lifecycle_child(
         for _ in 0..1_000 {
             if fs::read_to_string(&log_path)
                 .unwrap_or_default()
-                .contains("snapshot_start")
+                .contains("shutdown_started")
             {
                 break;
             }
             if let Some(status) = child.try_wait().unwrap() {
                 panic!(
-                    "signal child exited before snapshot_start: status={status:?} stderr={}",
+                    "signal child exited before shutdown_started: status={status:?} stderr={}",
                     fs::read_to_string(&stderr_path).unwrap_or_default()
                 );
             }
@@ -2949,44 +2965,46 @@ fn spawn_signal_lifecycle_child(
 
     let status = child.wait().unwrap();
     assert_eq!(status.signal(), Some(expected_sig), "status={status:?}");
-    assert_eq!(fs::read_to_string(&log_path).unwrap(), expected_log);
+    if let Some(expected_log) = expected_log {
+        assert_eq!(fs::read_to_string(&log_path).unwrap(), expected_log);
+    }
 }
 
 #[cfg(unix)]
 #[test]
-fn sigterm_subprocess_writes_snapshot_then_recording_and_exits_signaled() {
+fn sigterm_subprocess_exits_signaled() {
     spawn_signal_lifecycle_child(
         "term",
-        "ai::agent_sdk::driver::tests::sigterm_subprocess_writes_snapshot_then_recording_and_exits_signaled",
+        "ai::agent_sdk::driver::tests::sigterm_subprocess_exits_signaled",
         libc::SIGTERM,
         None,
         libc::SIGTERM,
-        "snapshot\nrecording\n",
+        None,
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn sigint_subprocess_writes_snapshot_then_recording_and_exits_signaled() {
+fn sigint_subprocess_exits_signaled() {
     spawn_signal_lifecycle_child(
         "int",
-        "ai::agent_sdk::driver::tests::sigint_subprocess_writes_snapshot_then_recording_and_exits_signaled",
+        "ai::agent_sdk::driver::tests::sigint_subprocess_exits_signaled",
         libc::SIGINT,
         None,
         libc::SIGINT,
-        "snapshot\nrecording\n",
+        None,
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn second_sigint_kills_during_stuck_snapshot() {
+fn second_sigint_kills_during_stuck_shutdown() {
     spawn_signal_lifecycle_child(
         "int-hang",
-        "ai::agent_sdk::driver::tests::second_sigint_kills_during_stuck_snapshot",
+        "ai::agent_sdk::driver::tests::second_sigint_kills_during_stuck_shutdown",
         libc::SIGINT,
         Some(libc::SIGINT),
         libc::SIGINT,
-        "snapshot_start\n",
+        Some("shutdown_started\n"),
     );
 }

@@ -974,14 +974,20 @@ where
 #[cfg(unix)]
 struct InterruptWatch {
     sig_ids: Vec<signal_hook::SigId>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    waiter: thread::JoinHandle<()>,
 }
 
 #[cfg(unix)]
 impl InterruptWatch {
     fn unregister(self) {
+        use std::sync::atomic::Ordering;
+
+        self.closed.store(true, Ordering::SeqCst);
         for id in self.sig_ids {
             signal_hook::low_level::unregister(id);
         }
+        let _ = self.waiter.join();
     }
 }
 
@@ -998,6 +1004,7 @@ fn watch_interrupt_signals() -> (
     use signal_hook::low_level::pipe;
 
     let shutdown_armed = Arc::new(AtomicBool::new(false));
+    let closed = Arc::new(AtomicBool::new(false));
     let flags = InterruptFlags {
         term: Arc::new(AtomicBool::new(false)),
         int: Arc::new(AtomicBool::new(false)),
@@ -1023,7 +1030,8 @@ fn watch_interrupt_signals() -> (
 
     let (tx, rx) = oneshot::channel();
     let wait_flags = flags.clone();
-    match UnixStream::pair() {
+    let waiter_closed = Arc::clone(&closed);
+    let waiter = match UnixStream::pair() {
         Ok((read, write)) => {
             let mut registered_pipe = false;
             if let Ok(write_term) = write.try_clone()
@@ -1037,13 +1045,13 @@ fn watch_interrupt_signals() -> (
                 registered_pipe = true;
             }
             if registered_pipe {
-                spawn_pipe_interrupt_waiter(read, wait_flags, tx);
+                spawn_pipe_interrupt_waiter(read, wait_flags, tx, waiter_closed)
             } else {
-                spawn_poll_interrupt_waiter(wait_flags, tx);
+                spawn_poll_interrupt_waiter(wait_flags, tx, waiter_closed)
             }
         }
-        Err(_) => spawn_poll_interrupt_waiter(wait_flags, tx),
-    }
+        Err(_) => spawn_poll_interrupt_waiter(wait_flags, tx, waiter_closed),
+    };
 
     let fut = async move {
         match rx.await {
@@ -1051,7 +1059,15 @@ fn watch_interrupt_signals() -> (
             Err(_) => future::pending().await,
         }
     };
-    (fut, flags, InterruptWatch { sig_ids })
+    (
+        fut,
+        flags,
+        InterruptWatch {
+            sig_ids,
+            closed,
+            waiter,
+        },
+    )
 }
 
 #[cfg(unix)]
@@ -1059,12 +1075,17 @@ fn spawn_pipe_interrupt_waiter(
     mut read: std::os::unix::net::UnixStream,
     flags: InterruptFlags,
     tx: oneshot::Sender<InterruptSignal>,
-) {
+    closed: Arc<std::sync::atomic::AtomicBool>,
+) -> thread::JoinHandle<()> {
     use std::io::Read as _;
+    use std::sync::atomic::Ordering;
 
     thread::spawn(move || {
         let mut buf = [0u8; 8];
         loop {
+            if closed.load(Ordering::SeqCst) {
+                return;
+            }
             if let Some(signal) = flags.pending() {
                 let _ = tx.send(signal);
                 return;
@@ -1086,20 +1107,29 @@ fn spawn_pipe_interrupt_waiter(
                 }
             }
         }
-    });
+    })
 }
 
 #[cfg(unix)]
-fn spawn_poll_interrupt_waiter(flags: InterruptFlags, tx: oneshot::Sender<InterruptSignal>) {
+fn spawn_poll_interrupt_waiter(
+    flags: InterruptFlags,
+    tx: oneshot::Sender<InterruptSignal>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+) -> thread::JoinHandle<()> {
+    use std::sync::atomic::Ordering;
+
     thread::spawn(move || {
         loop {
+            if closed.load(Ordering::SeqCst) {
+                return;
+            }
             if let Some(signal) = flags.pending() {
                 let _ = tx.send(signal);
                 return;
             }
             thread::sleep(Duration::from_millis(50));
         }
-    });
+    })
 }
 
 #[cfg(unix)]
