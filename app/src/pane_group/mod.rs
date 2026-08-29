@@ -1191,6 +1191,10 @@ impl PaneGroup {
         })
     }
 
+    pub(crate) fn has_pane(&self, pane_id: PaneId) -> bool {
+        self.pane_contents.contains_key(&pane_id)
+    }
+
     /// Returns true if this pane group contains any terminal panes.
     pub fn has_terminal_panes(&self) -> bool {
         self.pane_contents

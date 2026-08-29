@@ -11,6 +11,10 @@
 
 #[cfg(feature = "local_tty")]
 mod newline;
+#[cfg(feature = "local_tty")]
+mod operation;
+#[cfg(feature = "local_tty")]
+pub(crate) mod registry;
 #[cfg(all(feature = "local_tty", not(feature = "remote_tty")))]
 use std::collections::HashMap;
 #[cfg(feature = "local_tty")]
