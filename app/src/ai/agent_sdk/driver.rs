@@ -867,16 +867,141 @@ pub enum AgentDriverError {
         /// whether the message points the user at upgrading.
         on_free_plan: bool,
     },
-    /// The process received SIGTERM while the run was still in progress.
-    /// SIGTERM is how instance teardown reaches the client — server-initiated
-    /// sandbox shutdown, container-runtime stops, and self-hosted worker
-    /// termination — and the client cannot distinguish which initiated it, so
-    /// it is reported as `FAILED` (externally-originating).
-    #[error(
-        "The agent process was terminated (SIGTERM) before the run completed, most likely \
-         because the instance or worker hosting the run was shut down."
-    )]
-    TerminatedBySignal,
+}
+
+/// Unix signal that aborts an in-progress agent run so a handoff snapshot can be
+/// saved before the default terminate disposition is restored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InterruptSignal {
+    /// SIGTERM from instance teardown, container stop, or worker termination.
+    Term,
+    Int,
+}
+
+impl InterruptSignal {
+    #[cfg(unix)]
+    fn as_raw(self) -> libc::c_int {
+        match self {
+            Self::Term => libc::SIGTERM,
+            Self::Int => libc::SIGINT,
+        }
+    }
+}
+
+/// Why `run_internal` stopped. Drives artifact flush order and whether the process
+/// re-raises a Unix signal instead of returning to the caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunEndCause {
+    /// `run_internal` returned on its own (success or a non-signal error).
+    Completed,
+    /// `WARP_SANDBOX_DEADLINE` warning window fired.
+    SandboxDeadline,
+    /// A Unix interrupt arrived while the run was still in progress.
+    Signal(InterruptSignal),
+}
+
+/// Order of durable artifact work after `run_internal` stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArtifactFlush {
+    RecordingThenSnapshot,
+    /// Handoff snapshot first so it wins the short SIGTERM→SIGKILL window; video
+    /// recording follows if time remains.
+    SnapshotThenRecording,
+    /// Handoff snapshot only; skip video so Ctrl-C can resume default terminate promptly.
+    SnapshotOnly,
+}
+
+enum RunSelect {
+    Finished(Result<(), AgentDriverError>),
+    Signal(InterruptSignal),
+}
+
+fn run_end_cause(select: &RunSelect) -> RunEndCause {
+    match select {
+        RunSelect::Finished(Err(AgentDriverError::SandboxDeadlineReached { .. })) => {
+            RunEndCause::SandboxDeadline
+        }
+        RunSelect::Finished(_) => RunEndCause::Completed,
+        RunSelect::Signal(signal) => RunEndCause::Signal(*signal),
+    }
+}
+
+fn artifact_flush_for(cause: RunEndCause) -> ArtifactFlush {
+    match cause {
+        RunEndCause::Completed | RunEndCause::SandboxDeadline => {
+            ArtifactFlush::RecordingThenSnapshot
+        }
+        RunEndCause::Signal(InterruptSignal::Term) => ArtifactFlush::SnapshotThenRecording,
+        RunEndCause::Signal(InterruptSignal::Int) => ArtifactFlush::SnapshotOnly,
+    }
+}
+
+fn resumes_default_signal_action(cause: RunEndCause) -> bool {
+    matches!(cause, RunEndCause::Signal(_))
+}
+
+fn finishes_remaining_teardown_before_reraise(cause: RunEndCause) -> bool {
+    matches!(cause, RunEndCause::Signal(InterruptSignal::Term))
+}
+
+const fn should_attempt_handoff_snapshot(
+    oz_handoff_enabled: bool,
+    has_task_id: bool,
+    snapshot_disabled: bool,
+) -> bool {
+    oz_handoff_enabled && has_task_id && !snapshot_disabled
+}
+
+#[cfg(unix)]
+fn watch_interrupt_signals() -> (
+    impl Future<Output = InterruptSignal>,
+    Vec<signal_hook::SigId>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let term_flag = Arc::new(AtomicBool::new(false));
+    let int_flag = Arc::new(AtomicBool::new(false));
+    let mut sig_ids = Vec::new();
+    if let Ok(id) =
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term_flag))
+    {
+        sig_ids.push(id);
+    }
+    if let Ok(id) = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&int_flag))
+    {
+        sig_ids.push(id);
+    }
+    let fut = async move {
+        loop {
+            if term_flag.load(Ordering::Acquire) {
+                return InterruptSignal::Term;
+            }
+            if int_flag.load(Ordering::Acquire) {
+                return InterruptSignal::Int;
+            }
+            Timer::after(Duration::from_millis(100)).await;
+        }
+    };
+    (fut, sig_ids)
+}
+
+#[cfg(unix)]
+fn unregister_signal_ids(sig_ids: Vec<signal_hook::SigId>) {
+    for id in sig_ids {
+        signal_hook::low_level::unregister(id);
+    }
+}
+
+#[cfg(unix)]
+fn restore_default_and_reraise(signal: InterruptSignal) -> ! {
+    let raw = signal.as_raw();
+    // SAFETY: switching to SIG_DFL so `raise` delivers kernel default terminate
+    // instead of re-entering the flag handler we just unregistered.
+    unsafe {
+        libc::signal(raw, libc::SIG_DFL);
+    }
+    let _ = signal_hook::low_level::raise(raw);
+    std::process::exit(128 + raw);
 }
 
 /// User-facing message for [`AgentDriverError::SandboxDeadlineReached`].
@@ -1213,10 +1338,11 @@ impl AgentDriver {
     /// driver-level errors itself, and — for error-free runs where no terminal
     /// state was confirmed delivered — reports `SUCCEEDED` directly (see
     /// `flush_task_status_before_exit`), so a graceful exit never leaves the
-    /// server task `IN_PROGRESS`. Abrupt exits (SIGKILL, panics, Ctrl-C —
-    /// which terminates the app without resolving this future — and aborts
-    /// before the task id is known) are NOT covered and rely on server-side
-    /// stale-task cleanup.
+    /// server task `IN_PROGRESS`. Abrupt exits (SIGKILL, panics, Unix SIGINT/
+    /// SIGTERM after a best-effort handoff snapshot and re-raise — which
+    /// terminate the process without resolving this future — and aborts before
+    /// the task id is known) are NOT covered and rely on server-side stale-task
+    /// cleanup.
     pub fn run(
         &mut self,
         task: Task,
@@ -1258,7 +1384,7 @@ impl AgentDriver {
                 // normal AgentDriver teardown path — recording upload, snapshot upload —
                 // time to complete while the agent is still running.
                 //
-                // Secondary: SIGTERM detection (Unix only).
+                // Secondary: SIGTERM / SIGINT detection (Unix only).
                 //
                 // SIGTERM is how external shutdowns reach the client: server-initiated
                 // sandbox/instance teardown (both Docker Sandbox and Namespace send
@@ -1266,13 +1392,16 @@ impl AgentDriver {
                 // self-hosted workers being terminated. When the deadline timer is
                 // active it fires 5 minutes earlier and wins this race, but SIGTERM is
                 // the primary signal whenever WARP_SANDBOX_DEADLINE is absent or the
-                // shutdown was not deadline-driven. The SIGTERM handler is unregistered
-                // after run_internal resolves to restore the default terminate
-                // disposition.
+                // shutdown was not deadline-driven. SIGINT (Ctrl-C) is intercepted the
+                // same way so a handoff snapshot can be saved before default terminate.
+                // Handlers stay registered through the snapshot so a repeated SIGTERM
+                // cannot default-terminate the process before that work finishes; they
+                // are then unregistered and the signal is re-raised.
                 //
-                // When WARP_SANDBOX_DEADLINE is absent and no SIGTERM arrives, run_internal
-                // runs to completion as before (local and self-hosted runs are unaffected).
-                let result = {
+                // When WARP_SANDBOX_DEADLINE is absent and no interrupt arrives,
+                // run_internal runs to completion as before (local and self-hosted runs
+                // are unaffected).
+                let select_result = {
                     /// How far before the sandbox deadline to start the teardown sequence.
                     const SHUTDOWN_WARNING_WINDOW: Duration = Duration::from_secs(5 * 60);
 
@@ -1321,135 +1450,102 @@ impl AgentDriver {
                         .map(|w| Either::Left(Timer::after(w).map(|_| ())))
                         .unwrap_or_else(|| Either::Right(future::pending::<()>()));
 
-                    // SIGTERM future: catches externally-initiated shutdowns (instance
-                    // teardown, container stops, self-hosted worker termination). Uses
+                    // Interrupt future: catches SIGTERM (instance teardown, container
+                    // stops, self-hosted worker termination) and SIGINT (Ctrl-C). Uses
                     // signal_hook::flag polling (100ms async sleep, no CPU cost) on
-                    // Unix; pending forever on non-Unix platforms. The sig_id is held
-                    // to restore the default SIGTERM disposition after select! resolves.
+                    // Unix; pending forever on non-Unix platforms. Ids are held so the
+                    // flag handlers can be unregistered after the snapshot attempt.
                     #[cfg(unix)]
-                    let (sigterm_fut, sigterm_sig_id) = {
-                        use std::sync::atomic::{AtomicBool, Ordering};
-                        let flag = std::sync::Arc::new(AtomicBool::new(false));
-                        let sig_id = signal_hook::flag::register(
-                            signal_hook::consts::SIGTERM,
-                            std::sync::Arc::clone(&flag),
-                        )
-                        .ok();
-                        let flag_clone = flag.clone();
-                        let fut = async move {
-                            loop {
-                                if flag_clone.load(Ordering::Acquire) {
-                                    break;
-                                }
-                                Timer::after(Duration::from_millis(100)).await;
-                            }
-                        };
-                        (fut, sig_id)
-                    };
+                    let (signal_fut, registered_signal_ids) = watch_interrupt_signals();
                     #[cfg(not(unix))]
-                    let sigterm_fut = future::pending::<()>();
+                    let signal_fut = future::pending::<InterruptSignal>();
 
                     // `select!` resolves exactly one arm and drops the other future(s), so a
                     // `run_internal` completion that lands first (reporting its own terminal
                     // task state, e.g. SUCCEEDED) can never be overwritten by this branch: the
                     // timer future is simply dropped without ever producing this error.
-                    let result = futures::select! {
-                        r = Self::run_internal(task, foreground.clone()).fuse() => r,
+                    let select = futures::select! {
+                        r = Self::run_internal(task, foreground.clone()).fuse() => {
+                            RunSelect::Finished(r)
+                        }
                         _ = timer_fut.fuse() => {
                             log::info!(
                                 "Sandbox deadline approaching (WARP_SANDBOX_DEADLINE); \
                                  aborting run_internal to allow recording finalization"
                             );
-                            Err(AgentDriverError::SandboxDeadlineReached { on_free_plan })
+                            RunSelect::Finished(Err(AgentDriverError::SandboxDeadlineReached {
+                                on_free_plan,
+                            }))
                         }
-                        _ = sigterm_fut.fuse() => {
-                            log::warn!(
-                                "SIGTERM received; aborting run_internal to allow \
-                                 recording finalization (limited grace period before SIGKILL)"
-                            );
-                            Err(AgentDriverError::TerminatedBySignal)
+                        signal = signal_fut.fuse() => {
+                            match signal {
+                                InterruptSignal::Term => log::warn!(
+                                    "SIGTERM received; aborting run_internal to save a \
+                                     handoff snapshot before remaining teardown (limited \
+                                     grace period before SIGKILL)"
+                                ),
+                                InterruptSignal::Int => log::warn!(
+                                    "SIGINT received; aborting run_internal to save a \
+                                     handoff snapshot before restoring default terminate"
+                                ),
+                            }
+                            RunSelect::Signal(signal)
                         }
                     };
-                    // Restore the default SIGTERM disposition now that run_internal
-                    // has finished, so any subsequent SIGTERM terminates normally.
                     #[cfg(unix)]
-                    if let Some(sig_id) = sigterm_sig_id {
-                        signal_hook::low_level::unregister(sig_id);
+                    {
+                        (select, registered_signal_ids)
                     }
-                    result
+                    #[cfg(not(unix))]
+                    {
+                        select
+                    }
                 };
 
-                // Report a SIGTERM abort immediately, before the teardown below:
-                // SIGKILL follows SIGTERM within ~10-20 seconds and recording
-                // finalization plus snapshot upload may not fit in that window.
-                // Skipped when a terminal state was already delivered (e.g. the
-                // conversation finished and SIGTERM arrived during an idle
-                // window), so this cannot overwrite a real outcome.
-                if let (Some(task_id), Err(AgentDriverError::TerminatedBySignal)) =
-                    (task_id, &result)
-                {
-                    let already_terminal = foreground
-                        .spawn(move |_, ctx| {
-                            LocalAgentTaskSyncModel::as_ref(ctx)
-                                .confirmed_terminal_state(&task_id)
-                                .is_some()
-                        })
-                        .await
-                        .unwrap_or(false);
-                    if already_terminal {
-                        log::info!(
-                            "Skipping SIGTERM failure report for task {task_id}: a terminal \
-                             state was already reported"
-                        );
-                    } else {
-                        report_driver_error(
-                            task_id,
-                            &AgentDriverError::TerminatedBySignal,
-                            &server_api,
-                        )
-                        .await;
+                #[cfg(unix)]
+                let (select_result, registered_signal_ids) = select_result;
+                #[cfg(not(unix))]
+                let select_result = select_result;
+
+                let cause = run_end_cause(&select_result);
+                let flush = artifact_flush_for(cause);
+
+                if resumes_default_signal_action(cause) {
+                    // Snapshot first (and, for SIGTERM, recording afterward) while the
+                    // flag handlers are still installed, so a repeated SIGTERM cannot
+                    // default-terminate us before the handoff snapshot finishes.
+                    Self::flush_end_of_run_artifacts(&foreground, flush).await;
+                    #[cfg(unix)]
+                    unregister_signal_ids(registered_signal_ids);
+                    if finishes_remaining_teardown_before_reraise(cause) {
+                        Self::unregister_end_of_run_consumers(&foreground).await;
+                        Self::cleanup(foreground.clone()).await;
                     }
+                    #[cfg(unix)]
+                    {
+                        let RunSelect::Signal(signal) = select_result else {
+                            unreachable!("signal teardown requires a signal");
+                        };
+                        restore_default_and_reraise(signal);
+                    }
+                    #[cfg(not(unix))]
+                    unreachable!("Unix signals are not delivered on this platform");
                 }
 
-                // Stop accepting CLI session status updates now that the run
-                // is done. Already accepted task updates remain queued until
-                // delivery finishes.
-                let _ = foreground
-                    .spawn(|me, ctx| me.unregister_cli_agent_task_sync(ctx))
-                    .await;
-                // Unregister the driver consumer now that the run is done.
-                // The streamer will tear down the SSE if no other consumer
-                // remains and the conversation isn't a child.
-                let _ = foreground
-                    .spawn(|me, ctx| me.unregister_streamer_consumer(ctx))
-                    .await;
+                #[cfg(unix)]
+                unregister_signal_ids(registered_signal_ids);
+
+                let RunSelect::Finished(result) = select_result else {
+                    unreachable!("non-signal teardown requires a finished run");
+                };
+
+                Self::unregister_end_of_run_consumers(&foreground).await;
 
                 // The caller may terminate the process as soon as it receives
                 // `result`, so all durable artifact work must finish before the
-                // send below. First start or join finalization for this
-                // conversation and wait for ffmpeg stop plus upload to finish.
-                // This also waits for work already started by an early exit or
-                // cancellation path.
-                if let Ok(Some(finalization)) = foreground
-                    .spawn(|me, ctx| {
-                        me.run_conversation_id.and_then(|conversation_id| {
-                            finalize_recording_for_conversation(
-                                conversation_id,
-                                FinalizeReason::RunEnded,
-                                true,
-                                ctx,
-                            )
-                        })
-                    })
-                    .await
-                {
-                    let (finalization_result, actual_reason) = finalization.resolve().await;
-                    log::info!(
-                        "Recording finalization completed before agent driver exit \
-                         (reason={actual_reason:?}): {finalization_result:?}"
-                    );
-                }
-                Self::run_snapshot_upload(&foreground).await;
+                // send below. This also waits for work already started by an
+                // early exit or cancellation path.
+                Self::flush_end_of_run_artifacts(&foreground, flush).await;
 
                 // Guarantee the server task row reaches a terminal state before
                 // the caller can terminate the process (see the doc comment on
@@ -1496,12 +1592,8 @@ impl AgentDriver {
             // occur before or outside a conversation (e.g. bootstrap, MCP startup,
             // environment setup) so LocalAgentTaskSyncModel never fires for them.
             // Success/blocked/cancelled are handled by LocalAgentTaskSyncModel.
-            // TerminatedBySignal is excluded: the run task reports it before its
-            // teardown, since SIGKILL follows shortly after SIGTERM.
             if let (Some(task_id), Err(err)) = (task_id, &result) {
-                if !matches!(err, AgentDriverError::TerminatedBySignal) {
-                    report_driver_error(task_id, err, &server_api_for_error).await;
-                }
+                report_driver_error(task_id, err, &server_api_for_error).await;
                 if matches!(
                     err,
                     AgentDriverError::EnvironmentSetupFailed(_)
@@ -4772,19 +4864,69 @@ impl AgentDriver {
         }
     }
 
+    async fn unregister_end_of_run_consumers(foreground: &ModelSpawner<Self>) {
+        // Stop accepting CLI session status updates now that the run is done.
+        // Already accepted task updates remain queued until delivery finishes.
+        let _ = foreground
+            .spawn(|me, ctx| me.unregister_cli_agent_task_sync(ctx))
+            .await;
+        // Unregister the driver consumer now that the run is done. The streamer
+        // will tear down the SSE if no other consumer remains and the conversation
+        // isn't a child.
+        let _ = foreground
+            .spawn(|me, ctx| me.unregister_streamer_consumer(ctx))
+            .await;
+    }
+
+    async fn finalize_run_recording(foreground: &ModelSpawner<Self>) {
+        if let Ok(Some(finalization)) = foreground
+            .spawn(|me, ctx| {
+                me.run_conversation_id.and_then(|conversation_id| {
+                    finalize_recording_for_conversation(
+                        conversation_id,
+                        FinalizeReason::RunEnded,
+                        true,
+                        ctx,
+                    )
+                })
+            })
+            .await
+        {
+            let (finalization_result, actual_reason) = finalization.resolve().await;
+            log::info!(
+                "Recording finalization completed before agent driver exit \
+                 (reason={actual_reason:?}): {finalization_result:?}"
+            );
+        }
+    }
+
+    async fn flush_end_of_run_artifacts(foreground: &ModelSpawner<Self>, flush: ArtifactFlush) {
+        match flush {
+            ArtifactFlush::RecordingThenSnapshot => {
+                Self::finalize_run_recording(foreground).await;
+                Self::run_snapshot_upload(foreground).await;
+            }
+            ArtifactFlush::SnapshotThenRecording => {
+                Self::run_snapshot_upload(foreground).await;
+                Self::finalize_run_recording(foreground).await;
+            }
+            ArtifactFlush::SnapshotOnly => {
+                Self::run_snapshot_upload(foreground).await;
+            }
+        }
+    }
+
     /// Invoke the end-of-run snapshot upload pipeline if the feature flag is enabled and this
     /// driver is associated with a cloud task. Errors are logged internally; this helper always
     /// returns so cleanup can proceed.
     #[tracing::instrument(skip_all, fields(tags.cloud_agent = true))]
     async fn run_snapshot_upload(spawner: &ModelSpawner<Self>) {
-        if !FeatureFlag::OzHandoff.is_enabled() {
-            return;
-        }
+        let oz_handoff_enabled = FeatureFlag::OzHandoff.is_enabled();
 
         // Snapshot upload is only meaningful for cloud task runs, so short-circuit before
         // pulling the rest of the context onto this task.
         let Ok((
-            Some(task_id),
+            task_id,
             snapshot_disabled,
             upload_timeout,
             script_timeout,
@@ -4803,10 +4945,19 @@ impl AgentDriver {
         else {
             return;
         };
-        if snapshot_disabled {
-            log::info!("Skipping snapshot upload because --no-snapshot was specified");
+        if !should_attempt_handoff_snapshot(
+            oz_handoff_enabled,
+            task_id.is_some(),
+            snapshot_disabled,
+        ) {
+            if oz_handoff_enabled && task_id.is_some() && snapshot_disabled {
+                log::info!("Skipping snapshot upload because --no-snapshot was specified");
+            }
             return;
         }
+        let Some(task_id) = task_id else {
+            return;
+        };
 
         // An active coordinator replaces the legacy upload below. Budget must come from
         // `finalize_budget`: the coordinator's floor is `script_timeout + upload_timeout`,

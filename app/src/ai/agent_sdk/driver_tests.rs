@@ -33,13 +33,15 @@ use warpui::r#async::Timer;
 use warpui::{App, SingletonEntity as _};
 
 use super::{
-    AgentDriver, AgentDriverError, AgentRunPrompt, CLIAgentSessionStatus, IdleTimeoutSender,
-    LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV, LEGACY_OZ_PARENT_STATE_ROOT_ENV,
-    MANAGED_MCP_RESOLVE_MAX_ATTEMPTS, OZ_MESSAGE_LISTENER_MANAGED_EXTERNALLY_ENV,
-    OZ_MESSAGE_LISTENER_STATE_ROOT_ENV, PlatformErrorCode, SDKConversationOutputStatus,
-    WARP_MESSAGE_LISTENER_STATE_ROOT_ENV, build_secret_env_vars,
-    idle_window_for_cli_session_status, idle_window_for_terminal_status,
-    setup_failure_status_update, terminal_status_log_outcome,
+    AgentDriver, AgentDriverError, AgentRunPrompt, ArtifactFlush, CLIAgentSessionStatus,
+    IdleTimeoutSender, InterruptSignal, LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV,
+    LEGACY_OZ_PARENT_STATE_ROOT_ENV, MANAGED_MCP_RESOLVE_MAX_ATTEMPTS,
+    OZ_MESSAGE_LISTENER_MANAGED_EXTERNALLY_ENV, OZ_MESSAGE_LISTENER_STATE_ROOT_ENV,
+    PlatformErrorCode, RunEndCause, RunSelect, SDKConversationOutputStatus,
+    WARP_MESSAGE_LISTENER_STATE_ROOT_ENV, artifact_flush_for, build_secret_env_vars,
+    finishes_remaining_teardown_before_reraise, idle_window_for_cli_session_status,
+    idle_window_for_terminal_status, resumes_default_signal_action, run_end_cause,
+    setup_failure_status_update, should_attempt_handoff_snapshot, terminal_status_log_outcome,
 };
 use crate::ai::agent::conversation::ConversationStatus;
 use crate::ai::agent::task::TaskId;
@@ -2743,4 +2745,72 @@ fn openai_api_key_exports_only_api_key_not_base_url() {
         !env_vars.contains_key(&OsString::from("OPENAI_BASE_URL")),
         "OPENAI_BASE_URL should NOT be exported as an env var"
     );
+}
+
+#[test]
+fn sigterm_prioritizes_handoff_snapshot_before_recording() {
+    let cause = run_end_cause(&RunSelect::Signal(InterruptSignal::Term));
+    assert_eq!(cause, RunEndCause::Signal(InterruptSignal::Term));
+    assert_eq!(
+        artifact_flush_for(cause),
+        ArtifactFlush::SnapshotThenRecording
+    );
+    assert!(resumes_default_signal_action(cause));
+    assert!(finishes_remaining_teardown_before_reraise(cause));
+}
+
+#[test]
+fn sigint_saves_handoff_snapshot_without_recording() {
+    let cause = run_end_cause(&RunSelect::Signal(InterruptSignal::Int));
+    assert_eq!(cause, RunEndCause::Signal(InterruptSignal::Int));
+    assert_eq!(artifact_flush_for(cause), ArtifactFlush::SnapshotOnly);
+    assert!(resumes_default_signal_action(cause));
+    assert!(!finishes_remaining_teardown_before_reraise(cause));
+}
+
+#[test]
+fn sandbox_deadline_still_finalizes_recording_then_snapshot() {
+    let cause = run_end_cause(&RunSelect::Finished(Err(
+        AgentDriverError::SandboxDeadlineReached {
+            on_free_plan: false,
+        },
+    )));
+    assert_eq!(cause, RunEndCause::SandboxDeadline);
+    assert_eq!(
+        artifact_flush_for(cause),
+        ArtifactFlush::RecordingThenSnapshot
+    );
+    assert!(!resumes_default_signal_action(cause));
+    assert!(!finishes_remaining_teardown_before_reraise(cause));
+}
+
+#[test]
+fn completed_run_finalizes_recording_then_snapshot() {
+    let cause = run_end_cause(&RunSelect::Finished(Ok(())));
+    assert_eq!(cause, RunEndCause::Completed);
+    assert_eq!(
+        artifact_flush_for(cause),
+        ArtifactFlush::RecordingThenSnapshot
+    );
+    assert!(!resumes_default_signal_action(cause));
+}
+
+#[test]
+fn handoff_snapshot_runs_for_cloud_task_when_enabled() {
+    assert!(should_attempt_handoff_snapshot(true, true, false));
+}
+
+#[test]
+fn handoff_snapshot_is_skipped_when_oz_handoff_is_disabled() {
+    assert!(!should_attempt_handoff_snapshot(false, true, false));
+}
+
+#[test]
+fn handoff_snapshot_is_skipped_without_a_task_id() {
+    assert!(!should_attempt_handoff_snapshot(true, false, false));
+}
+
+#[test]
+fn handoff_snapshot_is_skipped_when_no_snapshot_is_set() {
+    assert!(!should_attempt_handoff_snapshot(true, true, true));
 }
