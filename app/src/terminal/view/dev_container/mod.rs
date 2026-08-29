@@ -106,7 +106,7 @@ struct DevContainerUpResult {
 
 #[cfg(feature = "local_tty")]
 #[allow(unused_variables, clippy::too_many_arguments)]
-fn create_dev_container_view(
+pub(crate) fn create_dev_container_view<V: warpui::View>(
     resources: TerminalViewResources,
     initial_size: Vector2F,
     model_event_sender: Option<SyncSender<ModelEvent>>,
@@ -117,7 +117,7 @@ fn create_dev_container_view(
     #[allow(dead_code)] remote_workspace_folder: String,
     #[allow(dead_code)] sandbox_id: String,
     #[allow(dead_code)] session_id: SessionId,
-    ctx: &mut ViewContext<TerminalView>,
+    ctx: &mut ViewContext<V>,
 ) -> (
     ViewHandle<TerminalView>,
     ModelHandle<Box<dyn TerminalManager>>,
@@ -270,6 +270,23 @@ impl TerminalView {
         self.model.lock().start_commandless_output_block();
         self.start_dev_container_build_attempt(ctx);
         ctx.notify();
+    }
+
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn model_event_sender(
+        &self,
+    ) -> Option<std::sync::mpsc::SyncSender<crate::persistence::ModelEvent>> {
+        self.model_event_sender.clone()
+    }
+
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn dev_container_build_key(
+        &self,
+        ctx: &warpui::AppContext,
+    ) -> Option<registry::DevContainerBuildKey> {
+        self.dev_container_build
+            .as_ref()
+            .map(|operation| operation.read(ctx, |operation, _| operation.key().clone()))
     }
 
     #[cfg(feature = "local_tty")]
@@ -594,10 +611,39 @@ impl TerminalView {
                 )))
                 .boxed();
 
+                if me.dev_container_build.is_some() {
+                    me.dev_container_build
+                        .as_ref()
+                        .unwrap()
+                        .update(ctx, |operation, ctx| {
+                            operation.set_phase(operation::DevContainerBuildPhase::Staging, ctx);
+                        });
+                }
                 ctx.spawn(
                     staging_future,
                     move |me, staging_result, ctx| match staging_result {
                         Ok(()) => {
+                            if me.dev_container_build.is_some() {
+                                me.dev_container_build.as_ref().unwrap().update(
+                                    ctx,
+                                    |operation, ctx| {
+                                        operation.set_phase(
+                                            operation::DevContainerBuildPhase::Attach,
+                                            ctx,
+                                        );
+                                    },
+                                );
+                                ctx.emit(super::Event::ReplaceDevContainerBuildPane {
+                                    workspace_folder,
+                                    docker_path,
+                                    container_id,
+                                    remote_user,
+                                    remote_workspace_folder,
+                                    sandbox_id,
+                                    session_id,
+                                });
+                                return;
+                            }
                             me.show_dev_container_toast(
                                 format!(
                                     "Dev container ready — opening session in {}…",
@@ -618,32 +664,48 @@ impl TerminalView {
                             );
                         }
                         Err(e) => {
-                            me.show_dev_container_toast(
-                                format!("Failed to prepare the Dev Container session: {e:#}"),
-                                ToastFlavor::Error,
-                                ctx,
-                            );
+                            let message =
+                                format!("Failed to prepare the Dev Container session: {e:#}");
+                            if me.dev_container_build.is_some() {
+                                me.fail_dev_container_build(
+                                    operation::DevContainerBuildPhase::Staging,
+                                    message,
+                                    ctx,
+                                );
+                            } else {
+                                me.show_dev_container_toast(message, ToastFlavor::Error, ctx);
+                            }
                         }
                     },
                 );
             }
             Ok(output) => {
                 let detail = tail_lines(&String::from_utf8_lossy(&output.stderr), 5);
-                me.show_dev_container_toast(
-                    format!(
-                        "Dev container isn't ready to attach: it may be missing `bash`, or its \
-                         configured remote user or workspace folder may not exist: {detail}"
-                    ),
-                    ToastFlavor::Error,
-                    ctx,
+                let message = format!(
+                    "Dev container isn't ready to attach: it may be missing `bash`, or its \
+                     configured remote user or workspace folder may not exist: {detail}"
                 );
+                if me.dev_container_build.is_some() {
+                    me.fail_dev_container_build(
+                        operation::DevContainerBuildPhase::Preflight,
+                        message,
+                        ctx,
+                    );
+                } else {
+                    me.show_dev_container_toast(message, ToastFlavor::Error, ctx);
+                }
             }
             Err(e) => {
-                me.show_dev_container_toast(
-                    format!("Failed to verify the Dev Container is ready to attach: {e}"),
-                    ToastFlavor::Error,
-                    ctx,
-                );
+                let message = format!("Failed to verify the Dev Container is ready to attach: {e}");
+                if me.dev_container_build.is_some() {
+                    me.fail_dev_container_build(
+                        operation::DevContainerBuildPhase::Preflight,
+                        message,
+                        ctx,
+                    );
+                } else {
+                    me.show_dev_container_toast(message, ToastFlavor::Error, ctx);
+                }
             }
         });
     }

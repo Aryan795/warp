@@ -1777,6 +1777,16 @@ pub enum Event {
         workspace_folder: PathBuf,
         config_file: PathBuf,
     },
+    #[cfg(feature = "local_tty")]
+    ReplaceDevContainerBuildPane {
+        workspace_folder: PathBuf,
+        docker_path: PathBuf,
+        container_id: String,
+        remote_user: Option<String>,
+        remote_workspace_folder: String,
+        sandbox_id: String,
+        session_id: warp_core::SessionId,
+    },
     InsertCodeReviewComments {
         repo_path: LocalOrRemotePath,
         comments: Vec<PendingImportedReviewComment>,

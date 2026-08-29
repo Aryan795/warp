@@ -1497,6 +1497,28 @@ fn handle_terminal_view_event(
                 stop_agent_conversation(group, *conversation_id, ctx);
             }
             #[cfg(feature = "local_tty")]
+            Event::ReplaceDevContainerBuildPane {
+                workspace_folder,
+                docker_path,
+                container_id,
+                remote_user,
+                remote_workspace_folder,
+                sandbox_id,
+                session_id,
+            } => {
+                group.replace_dev_container_build_pane(
+                    pane_id,
+                    workspace_folder.clone(),
+                    docker_path.clone(),
+                    container_id.clone(),
+                    remote_user.clone(),
+                    remote_workspace_folder.clone(),
+                    sandbox_id.clone(),
+                    *session_id,
+                    ctx,
+                );
+            }
+            #[cfg(feature = "local_tty")]
             Event::StartDevContainerBuild {
                 workspace_folder,
                 config_file,
