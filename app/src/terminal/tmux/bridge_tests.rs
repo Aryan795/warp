@@ -20,6 +20,8 @@ fn runtime() -> TmuxRuntime {
             control_incarnation: 0,
             tracked_expected_session: None,
             early_init_shell: HashMap::new(),
+            early_stage_complete: HashMap::new(),
+            pending_silent_bootstrap: VecDeque::new(),
             shell_type: None,
             app_bind_deadline: None,
             presentation_ready: false,
@@ -257,9 +259,15 @@ fn split_pane_stages_once_then_correlated_hook_bootstraps_ready() {
     assert_eq!(runtime.bootstrap_stage_count("%1"), 1);
     assert!(runtime.on_init_shell("%1", sid(8)).is_none());
     assert_eq!(runtime.on_init_shell("%1", session), Some(ShellType::Zsh));
+    assert!(!runtime.pane_bootstrap_ready("%1"));
+    assert_eq!(runtime.bootstrap_script_count("%1"), 0);
+    assert_eq!(
+        runtime.on_stage_complete("%1", session),
+        Some(ShellType::Zsh)
+    );
     assert!(runtime.pane_bootstrap_ready("%1"));
     assert_eq!(runtime.bootstrap_script_count("%1"), 1);
-    assert!(runtime.on_init_shell("%1", session).is_none());
+    assert!(runtime.on_stage_complete("%1", session).is_none());
     assert_eq!(runtime.bootstrap_script_count("%1"), 1);
     assert!(runtime.begin_pane_bootstrap("%1", session).is_none());
 }
@@ -347,6 +355,11 @@ fn correlated_hook_cancels_timeout() {
     let claim = runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
     runtime.arm_bootstrap_timeout("%0");
     assert_eq!(runtime.on_init_shell("%0", sid(1)), Some(ShellType::Zsh));
+    assert!(!runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(
+        runtime.on_stage_complete("%0", sid(1)),
+        Some(ShellType::Zsh)
+    );
     assert!(runtime.pane_bootstrap_ready("%0"));
     assert!(matches!(
         runtime.handle_bootstrap_timeout("%0", claim.generation),
@@ -371,6 +384,11 @@ fn delayed_first_hook_is_ignored_after_retry_session_rotates() {
         runtime.on_init_shell("%0", retry.session_id),
         Some(ShellType::Zsh)
     );
+    assert_eq!(runtime.bootstrap_script_count("%0"), 0);
+    assert_eq!(
+        runtime.on_stage_complete("%0", retry.session_id),
+        Some(ShellType::Zsh)
+    );
     assert!(runtime.pane_bootstrap_ready("%0"));
     assert_eq!(runtime.bootstrap_script_count("%0"), 1);
 }
@@ -380,17 +398,22 @@ fn early_init_shell_before_bind_reaches_ready_once() {
     let runtime = runtime();
     runtime.note_shell_type(ShellType::Zsh);
     runtime.note_tracked_control_pane("%0");
-    runtime.note_early_init_shell("%0", sid(3), ShellType::Zsh);
+    runtime.set_tracked_expected_session(sid(3));
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(3), ShellType::Zsh),
+        Some(ShellType::Zsh)
+    );
     let claim = runtime.begin_pane_bootstrap("%0", sid(3)).expect("stage");
     assert_eq!(claim.generation, 1);
+    assert!(!runtime.pane_bootstrap_ready("%0"));
     assert_eq!(
-        runtime.complete_if_early_init_shell("%0"),
+        runtime.on_stage_complete("%0", sid(3)),
         Some(ShellType::Zsh)
     );
     assert!(runtime.pane_bootstrap_ready("%0"));
     assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
     assert_eq!(runtime.bootstrap_script_count("%0"), 1);
-    assert!(runtime.complete_if_early_init_shell("%0").is_none());
+    assert!(runtime.on_stage_complete("%0", sid(3)).is_none());
     assert!(runtime.begin_pane_bootstrap("%0", sid(3)).is_none());
 }
 
@@ -423,11 +446,12 @@ fn tracked_control_pane_hands_off_early_init_shell() {
     let runtime = runtime();
     runtime.note_shell_type(ShellType::Zsh);
     runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(sid(4));
     assert_eq!(runtime.tracked_control_pane().as_deref(), Some("%0"));
     runtime.note_early_init_shell("%0", sid(4), ShellType::Zsh);
     runtime.begin_pane_bootstrap("%0", sid(4)).expect("stage");
     assert_eq!(
-        runtime.complete_if_early_init_shell("%0"),
+        runtime.on_stage_complete("%0", sid(4)),
         Some(ShellType::Zsh)
     );
     assert!(runtime.pane_bootstrap_ready("%0"));
@@ -545,6 +569,11 @@ fn stale_hook_after_remove_does_not_ready_rebound_pane() {
         runtime.note_early_init_shell("%0", sid(2), ShellType::Zsh),
         Some(ShellType::Zsh)
     );
+    assert!(!runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(
+        runtime.on_stage_complete("%0", sid(2)),
+        Some(ShellType::Zsh)
+    );
     assert!(runtime.pane_bootstrap_ready("%0"));
 }
 
@@ -567,13 +596,14 @@ fn late_bash_hook_selects_bash_silent_bootstrap_once() {
         Some(ShellType::Bash)
     );
     assert_eq!(runtime.shell_type(), Some(ShellType::Bash));
+    assert!(!runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(
+        runtime.on_stage_complete("%0", sid(8)),
+        Some(ShellType::Bash)
+    );
     assert!(runtime.pane_bootstrap_ready("%0"));
     assert_eq!(runtime.bootstrap_script_count("%0"), 1);
-    assert!(
-        runtime
-            .note_early_init_shell("%0", sid(8), ShellType::Bash)
-            .is_none()
-    );
+    assert!(runtime.on_stage_complete("%0", sid(8)).is_none());
     assert_eq!(runtime.bootstrap_script_count("%0"), 1);
 }
 
@@ -601,6 +631,11 @@ fn late_tracked_init_shell_completes_staged_pane_without_retry() {
         runtime.note_early_init_shell("%0", retained, ShellType::Zsh),
         Some(ShellType::Zsh)
     );
+    assert!(!runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(
+        runtime.on_stage_complete("%0", retained),
+        Some(ShellType::Zsh)
+    );
     assert!(runtime.pane_bootstrap_ready("%0"));
     assert_eq!(runtime.bootstrap_script_count("%0"), 1);
     assert_eq!(runtime.pane_bootstrap_session_id("%0"), Some(retained));
@@ -611,13 +646,8 @@ fn late_tracked_init_shell_completes_staged_pane_without_retry() {
         BootstrapTimeoutResult::Stale
     ));
     assert!(runtime.begin_pane_bootstrap("%0", sid(3)).is_none());
-    assert!(
-        runtime
-            .note_early_init_shell("%0", retained, ShellType::Zsh)
-            .is_none()
-    );
+    assert!(runtime.on_stage_complete("%0", retained).is_none());
     assert_eq!(runtime.bootstrap_script_count("%0"), 1);
-    assert!(runtime.complete_if_early_init_shell("%0").is_none());
 }
 
 #[test]
@@ -748,6 +778,7 @@ fn bind_reuses_retained_early_session_id_not_a_random_id() {
     runtime.note_tracked_control_pane("%0");
     let retained = sid(11);
     let would_be_random = sid(99);
+    runtime.set_tracked_expected_session(retained);
     runtime.note_early_init_shell("%0", retained, ShellType::Zsh);
     assert_eq!(runtime.early_init_session_id("%0"), Some(retained));
     let chosen = runtime
@@ -761,8 +792,121 @@ fn bind_reuses_retained_early_session_id_not_a_random_id() {
     assert_eq!(claim.session_id, retained);
     assert_ne!(claim.session_id, would_be_random);
     assert_eq!(
-        runtime.complete_if_early_init_shell("%0"),
+        runtime.on_stage_complete("%0", retained),
         Some(ShellType::Zsh)
     );
     assert!(runtime.pane_bootstrap_ready("%0"));
+}
+
+#[test]
+fn init_shell_does_not_inject_bootstrap() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
+    assert_eq!(runtime.on_init_shell("%0", sid(1)), Some(ShellType::Zsh));
+    assert_eq!(
+        runtime.pane_bootstrap_state("%0"),
+        PaneBootstrapState::Staging
+    );
+    assert_eq!(runtime.bootstrap_script_count("%0"), 0);
+    assert!(runtime.take_pending_silent_bootstrap().is_empty());
+}
+
+#[test]
+fn stage_complete_injects_once_and_repeated_ack_is_ignored() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
+    assert_eq!(
+        runtime.on_stage_complete("%0", sid(1)),
+        Some(ShellType::Zsh)
+    );
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert_eq!(runtime.take_pending_silent_bootstrap().len(), 1);
+    assert!(runtime.on_stage_complete("%0", sid(1)).is_none());
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert!(runtime.take_pending_silent_bootstrap().is_empty());
+}
+
+#[test]
+fn stale_generation_and_pane_ack_have_no_effect() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    let claim = runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
+    assert!(runtime.on_stage_complete("%1", sid(1)).is_none());
+    assert_eq!(runtime.bootstrap_script_count("%0"), 0);
+    let BootstrapTimeoutResult::Retry(retry) =
+        runtime.handle_bootstrap_timeout("%0", claim.generation)
+    else {
+        panic!("expected retry");
+    };
+    assert!(runtime.on_stage_complete("%0", sid(1)).is_none());
+    assert_eq!(runtime.bootstrap_script_count("%0"), 0);
+    assert_eq!(
+        runtime.on_stage_complete("%0", retry.session_id),
+        Some(ShellType::Zsh)
+    );
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+}
+
+fn expected_token_pre_and_post_bind(shell: ShellType) {
+    let runtime = runtime();
+    runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(sid(7));
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(7), shell),
+        Some(shell)
+    );
+    assert_eq!(runtime.shell_type(), Some(shell));
+    runtime.begin_pane_bootstrap("%0", sid(99)).expect("stage");
+    assert_eq!(runtime.pane_bootstrap_session_id("%0"), Some(sid(7)));
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(7), shell),
+        Some(shell)
+    );
+    assert_eq!(runtime.on_stage_complete("%0", sid(7)), Some(shell));
+    assert!(runtime.pane_bootstrap_ready("%0"));
+}
+
+#[test]
+fn bash_expected_token_works_pre_and_post_bind() {
+    expected_token_pre_and_post_bind(ShellType::Bash);
+}
+
+#[test]
+fn fish_expected_token_works_pre_and_post_bind() {
+    expected_token_pre_and_post_bind(ShellType::Fish);
+}
+
+#[test]
+fn delayed_same_id_rebind_hook_rejected_and_cannot_publish_shell_type() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(sid(1));
+    runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
+    runtime.unregister_pane("%0");
+    runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(sid(2));
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.begin_pane_bootstrap("%0", sid(2)).expect("restage");
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(1), ShellType::Bash)
+            .is_none()
+    );
+    assert_eq!(runtime.shell_type(), Some(ShellType::Zsh));
+    assert!(!runtime.pane_bootstrap_ready("%0"));
+}
+
+#[test]
+fn arbitrary_pre_bind_token_is_rejected() {
+    let runtime = runtime();
+    runtime.note_tracked_control_pane("%0");
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(99), ShellType::Bash)
+            .is_none()
+    );
+    assert_eq!(runtime.shell_type(), None);
 }

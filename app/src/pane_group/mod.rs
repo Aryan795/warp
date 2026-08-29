@@ -4292,12 +4292,30 @@ impl PaneGroup {
         let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), model) else {
             return;
         };
-        if let Some(shell_type) = runtime.complete_if_early_init_shell(tmux_pane_id) {
-            let bytes = crate::terminal::tmux::protocol::silent_bootstrap_bytes(shell_type);
+        if runtime
+            .complete_if_early_stage_complete(tmux_pane_id)
+            .is_some()
+            || runtime.pane_bootstrap_ready(tmux_pane_id)
+        {
+            for (pane_id, shell_type) in runtime.take_pending_silent_bootstrap() {
+                let bytes = crate::terminal::tmux::protocol::silent_bootstrap_bytes(shell_type);
+                let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
+                for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bytes) {
+                    self.write_tmux_command(command.into_bytes(), instance_id, ctx);
+                }
+            }
+            return;
+        }
+        if let Some(session_id) = runtime.early_init_session_id(tmux_pane_id)
+            && let Some(shell_type) = runtime.shell_type()
+        {
+            let bytes =
+                crate::terminal::tmux::protocol::stage_complete_script(shell_type, session_id);
             let pane = crate::terminal::tmux::parser::PaneId::from(tmux_pane_id);
             for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bytes) {
                 self.write_tmux_command(command.into_bytes(), instance_id, ctx);
             }
+            self.schedule_tmux_pane_bootstrap_timeout(&runtime, tmux_pane_id, ctx);
             return;
         }
         if runtime.pane_bootstrap_state(tmux_pane_id)

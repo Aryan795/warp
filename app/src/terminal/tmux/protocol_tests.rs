@@ -15,7 +15,8 @@ use super::{
     kill_server_command, kill_window_command, new_window_command, pane_bootstrap_for_shell,
     pipe_pane_journal_command, refresh_client_command, register_dedicated_server,
     resize_pane_command, schedule_kill_dedicated_server, select_pane_command,
-    select_window_command, send_keys_commands, split_window_command, zsh_init_bytes,
+    select_window_command, send_keys_commands, split_stage_complete, split_window_command,
+    zsh_init_bytes,
 };
 use crate::terminal::tmux::parser::{PaneId, WindowId};
 
@@ -657,8 +658,12 @@ fn zsh_pane_bootstrap_keeps_init_script_for_send_keys() {
     let bootstrap = pane_bootstrap_for_shell(PathBuf::from("/bin/zsh"), ShellType::Zsh);
     let init_script = bootstrap.init_script.expect("zsh needs an init script");
     assert!(init_script.contains(&bootstrap.session_id.as_u64().to_string()));
-    let bytes = zsh_init_bytes(&init_script, ShellType::Zsh);
+    let bytes = zsh_init_bytes(&init_script, ShellType::Zsh, bootstrap.session_id);
     assert!(bytes.ends_with(b"\n"));
+    let text = String::from_utf8_lossy(&bytes);
+    let init_at = text.find("InitShell").expect("InitShell");
+    let ack_at = text.rfind("9278;t;").expect("stage-complete ack");
+    assert!(init_at < ack_at);
 }
 
 #[test]
@@ -671,6 +676,21 @@ fn in_band_init_bytes_are_remote_safe_and_session_scoped() {
     assert!(bytes.ends_with(b"\n"));
     let bash = in_band_init_bytes(ShellType::Bash, session_id).expect("bash init");
     assert_ne!(bytes, bash);
+    assert!(text.contains("9278;t;7"));
+    assert!(text.find("InitShell").unwrap() < text.rfind("9278;t;").unwrap());
+}
+
+#[test]
+fn split_stage_complete_strips_osc_and_returns_session() {
+    let mut bytes = b"keep-before".to_vec();
+    bytes.extend_from_slice(b"\x1b]9278;t;42\x07");
+    bytes.extend_from_slice(b"keep-after");
+    let (kept, session) = split_stage_complete(&bytes);
+    assert_eq!(kept, b"keep-beforekeep-after");
+    assert_eq!(session, Some(SessionId::from(42)));
+    let (kept, session) = split_stage_complete(b"no-ack-here");
+    assert_eq!(kept, b"no-ack-here");
+    assert_eq!(session, None);
 }
 
 #[test]
@@ -848,6 +868,111 @@ sys.stdout.buffer.write(out)
     assert!(
         !joined.contains("warp_silent_hook") && !joined.contains("HISTFILE=/dev/null"),
         "bootstrap must not persist in history: {joined:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_chunked_stage_then_bootstrap_reaches_prompt_without_ps2() {
+    let Some(zsh) = optional_shell("zsh") else {
+        return;
+    };
+    let Ok(python) = Command::new("python3").arg("-c").arg("import pty").status() else {
+        return;
+    };
+    if !python.success() {
+        return;
+    }
+    let home = unique_temp_path("warp-tmux-zsh-chunked-home");
+    std::fs::create_dir_all(&home).expect("zsh chunked home");
+    let session_id = SessionId::from(11);
+    let init = zsh_init_bytes(":\n", ShellType::Zsh, session_id);
+    let bootstrap =
+        super::silent_history_isolated_script(ShellType::Zsh, b"warp_silent_hook() { :; }\n");
+    let runner = format!(
+        r#"
+import os, pty, select, sys
+zsh = {zsh:?}
+payload = sys.stdin.buffer.read()
+init_len = {init_len}
+init, bootstrap = payload[:init_len], payload[init_len:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir({home:?})
+    os.environ["HOME"] = {home:?}
+    os.environ.pop("HISTFILE", None)
+    os.execv(zsh, [zsh, "--no-rcs", "-i"])
+def write_chunks(data):
+    for i in range(0, len(data), 128):
+        os.write(fd, data[i:i+128])
+write_chunks(init)
+write_chunks(bootstrap)
+os.write(fd, b"typeset -f warp_silent_hook >/dev/null && echo WARP_HOOK_OK\n")
+os.write(fd, b"SAVEHIST=0\necho WARP_SILENT_DONE\nexit\n")
+out = b""
+import time
+deadline = time.time() + 6
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+    if b"WARP_SILENT_DONE" in out:
+        break
+try:
+    os.waitpid(pid, 0)
+except ChildProcessError:
+    pass
+sys.stdout.buffer.write(out)
+"#,
+        zsh = zsh.display(),
+        home = home.display(),
+        init_len = init.len(),
+    );
+    let mut payload = init;
+    payload.extend_from_slice(&bootstrap);
+    let mut child = Command::new("python3")
+        .arg("-c")
+        .arg(&runner)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python pty runner");
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = std::io::Write::write_all(&mut stdin, &payload);
+    }
+    let output = child.wait_with_output().expect("wait python pty");
+    let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+    let text = String::from_utf8_lossy(&combined);
+    assert!(
+        !text.contains("heredoc>") && !text.contains("function>") && !text.contains("then>"),
+        "chunked staging must not leak PS2: {text:?}"
+    );
+    let csi = [0x1b, 0x5b, 0x48, 0x1b, 0x5b, 0x32, 0x4a];
+    if let Some(clear_at) = combined.windows(csi.len()).position(|w| w == csi) {
+        let after_clear = String::from_utf8_lossy(&combined[clear_at + csi.len()..]);
+        for marker in [
+            "__warp_silent_cleanup",
+            "unset __warp_histfile",
+            "HISTFILE=/dev/null",
+        ] {
+            assert!(
+                !after_clear.contains(marker),
+                "cleanup {marker:?} must not remain after clear: {after_clear:?}"
+            );
+        }
+    }
+    assert!(
+        text.contains("WARP_HOOK_OK") && text.contains("WARP_SILENT_DONE"),
+        "hooks must be accepted and prompt reached: {text:?}"
     );
     let _ = std::fs::remove_dir_all(&home);
 }

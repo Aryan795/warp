@@ -9808,6 +9808,14 @@ impl TerminalView {
             if !tmux_events.is_empty() {
                 ctx.emit(Event::TmuxClientEvents(tmux_events));
             }
+            #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+            if let Some(id) = instance_id
+                && let Some(runtime) = crate::terminal::tmux::bridge::TmuxRuntime::for_id(
+                    crate::terminal::tmux::bridge::TmuxInstanceId::from_u64(id),
+                )
+            {
+                self.flush_pending_tmux_silent_bootstrap(&runtime, ctx);
+            }
         }
 
         // Need to re-render both the alt screen and the blocklist on keypresses.
@@ -12927,11 +12935,9 @@ impl TerminalView {
                         {
                             let pane = runtime.tracked_control_pane().or(fallback_pane);
                             if let Some(pane) = pane {
-                                if let Some(completed) =
-                                    runtime.note_early_init_shell(&pane, session_id, shell_type)
-                                {
-                                    self.write_tmux_silent_pane_bootstrap(&pane, completed, ctx);
-                                }
+                                let _ =
+                                    runtime.note_early_init_shell(&pane, session_id, shell_type);
+                                self.flush_pending_tmux_silent_bootstrap(&runtime, ctx);
                             } else {
                                 runtime.note_shell_type(shell_type);
                             }
@@ -15389,6 +15395,17 @@ impl TerminalView {
         }
     }
 
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn flush_pending_tmux_silent_bootstrap(
+        &mut self,
+        runtime: &crate::terminal::tmux::bridge::TmuxRuntime,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        for (pane_id, shell_type) in runtime.take_pending_silent_bootstrap() {
+            self.write_tmux_silent_pane_bootstrap(&pane_id, shell_type, ctx);
+        }
+    }
+
     fn write_tmux_presentation_bootstrap_script(
         &mut self,
         shell_type: ShellType,
@@ -15418,18 +15435,12 @@ impl TerminalView {
                     && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
                 {
                     runtime.note_shell_type(shell_type);
-                    if runtime.on_init_shell(&pane_id, session_id).is_none() {
-                        return;
-                    }
+                    let _ = runtime.on_init_shell(&pane_id, session_id);
+                    self.flush_pending_tmux_silent_bootstrap(&runtime, ctx);
                 }
             }
             #[cfg(feature = "remote_tty")]
             let _ = (instance_id, session_id);
-            let framed = crate::terminal::tmux::protocol::silent_bootstrap_bytes(shell_type);
-            let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
-            for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &framed) {
-                self.write_tmux_control_command(command.into_bytes(), ctx);
-            }
         }
         #[cfg(not(all(unix, feature = "local_tty")))]
         {

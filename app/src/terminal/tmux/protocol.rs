@@ -720,10 +720,46 @@ pub fn send_keys_commands(pane_id: &PaneId, bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-pub fn zsh_init_bytes(init_script: &str, shell_type: ShellType) -> Vec<u8> {
+pub const STAGE_COMPLETE_OSC_PREFIX: &[u8] = b"\x1b]9278;t;";
+
+pub fn zsh_init_bytes(init_script: &str, shell_type: ShellType, session_id: SessionId) -> Vec<u8> {
     let mut bytes = init_script.as_bytes().to_vec();
     bytes.extend_from_slice(shell_type.execute_command_bytes());
+    bytes.extend_from_slice(&stage_complete_script(shell_type, session_id));
     bytes
+}
+
+pub fn stage_complete_script(shell_type: ShellType, session_id: SessionId) -> Vec<u8> {
+    let mut bytes = format!("printf '\\033]9278;t;{}\\007'", session_id.as_u64()).into_bytes();
+    bytes.extend_from_slice(shell_type.execute_command_bytes());
+    bytes
+}
+
+pub fn split_stage_complete(bytes: &[u8]) -> (Vec<u8>, Option<SessionId>) {
+    let Some(start) = bytes
+        .windows(STAGE_COMPLETE_OSC_PREFIX.len())
+        .position(|window| window == STAGE_COMPLETE_OSC_PREFIX)
+    else {
+        return (bytes.to_vec(), None);
+    };
+    let rest = &bytes[start + STAGE_COMPLETE_OSC_PREFIX.len()..];
+    let Some(term) = rest.iter().position(|&b| b == 0x07 || b == 0x1b) else {
+        return (bytes.to_vec(), None);
+    };
+    let Ok(text) = std::str::from_utf8(&rest[..term]) else {
+        return (bytes.to_vec(), None);
+    };
+    let Ok(id) = text.parse::<u64>() else {
+        return (bytes.to_vec(), None);
+    };
+    let mut end = start + STAGE_COMPLETE_OSC_PREFIX.len() + term + 1;
+    if rest[term] == 0x1b && rest.get(term + 1) == Some(&0x5c) {
+        end += 1;
+    }
+    let mut kept = Vec::with_capacity(bytes.len().saturating_sub(end - start));
+    kept.extend_from_slice(&bytes[..start]);
+    kept.extend_from_slice(&bytes[end.min(bytes.len())..]);
+    (kept, Some(SessionId::from(id)))
 }
 
 // Snapshot history options, suppress only this injected setup/body, then restore
@@ -854,7 +890,9 @@ pub fn in_band_init_bytes(shell_type: ShellType, session_id: SessionId) -> Optio
         ShellType::PowerShell => None,
         shell_type => {
             let script = init_shell_script_for_shell(shell_type, &ASSETS, session_id);
-            Some(history_isolated_script(shell_type, script.as_bytes()))
+            let mut bytes = history_isolated_script(shell_type, script.as_bytes());
+            bytes.extend_from_slice(&stage_complete_script(shell_type, session_id));
+            Some(bytes)
         }
     }
 }

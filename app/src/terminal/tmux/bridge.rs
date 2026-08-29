@@ -115,6 +115,8 @@ struct Inner {
     control_incarnation: u64,
     tracked_expected_session: Option<SessionId>,
     early_init_shell: HashMap<String, (SessionId, u64)>,
+    early_stage_complete: HashMap<String, SessionId>,
+    pending_silent_bootstrap: VecDeque<(String, ShellType)>,
     shell_type: Option<ShellType>,
     app_bind_deadline: Option<instant::Instant>,
     presentation_ready: bool,
@@ -168,6 +170,8 @@ impl TmuxRuntime {
                 control_incarnation: 0,
                 tracked_expected_session: None,
                 early_init_shell: HashMap::new(),
+                early_stage_complete: HashMap::new(),
+                pending_silent_bootstrap: VecDeque::new(),
                 shell_type: None,
                 app_bind_deadline: None,
                 presentation_ready: false,
@@ -259,6 +263,8 @@ impl TmuxRuntime {
             inner.control_incarnation = 0;
             inner.tracked_expected_session = None;
             inner.early_init_shell.clear();
+            inner.early_stage_complete.clear();
+            inner.pending_silent_bootstrap.clear();
             inner.app_bind_deadline = None;
             inner.presentation_ready = false;
             inner.unregistered_bytes = 0;
@@ -302,6 +308,10 @@ impl TmuxRuntime {
                 .remove(pane_id)
                 .map(|entry| entry.session_id());
             inner.early_init_shell.remove(pane_id);
+            inner.early_stage_complete.remove(pane_id);
+            inner
+                .pending_silent_bootstrap
+                .retain(|(id, _)| id != pane_id);
             if inner.tracked_control_pane.as_deref() == Some(pane_id) {
                 inner.tracked_control_pane = None;
                 inner.tracked_expected_session = None;
@@ -319,6 +329,11 @@ impl TmuxRuntime {
     }
 
     pub fn deliver_output(&self, pane_id: &PaneId, bytes: &[u8]) -> bool {
+        let (bytes, stage_complete) = super::protocol::split_stage_complete(bytes);
+        if let Some(session_id) = stage_complete {
+            let _ = self.on_stage_complete(pane_id.as_str(), session_id);
+        }
+        let bytes = bytes.as_slice();
         let mut inner = self.inner.lock();
         if let Some(sink) = inner.panes.get_mut(pane_id.as_str()) {
             feed_sink(sink, bytes);
@@ -499,6 +514,9 @@ impl TmuxRuntime {
             .bootstrap_stage_count
             .entry(pane_id.to_owned())
             .or_insert(0) += 1;
+        if inner.early_stage_complete.get(pane_id).copied() == Some(session_id) {
+            let _ = Self::complete_staging_to_ready_locked(inner, pane_id, session_id, true);
+        }
         Some(PaneBootstrapClaim {
             pane_id: pane_id.to_owned(),
             shell_type,
@@ -517,9 +535,48 @@ impl TmuxRuntime {
     }
 
     pub fn on_init_shell(&self, pane_id: &str, session_id: SessionId) -> Option<ShellType> {
-        let mut inner = self.inner.lock();
-        Self::complete_staging_to_ready_locked(&mut inner, pane_id, session_id, false)
-            .map(|(shell, _)| shell)
+        let inner = self.inner.lock();
+        match inner.pane_bootstrap.get(pane_id) {
+            Some(PaneBootstrapEntry::Staging {
+                session_id: staged_id,
+                ..
+            }) if *staged_id == session_id => inner.shell_type,
+            _ => None,
+        }
+    }
+
+    pub fn on_stage_complete(&self, pane_id: &str, session_id: SessionId) -> Option<ShellType> {
+        let (shell_type, staged_id, model) = {
+            let mut inner = self.inner.lock();
+            let matches_expected = inner.tracked_control_pane.as_deref() == Some(pane_id)
+                && inner.tracked_expected_session == Some(session_id);
+            if !inner.pane_bootstrap.contains_key(pane_id) {
+                if matches_expected {
+                    inner
+                        .early_stage_complete
+                        .insert(pane_id.to_owned(), session_id);
+                }
+                return None;
+            }
+            let (shell_type, staged_id) = Self::complete_staging_to_ready_locked(
+                &mut inner,
+                pane_id,
+                session_id,
+                matches_expected,
+            )?;
+            inner.early_init_shell.remove(pane_id);
+            inner.early_stage_complete.remove(pane_id);
+            let model = inner.panes.get(pane_id).map(|sink| sink.model.clone());
+            (shell_type, staged_id, model)
+        };
+        if let Some(model) = model {
+            let mut locked = model.lock();
+            if staged_id != session_id {
+                locked.unregister_session_id(staged_id);
+            }
+            locked.register_session_id(session_id);
+        }
+        Some(shell_type)
     }
 
     fn complete_staging_to_ready_locked(
@@ -551,7 +608,16 @@ impl TmuxRuntime {
             .bootstrap_script_count
             .entry(pane_id.to_owned())
             .or_insert(0) += 1;
+        inner
+            .pending_silent_bootstrap
+            .push_back((pane_id.to_owned(), shell_type));
         Some((shell_type, staged_id))
+    }
+
+    pub fn take_pending_silent_bootstrap(&self) -> Vec<(String, ShellType)> {
+        std::mem::take(&mut self.inner.lock().pending_silent_bootstrap)
+            .into_iter()
+            .collect()
     }
 
     pub fn arm_bootstrap_timeout(&self, pane_id: &str) -> Option<(u64, Duration)> {
@@ -701,57 +767,36 @@ impl TmuxRuntime {
         session_id: SessionId,
         shell_type: ShellType,
     ) -> Option<ShellType> {
-        let (shell_type, staged_id, model) = {
-            let mut inner = self.inner.lock();
-            if inner
-                .tracked_control_pane
-                .as_deref()
-                .is_some_and(|tracked| tracked != pane_id)
-            {
-                return None;
-            }
-            if inner.tracked_control_pane.as_deref() != Some(pane_id)
-                && !inner.panes.contains_key(pane_id)
-            {
-                return None;
-            }
-            let matches_expected = inner.tracked_control_pane.as_deref() == Some(pane_id)
-                && inner.tracked_expected_session == Some(session_id);
-            let matches_staging = inner
-                .pane_bootstrap
-                .get(pane_id)
-                .is_some_and(|entry| entry.session_id() == session_id);
-            let has_staging = inner.pane_bootstrap.contains_key(pane_id);
-            if has_staging && !matches_expected && !matches_staging {
-                return None;
-            }
-            inner.shell_type = Some(shell_type);
-            let incarnation = inner.control_incarnation;
-            inner
-                .early_init_shell
-                .insert(pane_id.to_owned(), (session_id, incarnation));
-            if inner.tracked_control_pane.as_deref() == Some(pane_id)
-                && inner.tracked_expected_session.is_none()
-            {
-                inner.tracked_expected_session = Some(session_id);
-            }
-            let (shell_type, staged_id) = Self::complete_staging_to_ready_locked(
-                &mut inner,
-                pane_id,
-                session_id,
-                matches_expected,
-            )?;
-            inner.early_init_shell.remove(pane_id);
-            let model = inner.panes.get(pane_id).map(|sink| sink.model.clone());
-            (shell_type, staged_id, model)
-        };
-        if let Some(model) = model {
-            let mut locked = model.lock();
-            if staged_id != session_id {
-                locked.unregister_session_id(staged_id);
-            }
-            locked.register_session_id(session_id);
+        let mut inner = self.inner.lock();
+        if inner
+            .tracked_control_pane
+            .as_deref()
+            .is_some_and(|tracked| tracked != pane_id)
+        {
+            return None;
         }
+        if inner.tracked_control_pane.as_deref() != Some(pane_id)
+            && !inner.panes.contains_key(pane_id)
+        {
+            return None;
+        }
+        let matches_expected = inner.tracked_control_pane.as_deref() == Some(pane_id)
+            && inner.tracked_expected_session == Some(session_id);
+        let matches_staging = matches!(
+            inner.pane_bootstrap.get(pane_id),
+            Some(PaneBootstrapEntry::Staging {
+                session_id: staged_id,
+                ..
+            }) if *staged_id == session_id
+        );
+        if !matches_expected && !matches_staging {
+            return None;
+        }
+        inner.shell_type = Some(shell_type);
+        let incarnation = inner.control_incarnation;
+        inner
+            .early_init_shell
+            .insert(pane_id.to_owned(), (session_id, incarnation));
         Some(shell_type)
     }
 
@@ -774,6 +819,16 @@ impl TmuxRuntime {
     pub fn complete_if_early_init_shell(&self, pane_id: &str) -> Option<ShellType> {
         let session_id = self.take_early_init_shell(pane_id)?;
         self.on_init_shell(pane_id, session_id)
+    }
+
+    pub fn complete_if_early_stage_complete(&self, pane_id: &str) -> Option<ShellType> {
+        let session_id = self
+            .inner
+            .lock()
+            .early_stage_complete
+            .get(pane_id)
+            .copied()?;
+        self.on_stage_complete(pane_id, session_id)
     }
 
     pub fn apply_claim_session(&self, claim: &PaneBootstrapClaim) {

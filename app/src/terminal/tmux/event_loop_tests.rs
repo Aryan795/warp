@@ -171,11 +171,23 @@ fn start_loop_with(
         .with_wakeups_tx(wakeups_tx)
         .build();
     let model = Arc::new(FairMutex::new(TerminalModel::mock(None, None)));
+    let expected_session = zsh_init
+        .as_ref()
+        .map(|(_, _, session_id)| *session_id)
+        .unwrap_or(SessionId::from(1));
+    let zsh_init = zsh_init.map(|(script, shell, _)| (script, shell));
     let (tx, rx) = mio_channel::channel();
     let shared = Arc::new(SharedControlState::new());
     let sender = TmuxControlSender::new(tx, shared.clone());
-    let event_loop =
-        ControlClientEventLoop::new(model.clone(), listener, pty, rx, shared.clone(), zsh_init);
+    let event_loop = ControlClientEventLoop::new(
+        model.clone(),
+        listener,
+        pty,
+        rx,
+        shared.clone(),
+        expected_session,
+        zsh_init,
+    );
     Harness {
         handle: event_loop.spawn(),
         sender,
@@ -377,7 +389,7 @@ fn wait_for_written(written: &Arc<Mutex<Vec<u8>>>, needle: &[u8]) {
 #[test]
 fn bound_pane_writes_retained_zsh_init_send_keys_exactly_once() {
     let script = "WARP_ZSH_INIT_MARKER".to_owned();
-    let init_bytes = zsh_init_bytes(&script, ShellType::Zsh);
+    let init_bytes = zsh_init_bytes(&script, ShellType::Zsh, SessionId::from(7));
     let encoded = send_keys_commands(&PaneId::from("%0"), &init_bytes);
     let expected: Vec<u8> = encoded.iter().flat_map(|c| c.as_bytes()).copied().collect();
     let mut control = CONTROL_MODE_DCS.to_vec();
@@ -409,4 +421,77 @@ fn bound_pane_writes_retained_zsh_init_send_keys_exactly_once() {
         !written_text.contains("send-keys -t %0 -H 73 65 6e 64"),
         "zsh init send-keys must not be hex-encoded again: {written_text}"
     );
+}
+
+fn octal_escape_output(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for &b in bytes {
+        if b < 0x20 || b == 0x5c || b >= 0x7f {
+            out.push_str(&format!("\\{b:03o}"));
+        } else {
+            out.push(char::from(b));
+        }
+    }
+    out
+}
+
+#[test]
+fn init_shell_before_remaining_staged_bytes_does_not_write_bootstrap() {
+    use crate::terminal::tmux::bridge::TmuxRuntime;
+    use crate::terminal::tmux::protocol::{STAGE_COMPLETE_OSC_PREFIX, silent_bootstrap_bytes};
+
+    let runtime = TmuxRuntime::new();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(SessionId::from(7));
+    runtime
+        .begin_pane_bootstrap("%0", SessionId::from(7))
+        .expect("stage");
+
+    let script = "WARP_ZSH_INIT_MARKER".to_owned();
+    let mut ack = STAGE_COMPLETE_OSC_PREFIX.to_vec();
+    ack.extend_from_slice(b"7\x07");
+    let mut control = CONTROL_MODE_DCS.to_vec();
+    control.extend_from_slice(b"%window-pane-changed @0 %0\n");
+    control.extend_from_slice(
+        format!("%output %0 {}\n", octal_escape_output(b"still-staging")).as_bytes(),
+    );
+    control.extend_from_slice(format!("%output %0 {}\n", octal_escape_output(&ack)).as_bytes());
+    let mut harness = start_loop_with(
+        None,
+        None,
+        Some((script, ShellType::Zsh, SessionId::from(7))),
+        control,
+    );
+    harness
+        .model
+        .lock()
+        .set_tmux_instance_id(Some(runtime.id().as_u64()));
+    let mut peer = harness.peer.take().expect("peer");
+    peer.write_all(&[1]).expect("wake readable");
+
+    let bootstrap = silent_bootstrap_bytes(ShellType::Zsh);
+    let encoded = send_keys_commands(&PaneId::from("%0"), &bootstrap);
+    wait_for_written(&harness.written, encoded[0].as_bytes());
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert!(
+        runtime
+            .on_stage_complete("%0", SessionId::from(7))
+            .is_none()
+    );
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+
+    harness
+        .sender
+        .send(Message::Shutdown)
+        .expect("send shutdown");
+    join_loop(harness.handle);
+    runtime.unregister();
+    let written = harness.written.lock().expect("written lock").clone();
+    let bootstrap_prefix = encoded[0].as_bytes();
+    let count = written
+        .windows(bootstrap_prefix.len())
+        .filter(|w| *w == bootstrap_prefix)
+        .count();
+    assert_eq!(count, 1, "ack must inject silent bootstrap once");
 }

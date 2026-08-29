@@ -118,13 +118,14 @@ pub fn spawn_control_client(
     let zsh_init = bootstrap
         .init_script
         .clone()
-        .map(|script| (script, bootstrap.shell_type, bootstrap.session_id));
+        .map(|script| (script, bootstrap.shell_type));
     let event_loop = ControlClientEventLoop::new(
         model,
         channel_event_proxy,
         pty,
         event_loop_rx,
         shared,
+        bootstrap.session_id,
         zsh_init,
     );
     register_dedicated_server(socket.clone());

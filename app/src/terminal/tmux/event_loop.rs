@@ -18,7 +18,8 @@ use crate::terminal::model::ansi;
 use crate::terminal::tmux::pane_bytes::{feed_control_bytes, notify_exit, sink_writer};
 use crate::terminal::tmux::parser::PaneId;
 use crate::terminal::tmux::protocol::{
-    kill_server_command, refresh_client_command, send_keys_commands, zsh_init_bytes,
+    kill_server_command, refresh_client_command, send_keys_commands, silent_bootstrap_bytes,
+    zsh_init_bytes,
 };
 use crate::terminal::writeable_pty::Message;
 use crate::terminal::writeable_pty::pty_controller::{EventLoopSendError, EventLoopSender};
@@ -195,7 +196,8 @@ pub struct ControlClientEventLoop<P: EventedPty> {
     terminal: Arc<FairMutex<TerminalModel>>,
     event_listener: ChannelEventListener,
     shared: Arc<SharedControlState>,
-    zsh_init: Option<(String, ShellType, SessionId)>,
+    expected_session: SessionId,
+    zsh_init: Option<(String, ShellType)>,
 }
 
 impl<P> ControlClientEventLoop<P>
@@ -208,7 +210,8 @@ where
         pty: P,
         rx: Receiver<Message>,
         shared: Arc<SharedControlState>,
-        zsh_init: Option<(String, ShellType, SessionId)>,
+        expected_session: SessionId,
+        zsh_init: Option<(String, ShellType)>,
     ) -> Self {
         Self {
             poll: mio::Poll::new().expect("create mio Poll"),
@@ -217,6 +220,7 @@ where
             terminal,
             event_listener,
             shared,
+            expected_session,
             zsh_init,
         }
     }
@@ -391,6 +395,8 @@ where
         let mut bytes_in_buffer = 0;
         let mut bytes_processed = 0;
         let mut terminal = None;
+        let mut stage_complete = Vec::new();
+        let mut instance_id = None;
 
         loop {
             match self.pty.reader().read(&mut buf[bytes_in_buffer..]) {
@@ -436,12 +442,15 @@ where
             if feed.exited {
                 notify_exit(terminal.deref_mut());
             }
+            instance_id = terminal.tmux_instance_id();
             Self::maybe_bind_pane(
                 &self.shared,
+                self.expected_session,
                 &mut self.zsh_init,
                 state,
-                terminal.tmux_instance_id(),
+                instance_id,
             );
+            stage_complete.extend(feed.stage_complete);
 
             bytes_processed += bytes_in_buffer;
             bytes_in_buffer = 0;
@@ -450,6 +459,8 @@ where
             }
             FairMutexGuard::bump(terminal);
         }
+        drop(terminal);
+        Self::apply_stage_complete(instance_id, &stage_complete, state);
 
         if bytes_processed > 0 {
             self.event_listener.send_wakeup_event();
@@ -459,7 +470,8 @@ where
 
     fn maybe_bind_pane(
         shared: &SharedControlState,
-        zsh_init: &mut Option<(String, ShellType, SessionId)>,
+        expected_session: SessionId,
+        zsh_init: &mut Option<(String, ShellType)>,
         state: &mut LoopState,
         instance_id: Option<u64>,
     ) {
@@ -476,17 +488,15 @@ where
             use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
             if let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(instance_id)) {
                 runtime.note_tracked_control_pane(pane_id.as_str());
-                if let Some((_, _, session_id)) = zsh_init.as_ref() {
-                    runtime.set_tracked_expected_session(*session_id);
-                }
+                runtime.set_tracked_expected_session(expected_session);
             }
         }
 
         let pending = std::mem::take(&mut *shared.pending_pane_writes.lock());
         let pending_control = std::mem::take(&mut *shared.pending_control.lock());
         let mut to_send = Vec::new();
-        if let Some((script, shell_type, _)) = zsh_init.take() {
-            to_send.push(zsh_init_bytes(&script, shell_type));
+        if let Some((script, shell_type)) = zsh_init.take() {
+            to_send.push(zsh_init_bytes(&script, shell_type, expected_session));
         }
         to_send.extend(pending.into_iter().map(|bytes| bytes.into_owned()));
         for bytes in to_send {
@@ -495,6 +505,29 @@ where
             }
         }
         state.write_list.extend(pending_control);
+    }
+
+    fn apply_stage_complete(
+        instance_id: Option<u64>,
+        completed: &[(PaneId, SessionId)],
+        state: &mut LoopState,
+    ) {
+        use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+        let Some(instance_id) = instance_id else {
+            return;
+        };
+        let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(instance_id)) else {
+            return;
+        };
+        for (pane_id, session_id) in completed {
+            let _ = runtime.on_stage_complete(pane_id.as_str(), *session_id);
+        }
+        for (pane_id, shell_type) in runtime.take_pending_silent_bootstrap() {
+            let bytes = silent_bootstrap_bytes(shell_type);
+            for command in send_keys_commands(&PaneId::from(pane_id.as_str()), &bytes) {
+                state.write_list.push_back(Cow::Owned(command.into_bytes()));
+            }
+        }
     }
 
     fn pty_write(&mut self, state: &mut LoopState, can_write: &mut bool) -> io::Result<()> {
