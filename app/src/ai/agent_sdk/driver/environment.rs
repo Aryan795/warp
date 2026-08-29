@@ -53,6 +53,8 @@ pub enum PrepareEnvironmentError {
     SetupCommand { command: String },
     #[error("Failed to change directory into {repo_name}")]
     ChangeDirectory { repo_name: String },
+    #[error("Failed to configure task-scoped repository credentials")]
+    CredentialSetup,
     #[error(
         "Repositories {first_owner}/{repo_name} and {second_owner}/{repo_name} share a clone directory name"
     )]
@@ -393,6 +395,8 @@ async fn prepare_environment_impl(
             repo_name: working_dir_string,
         });
     }
+    git_credentials::prepare_repository_credentials(source_repos)
+        .map_err(|_| PrepareEnvironmentError::CredentialSetup)?;
     let mut codebase_context_receivers = Vec::new();
 
     let environment_snapshot = if source_repos.is_empty() {
@@ -413,10 +417,8 @@ async fn prepare_environment_impl(
 
     if !source_repos.is_empty() {
         for repo in source_repos {
-            git_credentials::configure_repository_git_identity(
-                &working_dir.join(&repo.repo),
-                repo.code_forge.map(CodeForge::host).unwrap_or(""),
-            );
+            git_credentials::configure_repository_credentials(&working_dir.join(&repo.repo), repo)
+                .map_err(|_| PrepareEnvironmentError::CredentialSetup)?;
             register_cloned_repo(repo, working_dir, is_sandbox, spawner).await?;
             if !is_sandbox && should_index_codebase {
                 let receiver = index_repo_codebase(
@@ -604,6 +606,7 @@ fn head_override_for_repo<'a>(
 #[derive(Debug, Clone)]
 struct RepositoryCloneRequest {
     repo: SourceRepo,
+    clone_url: String,
     checkout: Option<RepositoryHeadRef>,
 }
 
@@ -628,7 +631,13 @@ fn repository_clone_requests(
                 Some(head_override) => Some(head_override.head.clone()),
                 None => repo.checkout_ref.clone().map(RepositoryHeadRef::Branch),
             };
-            Ok(RepositoryCloneRequest { repo, checkout })
+            let clone_url = git_credentials::clone_url_for_repository(&repo)
+                .map_err(|_| PrepareEnvironmentError::CredentialSetup)?;
+            Ok(RepositoryCloneRequest {
+                repo,
+                clone_url,
+                checkout,
+            })
         })
         .collect()
 }
@@ -729,7 +738,7 @@ clone_repo() {
     let mut log_outputs = String::new();
     for (index, request) in repos.iter().enumerate() {
         let repo_name = format!("{}/{}", request.repo.owner, request.repo.repo);
-        let repo_url = request.repo.https_clone_url();
+        let repo_url = &request.clone_url;
         let escaped_repo_name = shell_escape_single_quotes(&repo_name, ShellType::Bash);
         let escaped_repo_url = shell_escape_single_quotes(&repo_url, ShellType::Bash);
         let escaped_target = shell_escape_single_quotes(&request.repo.repo, ShellType::Bash);
@@ -848,7 +857,7 @@ async fn clone_repo(
 ) -> Result<(), PrepareEnvironmentError> {
     let repo = &request.repo;
     let repo_name = format!("{}/{}", repo.owner, repo.repo);
-    let repo_url = repo.https_clone_url();
+    let repo_url = &request.clone_url;
     // Get the session's shell type for proper escaping, falling back to Bash
     // when the session is not yet bootstrapped or the spawn fails.
     let shell_type = spawner

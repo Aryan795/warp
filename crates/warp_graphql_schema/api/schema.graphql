@@ -3699,16 +3699,35 @@ type TaskAttachment {
   mimeType: String!
 }
 
-"""A set of git credentials for a single hosting provider."""
+"""A task-scoped git credential for one provider authority."""
 type TaskGitCredential {
   """
   The email address associated with the token, if available.
   Null for service-account (installation) tokens.
   """
   email: String
+  """An opaque task-scoped identifier for this credential."""
+  id: ID!
 
   """The git hosting provider (e.g. "github.com")."""
   host: String!
+  """The GitLab instance connection UID, when this is a GitLab credential."""
+  instanceUid: ID
+
+  """The GitLab root-group installation UID, when this is a GitLab credential."""
+  installationUid: ID
+
+  """The optional non-default port for the git hosting instance."""
+  port: Int
+
+  """The exact repository paths that this credential authorizes."""
+  projectPaths: [String!]!
+
+  """The GitLab relative URL prefix without a leading or trailing slash."""
+  relativeUrlPrefix: String!
+
+  """The URL scheme for clone, API, and credential matching."""
+  scheme: String!
 
   """The OAuth or installation access token."""
   token: String!
@@ -3741,7 +3760,7 @@ input TaskGitCredentialsInput {
 }
 
 type TaskGitCredentialsOutput implements Response {
-  """The credentials that were freshly issued this cycle, one per host."""
+  """The credentials that were freshly issued this cycle."""
   credentials: [TaskGitCredential!]!
 
   """

@@ -806,6 +806,16 @@ pub enum AgentDriverError {
     ConversationLoadFailed(String),
     #[error("Failed to initialize AWS Bedrock credentials: {0}")]
     AwsBedrockCredentialsFailed(String),
+    #[error("The worker could not reach the GitLab instance.")]
+    GitLabWorkerConnectivityFailed,
+    #[error("The worker could not establish trusted TLS with the GitLab instance.")]
+    GitLabWorkerTlsFailed,
+    #[error("The worker GitLab credential was rejected.")]
+    GitLabWorkerAuthenticationFailed,
+    #[error("The worker GitLab credential cannot access a required repository.")]
+    GitLabWorkerRepositoryAccessDenied,
+    #[error("The worker could not access a required GitLab remote with Git.")]
+    GitLabWorkerGitAccessFailed,
     #[error(
         "Conversation {conversation_id} was produced by the {expected} harness, but --harness {got} was requested. \
          Re-run with --harness {expected} (or omit --harness to match) to continue this conversation."
@@ -992,6 +1002,15 @@ impl AgentDriver {
                 });
 
         let mut env_vars = build_secret_env_vars(&secrets);
+        if let Some(task_bin_dir) = git_credentials::task_bin_dir() {
+            let mut paths = vec![task_bin_dir];
+            if let Some(path) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&path));
+            }
+            let path = std::env::join_paths(paths)
+                .map_err(|error| AgentDriverError::ConfigBuildFailed(error.into()))?;
+            env_vars.insert(OsString::from("PATH"), path);
+        }
 
         // Inject cloud provider env vars.
         cloud_provider::collect_env_vars(&cloud_providers, &mut env_vars)?;
@@ -3055,7 +3074,7 @@ impl AgentDriver {
 
             let harness = task.harness.harness();
             let setup_events_for_environment = setup_events.clone();
-            let source_repos_for_prepare = source_repos;
+            let source_repos_for_prepare = source_repos.clone();
             let prepare_outcome = foreground
                 .spawn(move |me, ctx| {
                     let working_dir = me.working_dir.clone();
@@ -3085,6 +3104,12 @@ impl AgentDriver {
                 Self::linger_after_failure(&foreground, "environment_setup", &error).await;
                 return Err(error);
             }
+            setup_events
+                .record_result(
+                    SetupStep::GitLabPreflight,
+                    Self::run_gitlab_preflight_checks(&source_repos, &foreground),
+                )
+                .await?;
 
             if let Some(file_based_discovery_rx) = file_based_discovery_rx {
                 // Await discovery: collect UUIDs of file-based MCP servers that were auto-started
@@ -3465,6 +3490,50 @@ impl AgentDriver {
         Ok(())
     }
 
+    async fn run_gitlab_preflight_checks(
+        repositories: &[SourceRepo],
+        foreground: &ModelSpawner<Self>,
+    ) -> Result<(), AgentDriverError> {
+        git_credentials::preflight_gitlab_network(repositories)
+            .await
+            .map_err(|error| match error {
+                git_credentials::GitLabPreflightError::Connectivity => {
+                    AgentDriverError::GitLabWorkerConnectivityFailed
+                }
+                git_credentials::GitLabPreflightError::Tls => {
+                    AgentDriverError::GitLabWorkerTlsFailed
+                }
+                git_credentials::GitLabPreflightError::Authentication => {
+                    AgentDriverError::GitLabWorkerAuthenticationFailed
+                }
+                git_credentials::GitLabPreflightError::RepositoryAccess => {
+                    AgentDriverError::GitLabWorkerRepositoryAccessDenied
+                }
+            })?;
+
+        let working_dir = foreground.spawn(|me, _| me.working_dir.clone()).await?;
+        let Some(command) =
+            git_credentials::gitlab_git_access_check_command(repositories, &working_dir)
+                .map_err(|_| AgentDriverError::GitLabWorkerRepositoryAccessDenied)?
+        else {
+            return Ok(());
+        };
+        let check = foreground
+            .spawn(move |me, ctx| {
+                me.terminal_driver.update(ctx, |driver, ctx| {
+                    driver.execute_silent_command(command, ctx)
+                })
+            })
+            .await?;
+        let output = check
+            .with_timeout(PREFLIGHT_CHECK_TIMEOUT)
+            .await
+            .map_err(|_| AgentDriverError::GitLabWorkerGitAccessFailed)??;
+        if !output.success() {
+            return Err(AgentDriverError::GitLabWorkerGitAccessFailed);
+        }
+        Ok(())
+    }
     /// Run a single preflight check command and return an error if it fails.
     async fn run_single_preflight(
         command: &str,

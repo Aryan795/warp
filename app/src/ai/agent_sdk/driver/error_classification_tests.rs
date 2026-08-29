@@ -17,6 +17,50 @@ fn assert_state_and_code(
     );
 }
 
+#[test]
+fn gitlab_worker_preflight_failures_are_bounded_and_actionable() {
+    let cases = [
+        (
+            AgentDriverError::GitLabWorkerConnectivityFailed,
+            PlatformErrorCode::EnvironmentSetupFailed,
+            "DNS",
+        ),
+        (
+            AgentDriverError::GitLabWorkerTlsFailed,
+            PlatformErrorCode::EnvironmentSetupFailed,
+            "TLS",
+        ),
+        (
+            AgentDriverError::GitLabWorkerAuthenticationFailed,
+            PlatformErrorCode::AuthenticationRequired,
+            "credential was rejected",
+        ),
+        (
+            AgentDriverError::GitLabWorkerRepositoryAccessDenied,
+            PlatformErrorCode::AuthenticationRequired,
+            "required repository",
+        ),
+        (
+            AgentDriverError::GitLabWorkerGitAccessFailed,
+            PlatformErrorCode::EnvironmentSetupFailed,
+            "GitLab remote",
+        ),
+    ];
+
+    for (error, expected_code, message_fragment) in cases {
+        let (state, update) = classify_driver_error(&error);
+        assert_eq!(state, AgentTaskState::Failed);
+        assert_eq!(update.error_code, Some(expected_code));
+        assert!(
+            update.message.contains(message_fragment),
+            "{}",
+            update.message
+        );
+        assert!(!update.message.contains("gitlab.example.com"));
+        assert!(!update.message.contains("token"));
+    }
+}
+
 // --- Infrastructure errors → ERROR ---
 
 #[test]

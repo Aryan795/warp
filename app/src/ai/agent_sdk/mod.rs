@@ -976,6 +976,16 @@ impl AgentDriverRunner {
         if needs_clone {
             let org = skill_spec.org.as_ref().expect("org checked above");
             let repo_name = skill_spec.repo.as_ref().expect("repo checked above");
+            driver::git_credentials::prepare_project_path(
+                cloud_object_models::CodeForge::GitHub,
+                org,
+                repo_name,
+            )
+            .map_err(|error| {
+                AgentDriverError::SkillResolutionFailed(format!(
+                    "Failed to configure task Git credentials for skill resolution: {error:#}"
+                ))
+            })?;
             log::info!("Cloning {org}/{repo_name} for skill resolution in sandboxed mode");
             setup_events
                 .record_result(SetupStep::SkillRepoClone, async {

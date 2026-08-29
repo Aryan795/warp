@@ -49,7 +49,6 @@ pub struct TaskGitCredentialsOutput {
 /// Pre-#16215 operation: omits `acceptsPartialRefresh` and `failedHosts` so a
 /// server that has not deployed those fields can still validate the query.
 pub mod legacy {
-    use super::TaskGitCredential;
     use crate::error::UserFacingError;
     use crate::request_context::RequestContext;
     use crate::schema;
@@ -93,21 +92,37 @@ pub mod legacy {
     #[derive(cynic::QueryFragment, Debug)]
     #[cynic(graphql_type = "TaskGitCredentialsOutput")]
     pub struct TaskGitCredentialsLegacyOutput {
-        pub credentials: Vec<TaskGitCredential>,
+        pub credentials: Vec<TaskGitCredentialLegacy>,
+    }
+
+    #[derive(cynic::QueryFragment, Debug)]
+    #[cynic(graphql_type = "TaskGitCredential")]
+    pub struct TaskGitCredentialLegacy {
+        pub token: String,
+        pub username: Option<String>,
+        pub email: Option<String>,
+        pub host: String,
     }
 }
 
 pub use legacy::{
-    TaskGitCredentialsLegacy, TaskGitCredentialsLegacyInput, TaskGitCredentialsLegacyResult,
-    TaskGitCredentialsLegacyVariables,
+    TaskGitCredentialLegacy, TaskGitCredentialsLegacy, TaskGitCredentialsLegacyInput,
+    TaskGitCredentialsLegacyResult, TaskGitCredentialsLegacyVariables,
 };
 
 #[derive(cynic::QueryFragment, Debug)]
 pub struct TaskGitCredential {
+    pub id: cynic::Id,
+    pub instance_uid: Option<cynic::Id>,
+    pub installation_uid: Option<cynic::Id>,
+    pub scheme: String,
+    pub host: String,
+    pub port: Option<i32>,
+    pub relative_url_prefix: String,
+    pub project_paths: Vec<String>,
     pub token: String,
     pub username: Option<String>,
     pub email: Option<String>,
-    pub host: String,
 }
 
 #[cfg(test)]

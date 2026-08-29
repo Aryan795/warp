@@ -716,20 +716,37 @@ pub struct CreateFileArtifactUploadResponse {
 /// A single git credential entry returned by `taskGitCredentials`.
 #[derive(Clone)]
 pub struct GitCredential {
+    /// Opaque task-scoped identity used to merge refreshes safely.
+    pub id: String,
+    /// GitLab instance connection identity, when applicable.
+    pub instance_uid: Option<String>,
+    /// GitLab root-group installation identity, when applicable.
+    pub installation_uid: Option<String>,
+    /// URL scheme for clone, API, and credential matching.
+    pub scheme: String,
+    /// The git hosting provider hostname.
+    pub host: String,
+    /// A non-default origin port.
+    pub port: Option<i32>,
+    /// GitLab's relative URL prefix, without leading or trailing slashes.
+    pub relative_url_prefix: String,
+    /// Exact forge-relative repository paths authorized by this credential.
+    pub project_paths: Vec<String>,
     /// The provider's OAuth or installation access token.
     pub token: String,
     /// The provider-specific git username, when available.
     pub username: Option<String>,
     /// The provider account's email, when available.
     pub email: Option<String>,
-    /// The managed git host, such as `"github.com"` or `"gitlab.com"`.
-    pub host: String,
 }
 
 impl std::fmt::Debug for GitCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitCredential")
-            .field("host", &self.host)
+            .field("id", &self.id)
+            .field("instance_uid", &self.instance_uid)
+            .field("installation_uid", &self.installation_uid)
+            .field("project_path_count", &self.project_paths.len())
             .field("username_present", &self.username.is_some())
             .field("email_present", &self.email.is_some())
             .field("token_present", &!self.token.is_empty())
@@ -1705,7 +1722,7 @@ impl ServerApi {
                     credentials: output
                         .credentials
                         .into_iter()
-                        .map(into_git_credential)
+                        .map(into_legacy_git_credential)
                         .collect(),
                     failed_hosts: Vec::new(),
                 })
@@ -1724,18 +1741,54 @@ fn into_git_credential(
     credential: warp_graphql::queries::task_git_credentials::TaskGitCredential,
 ) -> GitCredential {
     GitCredential {
+        id: credential.id.into_inner(),
+        instance_uid: credential.instance_uid.map(cynic::Id::into_inner),
+        installation_uid: credential.installation_uid.map(cynic::Id::into_inner),
+        scheme: credential.scheme,
+        host: credential.host,
+        port: credential.port,
+        relative_url_prefix: credential.relative_url_prefix,
+        project_paths: credential.project_paths,
         token: credential.token,
         username: credential.username,
         email: credential.email,
+    }
+}
+
+fn into_legacy_git_credential(
+    credential: warp_graphql::queries::task_git_credentials::TaskGitCredentialLegacy,
+) -> GitCredential {
+    GitCredential {
+        id: format!("legacy:{}", credential.host),
+        instance_uid: None,
+        installation_uid: None,
+        scheme: "https".to_string(),
         host: credential.host,
+        port: None,
+        relative_url_prefix: String::new(),
+        project_paths: Vec::new(),
+        token: credential.token,
+        username: credential.username,
+        email: credential.email,
     }
 }
 
 fn is_unknown_git_credential_schema_error(error: &anyhow::Error) -> bool {
     let message = error.to_string();
-    let names_partial_refresh_field =
-        message.contains("failedHosts") || message.contains("acceptsPartialRefresh");
-    names_partial_refresh_field
+    let names_compatibility_field = [
+        "failedHosts",
+        "acceptsPartialRefresh",
+        "instanceUid",
+        "installationUid",
+        "scheme",
+        "port",
+        "relativeUrlPrefix",
+        "projectPaths",
+    ]
+    .iter()
+    .any(|field| message.contains(field))
+        || message.contains("TaskGitCredential") && message.contains("\"id\"");
+    names_compatibility_field
         && (message.contains("Cannot query field")
             || message.contains("Unknown argument")
             || message.contains("is not defined by type"))
@@ -2794,7 +2847,7 @@ impl AIClient for ServerApi {
             Ok(response) => Ok(response),
             Err(error) if is_unknown_git_credential_schema_error(&error) => {
                 log::info!(
-                    "taskGitCredentials partial-refresh fields are unavailable; falling back to the pre-deploy schema"
+                    "taskGitCredentials credential fields are unavailable; falling back to the legacy schema"
                 );
                 self.get_task_git_credentials_legacy(task_id, workload_token)
                     .await

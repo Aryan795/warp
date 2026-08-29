@@ -31,6 +31,24 @@ fn current_query_selects_partial_refresh_fields() {
 
     assert!(operation.query.contains("failedHosts"));
     assert!(operation.query.contains("credentials"));
+    for field in [
+        "id",
+        "instanceUid",
+        "installationUid",
+        "scheme",
+        "host",
+        "port",
+        "relativeUrlPrefix",
+        "projectPaths",
+        "username",
+        "email",
+        "token",
+    ] {
+        assert!(
+            operation.query.contains(field),
+            "current query must select {field}"
+        );
+    }
 }
 
 #[test]
@@ -60,4 +78,18 @@ fn legacy_query_omits_partial_refresh_fields() {
     assert!(!operation.query.contains("acceptsPartialRefresh"));
     assert!(!operation.query.contains("failedHosts"));
     assert!(operation.query.contains("credentials"));
+    for field in [
+        "id",
+        "instanceUid",
+        "installationUid",
+        "scheme",
+        "port",
+        "relativeUrlPrefix",
+        "projectPaths",
+    ] {
+        assert!(
+            !operation.query.contains(field),
+            "legacy query must not select {field}"
+        );
+    }
 }

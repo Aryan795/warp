@@ -198,6 +198,7 @@ pub(crate) enum SetupStep {
     EnvironmentCodebaseIndexing,
     FileBasedMcpDiscovery,
     FileBasedMcpReadiness,
+    GitLabPreflight,
     EnvironmentSkillLoading,
     GlobalSkillLoading,
     SkillsDirsLoading,
@@ -277,6 +278,9 @@ impl SetupStep {
             }
             Self::FileBasedMcpReadiness => {
                 span_and_name!("setup_file_based_mcp_readiness")
+            }
+            Self::GitLabPreflight => {
+                span_and_name!("setup_gitlab_preflight")
             }
             Self::EnvironmentSkillLoading => {
                 span_and_name!("setup_environment_skill_loading")

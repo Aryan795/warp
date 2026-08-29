@@ -180,7 +180,12 @@ fn branch_head_override(
 }
 
 fn clone_request(repo: SourceRepo, checkout: Option<RepositoryHeadRef>) -> RepositoryCloneRequest {
-    RepositoryCloneRequest { repo, checkout }
+    let clone_url = repo.https_clone_url();
+    RepositoryCloneRequest {
+        repo,
+        clone_url,
+        checkout,
+    }
 }
 
 fn named_checkout_request(repo: SourceRepo) -> RepositoryCloneRequest {
@@ -336,6 +341,25 @@ fn parallel_clone_command_runs_repos_in_background_and_waits() {
     assert!(command.contains("===== platform/backend/api ====="));
     assert!(!command.contains("repository revision results"));
     assert!(command.contains("exit \"$failed\""));
+}
+
+#[test]
+fn clone_command_uses_an_explicit_self_hosted_origin_without_a_token() {
+    let request = RepositoryCloneRequest {
+        repo: SourceRepo::new(
+            CodeForge::GitLab,
+            "platform/backend".to_string(),
+            "api".to_string(),
+        ),
+        clone_url: "https://gitlab.example.com:8443/gitlab/platform/backend/api.git".to_string(),
+        checkout: None,
+    };
+
+    let command = build_parallel_clone_command(&[request], ShellType::Bash);
+
+    assert!(command.contains("https://gitlab.example.com:8443/gitlab/platform/backend/api.git"));
+    assert!(!command.contains("oauth2@"));
+    assert!(!command.contains("GITLAB_TOKEN"));
 }
 
 #[test]
@@ -514,11 +538,11 @@ fn clone_requests_use_each_repository_host() {
     let command = build_parallel_clone_command(&prepared, ShellType::Bash);
 
     assert_eq!(
-        prepared[0].repo.https_clone_url(),
+        prepared[0].clone_url,
         "https://github.com/warpdotdev/warp.git"
     );
     assert_eq!(
-        prepared[1].repo.https_clone_url(),
+        prepared[1].clone_url,
         "https://gitlab.com/platform/backend/api.git"
     );
     assert!(command.contains("https://github.com/warpdotdev/warp.git"));

@@ -1300,6 +1300,12 @@ fn unknown_git_credential_schema_error_matches_undeployed_partial_refresh_fields
     assert!(is_unknown_git_credential_schema_error(&anyhow::anyhow!(
         "Unknown argument \"acceptsPartialRefresh\" on field \"taskGitCredentials\""
     )));
+    assert!(is_unknown_git_credential_schema_error(&anyhow::anyhow!(
+        "Cannot query field \"instanceUid\" on type \"TaskGitCredential\""
+    )));
+    assert!(is_unknown_git_credential_schema_error(&anyhow::anyhow!(
+        "Cannot query field \"id\" on type \"TaskGitCredential\""
+    )));
     assert!(!is_unknown_git_credential_schema_error(&anyhow::anyhow!(
         "Failed to fetch task git credentials"
     )));

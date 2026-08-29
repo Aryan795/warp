@@ -274,6 +274,41 @@ pub fn classify_driver_error(error: &AgentDriverError) -> (AgentTaskState, TaskS
                 PlatformErrorCode::EnvironmentSetupFailed,
             ),
         ),
+        AgentDriverError::GitLabWorkerConnectivityFailed => (
+            AgentTaskState::Failed,
+            TaskStatusUpdate::with_error_code(
+                "The worker could not reach the GitLab instance. Check DNS, routing, firewall rules, and the configured instance address, then retry.",
+                PlatformErrorCode::EnvironmentSetupFailed,
+            ),
+        ),
+        AgentDriverError::GitLabWorkerTlsFailed => (
+            AgentTaskState::Failed,
+            TaskStatusUpdate::with_error_code(
+                "The worker could not establish trusted TLS with the GitLab instance. Install a publicly trusted certificate for the configured hostname, then retry.",
+                PlatformErrorCode::EnvironmentSetupFailed,
+            ),
+        ),
+        AgentDriverError::GitLabWorkerAuthenticationFailed => (
+            AgentTaskState::Failed,
+            TaskStatusUpdate::with_error_code(
+                "The GitLab task credential was rejected. Repair the GitLab installation or mint a new Factory credential, then retry.",
+                PlatformErrorCode::AuthenticationRequired,
+            ),
+        ),
+        AgentDriverError::GitLabWorkerRepositoryAccessDenied => (
+            AgentTaskState::Failed,
+            TaskStatusUpdate::with_error_code(
+                "The GitLab task credential cannot access a required repository. Repair the Factory project binding and installation membership, then retry.",
+                PlatformErrorCode::AuthenticationRequired,
+            ),
+        ),
+        AgentDriverError::GitLabWorkerGitAccessFailed => (
+            AgentTaskState::Failed,
+            TaskStatusUpdate::with_error_code(
+                "Git could not access a required GitLab remote. Check the repository binding and worker network access, then retry.",
+                PlatformErrorCode::EnvironmentSetupFailed,
+            ),
+        ),
         AgentDriverError::ConversationLoadFailed(msg) => (
             AgentTaskState::Error,
             TaskStatusUpdate::with_error_code(
