@@ -4136,6 +4136,23 @@ fn devcontainer_build_pane_renders_streamed_output() {
                     .as_ref(ctx)
                     .dev_container_shows_retry_and_close(ctx)
             );
+            let failed_title = build_view
+                .as_ref(ctx)
+                .pane_configuration()
+                .as_ref(ctx)
+                .title();
+            assert!(
+                failed_title.contains("failed"),
+                "failed header title must identify the failed phase, got {failed_title:?}"
+            );
+            assert_eq!(
+                build_view
+                    .as_ref(ctx)
+                    .pane_configuration()
+                    .as_ref(ctx)
+                    .title_secondary(),
+                "boom"
+            );
         });
     });
 }

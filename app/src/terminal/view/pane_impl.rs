@@ -273,6 +273,25 @@ impl TerminalView {
         }
     }
 
+    fn pane_header_title_and_secondary(&self, app: &AppContext) -> (String, String) {
+        #[cfg(feature = "local_tty")]
+        if let Some(operation) = &self.dev_container_build {
+            return (
+                operation.read(app, |operation, _| operation.header_title()),
+                operation
+                    .read(app, |operation, _| {
+                        operation.header_error().map(str::to_owned)
+                    })
+                    .unwrap_or_default(),
+            );
+        }
+        let pane_config = self.pane_configuration.as_ref(app);
+        (
+            pane_config.title().to_owned(),
+            pane_config.title_secondary().to_owned(),
+        )
+    }
+
     fn render_header_title(
         &self,
         is_fullscreen_agent_view: bool,
@@ -289,8 +308,7 @@ impl TerminalView {
         // double-render the same navigation affordance.
 
         let appearance = Appearance::as_ref(app);
-        let pane_config = self.pane_configuration.as_ref(app);
-        let title = pane_config.title().to_owned();
+        let (title, secondary) = self.pane_header_title_and_secondary(app);
         let clip_config = if self.is_using_conversation_for_pane_header_title {
             ClipConfig::ellipsis()
         } else {
@@ -378,12 +396,11 @@ impl TerminalView {
                 };
             center_row.add_child(title_element);
         }
-        let secondary = pane_config.title_secondary();
         if !secondary.is_empty() {
             let error_color = blended_colors::text_sub(theme, theme.background());
             center_row.add_child(
                 Container::new(
-                    Text::new_inline(secondary.to_owned(), appearance.ui_font_family(), 11.)
+                    Text::new_inline(secondary, appearance.ui_font_family(), 11.)
                         .with_color(error_color)
                         .finish(),
                 )

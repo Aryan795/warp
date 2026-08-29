@@ -337,7 +337,7 @@ impl TerminalView {
     }
 
     #[cfg(feature = "local_tty")]
-    pub(crate) fn sync_dev_container_build_header(&mut self, ctx: &mut ViewContext<Self>) {
+    pub(crate) fn sync_dev_container_build_header(&self, ctx: &mut ViewContext<Self>) {
         let Some(operation) = self.dev_container_build.clone() else {
             return;
         };
@@ -501,6 +501,7 @@ impl TerminalView {
         registry::DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
             registry.mark_failed(&key);
         });
+        self.sync_dev_container_build_header(ctx);
         ctx.notify();
     }
 
