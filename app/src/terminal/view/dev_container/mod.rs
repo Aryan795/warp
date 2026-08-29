@@ -268,7 +268,187 @@ impl TerminalView {
     ) {
         self.dev_container_build = Some(operation);
         self.model.lock().start_commandless_output_block();
+        self.start_dev_container_build_attempt(ctx);
         ctx.notify();
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn start_dev_container_build_attempt(&self, ctx: &mut ViewContext<Self>) {
+        let Some(operation) = self.dev_container_build.clone() else {
+            return;
+        };
+        let operation_id = operation.read(ctx, |operation, _| operation.operation_id());
+        let attempt_id = operation.read(ctx, |operation, _| operation.attempt_id());
+        let workspace_folder =
+            operation.read(ctx, |operation, _| operation.workspace_folder().clone());
+        let config_file = operation.read(ctx, |operation, _| operation.config_file().clone());
+        let cancel = operation.read(ctx, |operation, _| operation.cancel_handle());
+
+        let cli_future = resolve_devcontainer_cli_path(ctx);
+        let docker_future = resolve_docker_cli_path(ctx);
+        ctx.spawn(
+            async move { (cli_future.await, docker_future.await) },
+            move |me, (cli, docker), ctx| {
+                let Some(operation) = me.dev_container_build.clone() else {
+                    return;
+                };
+                if !operation.read(ctx, |operation, _| {
+                    operation.is_current_attempt(operation_id, attempt_id)
+                }) {
+                    return;
+                }
+                match (cli, docker) {
+                    (Some(cli), Some(docker)) => {
+                        me.run_dev_container_up(
+                            cli,
+                            docker,
+                            workspace_folder,
+                            config_file,
+                            cancel,
+                            operation_id,
+                            attempt_id,
+                            ctx,
+                        );
+                    }
+                    (None, _) => me.fail_dev_container_build(
+                        operation::DevContainerBuildPhase::Build,
+                        "devcontainer CLI not found on PATH. Install it with `npm install -g \
+                         @devcontainers/cli` and try again."
+                            .to_owned(),
+                        ctx,
+                    ),
+                    (_, None) => me.fail_dev_container_build(
+                        operation::DevContainerBuildPhase::Build,
+                        "docker CLI not found on PATH.".to_owned(),
+                        ctx,
+                    ),
+                }
+            },
+        );
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn fail_dev_container_build(
+        &self,
+        phase: operation::DevContainerBuildPhase,
+        message: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(operation) = self.dev_container_build.clone() else {
+            return;
+        };
+        let key = operation.read(ctx, |operation, _| operation.key().clone());
+        operation.update(ctx, |operation, ctx| {
+            operation.fail(phase, message, ctx);
+        });
+        registry::DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
+            registry.mark_failed(&key);
+        });
+        ctx.notify();
+    }
+
+    #[cfg(feature = "local_tty")]
+    #[allow(clippy::too_many_arguments)]
+    fn run_dev_container_up(
+        &self,
+        cli: PathBuf,
+        docker_path: PathBuf,
+        workspace_folder: PathBuf,
+        config_file: PathBuf,
+        cancel: operation::DevContainerBuildCancel,
+        operation_id: uuid::Uuid,
+        attempt_id: u64,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use std::sync::Arc;
+
+        use parking_lot::Mutex;
+        use warp_terminal::model::ansi::Processor;
+
+        use super::super::event::Event as TerminalModelEvent;
+
+        let processor = Arc::new(Mutex::new(Processor::new()));
+        let model = self.model.clone();
+        let event_proxy = self.model.lock().event_proxy.clone();
+        let up_future = async move {
+            let mut command =
+                stream::dev_container_up_command(&cli, &workspace_folder, &config_file);
+            let mut child = command.spawn()?;
+            cancel.set_process_group_id(child.id());
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| std::io::Error::other("devcontainer up stdout was not piped"))?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| std::io::Error::other("devcontainer up stderr was not piped"))?;
+            let drain = stream::drain_dev_container_pipes(stdout, stderr, move |chunk| {
+                processor
+                    .lock()
+                    .parse_bytes(&mut *model.lock(), chunk, &mut std::io::sink());
+                event_proxy.send_app_event(TerminalModelEvent::BackgroundBlockStarted);
+            });
+            let stdout = drain.await?;
+            let status = child.status().await?;
+            std::io::Result::Ok((stdout, status.success(), docker_path, workspace_folder))
+        };
+        ctx.spawn(up_future, move |me, result, ctx| {
+            let Some(operation) = me.dev_container_build.clone() else {
+                return;
+            };
+            if !operation.read(ctx, |operation, _| {
+                operation.is_current_attempt(operation_id, attempt_id)
+            }) {
+                return;
+            }
+            match result {
+                Ok((stdout, exit_success, docker_path, workspace_folder)) => {
+                    if stdout.oversized {
+                        me.fail_dev_container_build(
+                            operation::DevContainerBuildPhase::Build,
+                            "Dev container failed to start: stdout exceeded 1 MiB.".to_owned(),
+                            ctx,
+                        );
+                        return;
+                    }
+                    match interpret_dev_container_up_output(exit_success, &stdout.bytes, b"") {
+                        DevContainerUpOutcome::ReadyToAttach {
+                            container_id,
+                            remote_user,
+                            remote_workspace_folder,
+                        } => {
+                            operation.update(ctx, |operation, ctx| {
+                                operation
+                                    .set_phase(operation::DevContainerBuildPhase::Preflight, ctx);
+                            });
+                            me.preflight_and_attach_dev_container(
+                                workspace_folder,
+                                docker_path,
+                                container_id,
+                                remote_user,
+                                remote_workspace_folder,
+                                generate_sandbox_id(),
+                                generate_session_id(),
+                                ctx,
+                            );
+                        }
+                        DevContainerUpOutcome::Error(message) => {
+                            me.fail_dev_container_build(
+                                operation::DevContainerBuildPhase::Build,
+                                message,
+                                ctx,
+                            );
+                        }
+                    }
+                }
+                Err(error) => me.fail_dev_container_build(
+                    operation::DevContainerBuildPhase::Build,
+                    format!("Failed to run `devcontainer up`: {error}"),
+                    ctx,
+                ),
+            }
+        });
     }
 
     /// Runs `devcontainer up` for `workspace_folder` against `config_path`. Only opens a pane
