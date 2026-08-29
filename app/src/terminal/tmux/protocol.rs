@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use warp_core::SessionId;
 use warp_core::paths::cache_dir;
 use warp_terminal::bootstrap::{
-    generate_session_id, init_shell_script_for_shell, script_for_shell,
+    generate_session_id, raw_init_shell_script_for_shell, script_for_shell,
 };
 use warp_terminal::local_tty::shell::{
     DirectShellStarter, arguments_for_session_spawning_command, supported_shell_path_and_type,
@@ -145,7 +145,7 @@ pub fn pane_bootstrap_for_shell(shell_path: PathBuf, shell_type: ShellType) -> P
         session_id,
     );
     let init_script = matches!(shell_type, ShellType::Zsh)
-        .then(|| init_shell_script_for_shell(shell_type, &ASSETS, session_id));
+        .then(|| raw_init_shell_script_for_shell(shell_type, &ASSETS, session_id));
     PaneBootstrap {
         session_id,
         shell_type,
@@ -895,7 +895,7 @@ pub fn in_band_init_bytes(shell_type: ShellType, session_id: SessionId) -> Optio
     match shell_type {
         ShellType::PowerShell => None,
         shell_type => {
-            let script = init_shell_script_for_shell(shell_type, &ASSETS, session_id);
+            let script = raw_init_shell_script_for_shell(shell_type, &ASSETS, session_id);
             let mut body = script.into_bytes();
             if !body.ends_with(b"\n") {
                 body.push(b'\n');

@@ -661,9 +661,101 @@ fn zsh_pane_bootstrap_keeps_init_script_for_send_keys() {
     let bytes = zsh_init_bytes(&init_script, ShellType::Zsh, bootstrap.session_id);
     assert!(bytes.ends_with(b"\n"));
     let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        !text.contains(r#"'"'"'"#),
+        "send-keys zsh init must not be eval-escaped: {text}"
+    );
     let init_at = text.find("InitShell").expect("InitShell");
     let ack_at = text.rfind("9278;t;").expect("stage-complete ack");
     assert!(init_at < ack_at);
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_retained_init_bytes_reach_prompt_without_quote_ps2() {
+    let Some(zsh) = optional_shell("zsh") else {
+        return;
+    };
+    let Ok(python) = Command::new("python3").arg("-c").arg("import pty").status() else {
+        return;
+    };
+    if !python.success() {
+        return;
+    }
+    let bootstrap = pane_bootstrap_for_shell(zsh.clone(), ShellType::Zsh);
+    let init_script = bootstrap.init_script.expect("zsh needs an init script");
+    let init = zsh_init_bytes(&init_script, ShellType::Zsh, bootstrap.session_id);
+    let home = unique_temp_path("warp-tmux-zsh-retained-home");
+    std::fs::create_dir_all(&home).expect("zsh retained home");
+    let runner = format!(
+        r#"
+import os, pty, select, sys, time
+zsh = {zsh:?}
+script = sys.stdin.buffer.read()
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir({home:?})
+    os.environ["HOME"] = {home:?}
+    os.environ.pop("HISTFILE", None)
+    os.execv(zsh, [zsh, "--no-rcs", "-i"])
+for i in range(0, len(script), 128):
+    os.write(fd, script[i:i+128])
+time.sleep(0.3)
+os.write(fd, b"echo WARP_INIT_DONE\nexit\n")
+out = b""
+deadline = time.time() + 6
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+    if b"WARP_INIT_DONE" in out:
+        break
+try:
+    os.waitpid(pid, 0)
+except ChildProcessError:
+    pass
+sys.stdout.buffer.write(out)
+"#,
+        zsh = zsh.display(),
+        home = home.display(),
+    );
+    let mut child = Command::new("python3")
+        .arg("-c")
+        .arg(&runner)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python pty runner");
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = std::io::Write::write_all(&mut stdin, &init);
+    }
+    let output = child.wait_with_output().expect("wait python pty");
+    let _ = std::fs::remove_dir_all(&home);
+    let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+    let text = String::from_utf8_lossy(&combined);
+    assert!(
+        !text.contains("quote>")
+            && !text.contains("heredoc>")
+            && !text.contains("function>")
+            && !text.contains("then>"),
+        "retained zsh init must not stall on PS2: {text:?}"
+    );
+    assert!(
+        !text.contains("fc -p") && !text.contains("fc -P"),
+        "retained zsh init must not inject in-band history setup: {text:?}"
+    );
+    assert!(
+        text.contains("WARP_INIT_DONE"),
+        "interactive zsh must reach a prompt: {text:?}"
+    );
 }
 
 #[test]
