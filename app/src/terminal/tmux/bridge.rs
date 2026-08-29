@@ -13,6 +13,8 @@ use crate::terminal::model::terminal_model::TmuxClientEvent;
 use crate::terminal::tmux::pane_bytes::sink_writer;
 
 const MAX_BUFFERED_PANE_BYTES: usize = 64 * 1024;
+const MAX_PENDING_CLIENT_EVENTS: usize = 256;
+pub const APP_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TmuxInstanceId(u64);
@@ -45,6 +47,8 @@ struct Inner {
     buffers: HashMap<String, Vec<u8>>,
     pending_captures: VecDeque<String>,
     pending_client_events: Vec<TmuxClientEvent>,
+    app_bind_deadline: Option<instant::Instant>,
+    presentation_ready: bool,
 }
 
 /// One Warp-managed tmux control-mode session (gateway PTY + presentation window).
@@ -84,6 +88,8 @@ impl TmuxRuntime {
                 buffers: HashMap::new(),
                 pending_captures: VecDeque::new(),
                 pending_client_events: Vec::new(),
+                app_bind_deadline: None,
+                presentation_ready: false,
             }),
             applying: AtomicBool::new(false),
         });
@@ -152,6 +158,8 @@ impl TmuxRuntime {
         inner.buffers.clear();
         inner.pending_captures.clear();
         inner.pending_client_events.clear();
+        inner.app_bind_deadline = None;
+        inner.presentation_ready = false;
     }
 
     pub fn is_applying(&self) -> bool {
@@ -210,23 +218,67 @@ impl TmuxRuntime {
         self.inner.lock().pending_captures.pop_front()
     }
 
-    pub fn buffer_client_events(&self, events: &[TmuxClientEvent]) {
+    pub fn buffer_client_events(&self, events: &[TmuxClientEvent]) -> bool {
         if events.is_empty() {
-            return;
+            return true;
+        }
+        let mut inner = self.inner.lock();
+        for event in events {
+            if let TmuxClientEvent::LayoutChange { window_id, .. } = event
+                && let Some(TmuxClientEvent::LayoutChange {
+                    window_id: last_id, ..
+                }) = inner.pending_client_events.last()
+                && last_id == window_id
+            {
+                *inner.pending_client_events.last_mut().unwrap() = event.clone();
+                continue;
+            }
+            if inner.pending_client_events.len() >= MAX_PENDING_CLIENT_EVENTS {
+                log::warn!(
+                    "tmux runtime {} pending client event queue overflow; rolling back",
+                    self.id.as_u64()
+                );
+                inner.pending_client_events.clear();
+                return false;
+            }
+            inner.pending_client_events.push(event.clone());
         }
         log::info!(
             "tmux runtime {} buffering {} client events until presentation binds",
             self.id.as_u64(),
             events.len()
         );
-        self.inner
-            .lock()
-            .pending_client_events
-            .extend(events.iter().cloned());
+        true
     }
 
     pub fn take_client_events(&self) -> Vec<TmuxClientEvent> {
         std::mem::take(&mut self.inner.lock().pending_client_events)
+    }
+
+    pub fn start_app_bind_deadline(&self) {
+        let mut inner = self.inner.lock();
+        inner.presentation_ready = false;
+        inner.app_bind_deadline = Some(instant::Instant::now() + APP_BIND_TIMEOUT);
+    }
+
+    pub fn mark_presentation_ready(&self) {
+        let mut inner = self.inner.lock();
+        inner.presentation_ready = true;
+        inner.app_bind_deadline = None;
+    }
+
+    pub fn is_presentation_ready(&self) -> bool {
+        self.inner.lock().presentation_ready
+    }
+
+    pub fn app_bind_deadline_elapsed(&self, now: instant::Instant) -> bool {
+        let inner = self.inner.lock();
+        if inner.presentation_ready {
+            return false;
+        }
+        inner
+            .app_bind_deadline
+            .is_some_and(|deadline| now >= deadline)
     }
 
     #[cfg(test)]
@@ -257,6 +309,8 @@ mod tests {
                 buffers: HashMap::new(),
                 pending_captures: VecDeque::new(),
                 pending_client_events: Vec::new(),
+                app_bind_deadline: None,
+                presentation_ready: false,
             }),
             applying: AtomicBool::new(false),
         }
@@ -343,5 +397,32 @@ mod tests {
         });
         assert!(!a.is_applying());
         assert!(!b.is_applying());
+    }
+
+    #[test]
+    fn pending_client_events_overflow_clears_and_reports_failure() {
+        let runtime = runtime();
+        let event = TmuxClientEvent::WindowAdd {
+            window_id: "@0".to_owned(),
+        };
+        let batch: Vec<_> = (0..MAX_PENDING_CLIENT_EVENTS)
+            .map(|_| event.clone())
+            .collect();
+        assert!(runtime.buffer_client_events(&batch));
+        assert!(!runtime.buffer_client_events(&[event]));
+        assert!(runtime.take_client_events().is_empty());
+    }
+
+    #[test]
+    fn app_bind_deadline_is_not_cleared_until_presentation_ready() {
+        let runtime = runtime();
+        runtime.start_app_bind_deadline();
+        assert!(!runtime.is_presentation_ready());
+        assert!(!runtime.app_bind_deadline_elapsed(instant::Instant::now()));
+        let later = instant::Instant::now() + APP_BIND_TIMEOUT + std::time::Duration::from_secs(1);
+        assert!(runtime.app_bind_deadline_elapsed(later));
+        runtime.mark_presentation_ready();
+        assert!(runtime.is_presentation_ready());
+        assert!(!runtime.app_bind_deadline_elapsed(later));
     }
 }

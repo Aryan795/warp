@@ -42,6 +42,13 @@ pub enum TmuxPhaseKind {
     PresentationRecovering,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandIntent {
+    Snapshot { generation: u64 },
+    Capture { pane_id: PaneId },
+    Other,
+}
+
 #[allow(clippy::large_enum_variant)]
 enum TmuxPhase {
     Inactive,
@@ -55,12 +62,12 @@ enum TmuxPhase {
         known_panes: HashSet<PaneId>,
         pending_writes: Vec<Cow<'static, [u8]>>,
         pending_resize: Option<(usize, usize)>,
-        pending_captures: VecDeque<PaneId>,
-        pending_snapshots: VecDeque<u64>,
+        pending_commands: VecDeque<CommandIntent>,
         live_snapshot: Option<u64>,
         next_snapshot_generation: u64,
         pending_bootstrap_window: Option<WindowId>,
         pending_bootstrap_pane: Option<PaneId>,
+        bootstrap_blocked: bool,
         layout_ready: bool,
         ready_deadline: Option<Instant>,
     },
@@ -340,12 +347,12 @@ impl TmuxIoState {
                     known_panes: HashSet::new(),
                     pending_writes,
                     pending_resize,
-                    pending_captures: VecDeque::new(),
-                    pending_snapshots: VecDeque::new(),
+                    pending_commands: VecDeque::new(),
                     live_snapshot: None,
                     next_snapshot_generation: 0,
                     pending_bootstrap_window: None,
                     pending_bootstrap_pane: None,
+                    bootstrap_blocked: false,
                     layout_ready: false,
                     ready_deadline: Some(Instant::now() + PRESENTATION_READY_TIMEOUT),
                 };
@@ -501,23 +508,8 @@ impl TmuxIoState {
     }
 
     fn note_outgoing_command(&mut self, bytes: &[u8]) {
-        if let Some(pane_id) = capture_pane_target(bytes) {
-            if let TmuxPhase::InControl {
-                pending_captures, ..
-            } = &mut self.phase
-            {
-                pending_captures.push_back(pane_id);
-            }
-            return;
-        }
-        if is_snapshot_command(bytes) {
-            self.issue_snapshot();
-        }
-    }
-
-    fn issue_snapshot(&mut self) {
         let TmuxPhase::InControl {
-            pending_snapshots,
+            pending_commands,
             live_snapshot,
             next_snapshot_generation,
             ..
@@ -525,10 +517,18 @@ impl TmuxIoState {
         else {
             return;
         };
-        *next_snapshot_generation += 1;
-        let generation = *next_snapshot_generation;
-        *live_snapshot = Some(generation);
-        pending_snapshots.push_back(generation);
+        if let Some(pane_id) = capture_pane_target(bytes) {
+            pending_commands.push_back(CommandIntent::Capture { pane_id });
+            return;
+        }
+        if is_snapshot_command(bytes) {
+            *next_snapshot_generation += 1;
+            let generation = *next_snapshot_generation;
+            *live_snapshot = Some(generation);
+            pending_commands.push_back(CommandIntent::Snapshot { generation });
+            return;
+        }
+        pending_commands.push_back(CommandIntent::Other);
     }
 
     fn apply_command_end(
@@ -542,26 +542,57 @@ impl TmuxIoState {
         {
             self.note_pane(pane_id);
         }
-        if !error
+        let has_layout = !error
             && payload
                 .iter()
-                .any(|line| parse_window_layout_line(line).is_some())
-        {
-            if self.take_live_snapshot_reply() {
-                return self.apply_snapshot_payload(payload);
+                .any(|line| parse_window_layout_line(line).is_some());
+        if has_layout {
+            return match self.take_snapshot_intent() {
+                Some(generation) if self.live_snapshot() == Some(generation) => {
+                    self.clear_live_snapshot_if(generation);
+                    self.apply_snapshot_payload(payload)
+                }
+                Some(_) => Vec::new(),
+                None => vec![TmuxFeedItem::CommandEnd {
+                    number,
+                    error,
+                    payload,
+                    capture_pane: None,
+                }],
+            };
+        }
+        if error {
+            let capture_pane = match self.pop_command_intent() {
+                Some(CommandIntent::Snapshot { generation }) => {
+                    self.clear_live_snapshot_if(generation);
+                    None
+                }
+                Some(CommandIntent::Capture { pane_id }) => Some(pane_id),
+                Some(CommandIntent::Other) | None => None,
+            };
+            return vec![TmuxFeedItem::CommandEnd {
+                number,
+                error,
+                payload,
+                capture_pane,
+            }];
+        }
+        match self.take_nonsnapshot_intent() {
+            Some(CommandIntent::Capture { pane_id }) => vec![TmuxFeedItem::CommandEnd {
+                number,
+                error,
+                payload,
+                capture_pane: Some(pane_id),
+            }],
+            Some(CommandIntent::Other) | Some(CommandIntent::Snapshot { .. }) | None => {
+                vec![TmuxFeedItem::CommandEnd {
+                    number,
+                    error,
+                    payload,
+                    capture_pane: None,
+                }]
             }
-            return Vec::new();
         }
-        let capture_pane = self.pop_pending_capture();
-        if error && capture_pane.is_none() {
-            self.take_snapshot_reply();
-        }
-        vec![TmuxFeedItem::CommandEnd {
-            number,
-            error,
-            payload,
-            capture_pane,
-        }]
     }
 
     fn apply_snapshot_payload(&mut self, payload: Vec<String>) -> Vec<TmuxFeedItem> {
@@ -588,10 +619,12 @@ impl TmuxIoState {
     fn bootstrap_layout_from_output(&mut self, pane_id: &PaneId) -> Vec<TmuxFeedItem> {
         if let TmuxPhase::InControl {
             layout_ready: false,
+            bootstrap_blocked: false,
             pending_bootstrap_pane,
             ..
         } = &mut self.phase
             && pending_bootstrap_pane.is_none()
+            && is_canonical_bootstrap_pane(pane_id)
         {
             *pending_bootstrap_pane = Some(pane_id.clone());
         }
@@ -601,11 +634,19 @@ impl TmuxIoState {
     fn bootstrap_layout_from_window(&mut self, window_id: WindowId) -> Vec<TmuxFeedItem> {
         if let TmuxPhase::InControl {
             layout_ready: false,
+            bootstrap_blocked,
             pending_bootstrap_window,
+            pending_bootstrap_pane,
             ..
         } = &mut self.phase
         {
-            *pending_bootstrap_window = Some(window_id);
+            if !is_canonical_bootstrap_window(&window_id) {
+                *bootstrap_blocked = true;
+                *pending_bootstrap_window = None;
+                *pending_bootstrap_pane = None;
+            } else if !*bootstrap_blocked && pending_bootstrap_window.is_none() {
+                *pending_bootstrap_window = Some(window_id);
+            }
         }
         self.maybe_synthesize_bootstrap_layout()
     }
@@ -614,10 +655,15 @@ impl TmuxIoState {
         let (window_id, pane_id) = match &self.phase {
             TmuxPhase::InControl {
                 layout_ready: false,
+                bootstrap_blocked: false,
                 pending_bootstrap_window: Some(window_id),
                 pending_bootstrap_pane: Some(pane_id),
                 ..
-            } => (window_id.clone(), pane_id.clone()),
+            } if is_canonical_bootstrap_window(window_id)
+                && is_canonical_bootstrap_pane(pane_id) =>
+            {
+                (window_id.clone(), pane_id.clone())
+            }
             _ => return Vec::new(),
         };
         let layout = dummy_layout_for_pane(&pane_id);
@@ -653,6 +699,7 @@ impl TmuxIoState {
             ready_deadline,
             pending_bootstrap_window,
             pending_bootstrap_pane,
+            bootstrap_blocked,
             ..
         } = &mut self.phase
         {
@@ -660,6 +707,7 @@ impl TmuxIoState {
             *ready_deadline = None;
             *pending_bootstrap_window = None;
             *pending_bootstrap_pane = None;
+            *bootstrap_blocked = false;
         }
     }
 
@@ -671,41 +719,57 @@ impl TmuxIoState {
         }]
     }
 
-    fn take_snapshot_reply(&mut self) -> Option<u64> {
-        let TmuxPhase::InControl {
-            pending_snapshots,
-            live_snapshot,
-            ..
-        } = &mut self.phase
-        else {
-            return None;
-        };
-        let generation = pending_snapshots.pop_front()?;
-        if *live_snapshot == Some(generation) {
-            *live_snapshot = None;
-        }
-        Some(generation)
-    }
-
-    fn take_live_snapshot_reply(&mut self) -> bool {
-        let live = match &self.phase {
+    fn live_snapshot(&self) -> Option<u64> {
+        match &self.phase {
             TmuxPhase::InControl { live_snapshot, .. } => *live_snapshot,
             _ => None,
-        };
-        let Some(generation) = self.take_snapshot_reply() else {
-            return false;
-        };
-        live == Some(generation)
+        }
     }
 
-    fn pop_pending_capture(&mut self) -> Option<PaneId> {
+    fn clear_live_snapshot_if(&mut self, generation: u64) {
+        if let TmuxPhase::InControl { live_snapshot, .. } = &mut self.phase
+            && *live_snapshot == Some(generation)
+        {
+            *live_snapshot = None;
+        }
+    }
+
+    fn pop_command_intent(&mut self) -> Option<CommandIntent> {
+        match &mut self.phase {
+            TmuxPhase::InControl {
+                pending_commands, ..
+            } => pending_commands.pop_front(),
+            _ => None,
+        }
+    }
+
+    fn take_snapshot_intent(&mut self) -> Option<u64> {
         let TmuxPhase::InControl {
-            pending_captures, ..
+            pending_commands, ..
         } = &mut self.phase
         else {
             return None;
         };
-        pending_captures.pop_front()
+        let index = pending_commands
+            .iter()
+            .position(|intent| matches!(intent, CommandIntent::Snapshot { .. }))?;
+        match pending_commands.remove(index) {
+            Some(CommandIntent::Snapshot { generation }) => Some(generation),
+            _ => None,
+        }
+    }
+
+    fn take_nonsnapshot_intent(&mut self) -> Option<CommandIntent> {
+        let TmuxPhase::InControl {
+            pending_commands, ..
+        } = &mut self.phase
+        else {
+            return None;
+        };
+        let index = pending_commands
+            .iter()
+            .position(|intent| !matches!(intent, CommandIntent::Snapshot { .. }))?;
+        pending_commands.remove(index)
     }
 }
 
@@ -766,6 +830,14 @@ fn parse_window_layout_line(line: &str) -> Option<(WindowId, String)> {
 fn dummy_layout_for_pane(pane_id: &PaneId) -> String {
     let index = pane_id.as_str().trim_start_matches('%');
     format!("80x24,0,0,{index}")
+}
+
+fn is_canonical_bootstrap_window(window_id: &WindowId) -> bool {
+    window_id.as_str() == "@0"
+}
+
+fn is_canonical_bootstrap_pane(pane_id: &PaneId) -> bool {
+    pane_id.as_str() == "%0"
 }
 
 #[cfg(test)]

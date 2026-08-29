@@ -485,3 +485,63 @@ fn snapshot_error_clears_intent_and_ignores_late_success() {
     );
     assert!(io.focused_pane().is_none());
 }
+
+#[test]
+fn snapshot_error_then_capture_does_not_steal_capture_reply() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    io.feed(CONTROL_MODE_DCS);
+    let err = io.feed(b"%begin 1 1\nno windows\n%error 1 1\n");
+    assert!(
+        err.iter()
+            .any(|item| matches!(item, TmuxFeedItem::CommandEnd { error: true, .. }))
+    );
+    io.enqueue_input(Cow::Borrowed(b"capture-pane -p -t %0\n"));
+    let capture = io.feed(b"%begin 1 2\npane-bytes\n%end 1 2\n");
+    assert!(capture.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::CommandEnd {
+            error: false,
+            capture_pane: Some(pane),
+            payload,
+            ..
+        } if pane.as_str() == "%0" && payload == &["pane-bytes".to_string()]
+    )));
+    assert!(
+        !capture
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::LayoutChange { .. }))
+    );
+}
+
+#[test]
+fn multi_window_add_then_percent0_output_waits_for_snapshot() {
+    let mut io = TmuxIoState::new();
+    io.enqueue_input(start_command());
+    let mut bytes = CONTROL_MODE_DCS.to_vec();
+    bytes.extend_from_slice(b"%window-add @0\n%window-add @1\n%output %0 hi\n");
+    let items = io.feed(&bytes);
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, TmuxFeedItem::LayoutChange { .. }))
+    );
+    assert!(io.focused_pane().is_none());
+    let snapshot = io.feed(b"%begin 1 1\n@0 80x24,0,0,0\n@1 80x24,0,0,3\n%end 1 1\n");
+    assert!(snapshot.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::LayoutChange {
+            window_id,
+            layout,
+            ..
+        } if window_id.as_str() == "@0" && layout == "80x24,0,0,0"
+    )));
+    assert!(snapshot.iter().any(|item| matches!(
+        item,
+        TmuxFeedItem::LayoutChange {
+            window_id,
+            layout,
+            ..
+        } if window_id.as_str() == "@1" && layout == "80x24,0,0,3"
+    )));
+}

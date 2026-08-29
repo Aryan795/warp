@@ -4041,13 +4041,16 @@ impl Workspace {
                 self.check_and_trigger_onboarding(ctx);
             }
             NewWorkspaceSource::Session { options } => {
+                let skip_onboarding = options.tmux_presentation;
                 self.add_tab_with_pane_layout(
                     PanesLayout::SingleTerminal(options),
                     Arc::new(HashMap::new()),
                     None,
                     ctx,
                 );
-                self.check_and_trigger_onboarding(ctx);
+                if !skip_onboarding {
+                    self.check_and_trigger_onboarding(ctx);
+                }
             }
             NewWorkspaceSource::SharedSessionAsViewer { session_id } => {
                 // Generic session link: ambient-ness (if any) is discovered at SessionJoined.
@@ -12793,7 +12796,7 @@ impl Workspace {
 
     #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
     fn flush_buffered_tmux_client_events(
-        &self,
+        &mut self,
         instance_id: Option<u64>,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -12814,7 +12817,9 @@ impl Workspace {
             runtime.id().as_u64()
         );
         let Some(presentation) = Self::presentation_workspace(ctx, runtime.gateway_window()) else {
-            runtime.buffer_client_events(&events);
+            if !runtime.buffer_client_events(&events) {
+                self.fail_tmux_presentation(ctx);
+            }
             return;
         };
         presentation.update(ctx, |workspace, ctx| {
@@ -12822,7 +12827,11 @@ impl Workspace {
         });
     }
 
-    fn open_tmux_presentation_window(&self, instance_id: Option<u64>, ctx: &mut ViewContext<Self>) {
+    fn open_tmux_presentation_window(
+        &mut self,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let gateway_window = ctx.window_id();
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
         let _ = instance_id;
@@ -12837,22 +12846,42 @@ impl Workspace {
                     id
                 );
                 runtime.bind_gateway(gateway_window);
+                runtime.start_app_bind_deadline();
             }
         }
-        crate::root_view::open_new_with_workspace_source(
+        let (presentation_window, root) = crate::root_view::open_new_with_workspace_source(
             crate::root_view::NewWorkspaceSource::Session {
                 options: Box::new(NewTerminalOptions {
                     tmux_presentation: true,
                     tmux_gateway_window: Some(gateway_window),
+                    tmux_instance_id: instance_id,
                     hide_homepage: true,
                     ..Default::default()
                 }),
             },
             ctx,
         );
-        ctx.windows().hide_window(gateway_window);
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-        self.flush_buffered_tmux_client_events(instance_id, ctx);
+        {
+            use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+            if let Some(id) = instance_id
+                && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
+            {
+                runtime.bind_presentation(presentation_window);
+            }
+            self.flush_buffered_tmux_client_events(instance_id, ctx);
+            if self.tmux_presentation_is_ready(presentation_window, ctx) {
+                self.complete_tmux_presentation_open(instance_id, gateway_window, ctx);
+            } else {
+                self.schedule_tmux_app_bind_deadline(instance_id, ctx);
+            }
+            let _ = root;
+        }
+        #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+        {
+            let _ = (presentation_window, root);
+            ctx.windows().hide_window(gateway_window);
+        }
     }
 
     fn close_tmux_presentation_windows(
@@ -13020,24 +13049,21 @@ impl Workspace {
         gateway_window: Option<WindowId>,
     ) -> Option<warpui::ViewHandle<Workspace>> {
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-        let presentation_window = gateway_window.and_then(|gateway| {
-            crate::terminal::tmux::bridge::TmuxRuntime::for_gateway(gateway)
-                .and_then(|runtime| runtime.presentation_window())
-        });
+        {
+            let gateway = gateway_window?;
+            let runtime = crate::terminal::tmux::bridge::TmuxRuntime::for_gateway(gateway)?;
+            let presentation = runtime.presentation_window()?;
+            let workspace =
+                crate::workspace::WorkspaceRegistry::as_ref(ctx).get(presentation, ctx)?;
+            workspace
+                .read(ctx, |workspace, ctx| workspace.is_tmux_owned_window(ctx))
+                .then_some(workspace)
+        }
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
-        let presentation_window: Option<WindowId> = None;
-        let _ = gateway_window;
-        crate::workspace::WorkspaceRegistry::as_ref(ctx)
-            .all_workspaces(ctx)
-            .into_iter()
-            .find_map(|(window_id, workspace)| {
-                if presentation_window.is_some_and(|presentation| presentation != window_id) {
-                    return None;
-                }
-                workspace
-                    .read(ctx, |workspace, ctx| workspace.is_tmux_owned_window(ctx))
-                    .then_some(workspace)
-            })
+        {
+            let _ = (ctx, gateway_window);
+            None
+        }
     }
 
     fn apply_tmux_client_events(
@@ -13060,8 +13086,10 @@ impl Workspace {
         }
         let Some(presentation) = Self::presentation_workspace(ctx, Some(ctx.window_id())) else {
             #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-            if let Some(runtime) = self.tmux_runtime_for_client_events(ctx) {
-                runtime.buffer_client_events(events);
+            if let Some(runtime) = self.tmux_runtime_for_client_events(ctx)
+                && !runtime.buffer_client_events(events)
+            {
+                self.fail_tmux_presentation(ctx);
             }
             return;
         };
@@ -13161,14 +13189,21 @@ impl Workspace {
         self.add_tab_with_pane_layout(
             PanesLayout::SingleTerminal(Box::new({
                 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
-                let tmux_gateway_window = self
-                    .tmux_runtime(ctx.window_id())
+                let runtime = self.tmux_runtime(ctx.window_id());
+                #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+                let tmux_gateway_window = runtime
+                    .as_ref()
                     .and_then(|runtime| runtime.gateway_window());
+                #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+                let tmux_instance_id = runtime.as_ref().map(|runtime| runtime.id().as_u64());
                 #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
                 let tmux_gateway_window = None;
+                #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+                let tmux_instance_id = None;
                 NewTerminalOptions {
                     tmux_presentation: true,
                     tmux_gateway_window,
+                    tmux_instance_id,
                     hide_homepage: true,
                     ..Default::default()
                 }
@@ -13246,6 +13281,7 @@ impl Workspace {
             }
             pane_group.reconcile_tmux_panes(&leaves, ctx);
         });
+        self.maybe_complete_tmux_presentation(ctx);
     }
 
     fn fail_tmux_presentation(&mut self, ctx: &mut ViewContext<Self>) {
@@ -13273,6 +13309,95 @@ impl Workspace {
         }
     }
 
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn tmux_presentation_is_ready(&self, presentation_window: WindowId, ctx: &AppContext) -> bool {
+        crate::workspace::WorkspaceRegistry::as_ref(ctx)
+            .get(presentation_window, ctx)
+            .is_some_and(|workspace| {
+                workspace.read(ctx, |workspace, ctx| {
+                    let (window_id, pane_id) = workspace.tmux_active_window_and_pane(ctx);
+                    window_id.is_some() && pane_id.is_some()
+                })
+            })
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn maybe_complete_tmux_presentation(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(runtime) = self.tmux_runtime(ctx.window_id()) else {
+            return;
+        };
+        if runtime.is_presentation_ready() {
+            return;
+        }
+        let (window_id, pane_id) = self.tmux_active_window_and_pane(ctx);
+        if window_id.is_none() || pane_id.is_none() {
+            return;
+        }
+        let gateway = runtime.gateway_window();
+        runtime.mark_presentation_ready();
+        if let Some(gateway) = gateway {
+            ctx.windows().hide_window(gateway);
+        }
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn complete_tmux_presentation_open(
+        &self,
+        instance_id: Option<u64>,
+        gateway_window: WindowId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+        if let Some(id) = instance_id
+            && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
+        {
+            runtime.mark_presentation_ready();
+        }
+        ctx.windows().hide_window(gateway_window);
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn schedule_tmux_app_bind_deadline(
+        &self,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::terminal::tmux::bridge::APP_BIND_TIMEOUT;
+        let Some(id) = instance_id else {
+            return;
+        };
+        ctx.spawn(
+            async move {
+                warpui::r#async::Timer::after(APP_BIND_TIMEOUT).await;
+            },
+            move |workspace, _, ctx| {
+                workspace.check_tmux_app_bind_deadline(Some(id), ctx);
+            },
+        );
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn check_tmux_app_bind_deadline(
+        &mut self,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+        let Some(runtime) =
+            instance_id.and_then(|id| TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)))
+        else {
+            return;
+        };
+        if runtime.app_bind_deadline_elapsed(instant::Instant::now()) {
+            self.fail_tmux_presentation(ctx);
+        }
+    }
+
+    #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
+    fn maybe_complete_tmux_presentation(&mut self, ctx: &mut ViewContext<Self>) {
+        let _ = ctx;
+    }
+
     #[cfg(test)]
     pub(crate) fn apply_tmux_client_events_for_tests(
         &mut self,
@@ -13293,14 +13418,40 @@ impl Workspace {
 
     #[cfg(all(test, unix, feature = "local_tty", not(feature = "remote_tty")))]
     pub(crate) fn flush_buffered_tmux_client_events_for_tests(
-        &self,
+        &mut self,
         instance_id: Option<u64>,
         ctx: &mut ViewContext<Self>,
     ) {
         self.flush_buffered_tmux_client_events(instance_id, ctx);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix, feature = "local_tty", not(feature = "remote_tty")))]
+    pub(crate) fn presentation_workspace_for_tests(
+        ctx: &AppContext,
+        gateway_window: Option<WindowId>,
+    ) -> Option<warpui::ViewHandle<Workspace>> {
+        Self::presentation_workspace(ctx, gateway_window)
+    }
+
+    #[cfg(all(test, unix, feature = "local_tty", not(feature = "remote_tty")))]
+    pub(crate) fn check_tmux_app_bind_deadline_at_for_tests(
+        &mut self,
+        instance_id: Option<u64>,
+        now: instant::Instant,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+        let Some(runtime) =
+            instance_id.and_then(|id| TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)))
+        else {
+            return;
+        };
+        if runtime.app_bind_deadline_elapsed(now) {
+            self.fail_tmux_presentation(ctx);
+        }
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
     pub(crate) fn tmux_active_window_and_pane(
         &self,
         ctx: &AppContext,

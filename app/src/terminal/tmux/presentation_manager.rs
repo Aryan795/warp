@@ -30,6 +30,7 @@ impl TmuxPresentationManager {
         initial_size: Vector2F,
         window_id: WindowId,
         gateway_window: Option<WindowId>,
+        instance_id: Option<u64>,
         ctx: &mut AppContext,
     ) -> TmuxPresentationManagerInit {
         let (wakeups_tx, wakeups_rx) = async_channel::unbounded();
@@ -45,7 +46,7 @@ impl TmuxPresentationManager {
             channel_event_proxy,
             ShellLaunchState::ShellSpawned {
                 available_shell: None,
-                display_name: ShellName::blank(),
+                display_name: ShellName::LessDescriptive("tmux".to_owned()),
                 shell_type: ShellType::Zsh,
             },
             BlockSpacing::for_gui(ctx),
@@ -53,8 +54,15 @@ impl TmuxPresentationManager {
         );
         model.set_tmux_presentation(true);
         model.set_tmux_control_mode(true);
-        if let Some(runtime) = gateway_window
-            .and_then(crate::terminal::tmux::bridge::TmuxRuntime::for_gateway)
+        if let Some(runtime) = instance_id
+            .and_then(|id| {
+                crate::terminal::tmux::bridge::TmuxRuntime::for_id(
+                    crate::terminal::tmux::bridge::TmuxInstanceId::from_u64(id),
+                )
+            })
+            .or_else(|| {
+                gateway_window.and_then(crate::terminal::tmux::bridge::TmuxRuntime::for_gateway)
+            })
             .or_else(|| crate::terminal::tmux::bridge::TmuxRuntime::for_presentation(window_id))
         {
             runtime.bind_presentation(window_id);

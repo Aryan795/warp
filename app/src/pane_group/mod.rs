@@ -855,6 +855,8 @@ pub struct NewTerminalOptions {
     pub tmux_presentation: bool,
     /// Gateway window that owns this presentation, when `tmux_presentation` is set.
     pub tmux_gateway_window: Option<WindowId>,
+    /// Runtime instance that owns this presentation, when `tmux_presentation` is set.
+    pub tmux_instance_id: Option<u64>,
     /// Whether or not to start sharing the terminal session as soon as it's ready.
     pub is_shared_session_creator: IsSharedSessionCreator,
     /// The AI conversation to restore when the terminal is created.
@@ -3488,6 +3490,7 @@ impl PaneGroup {
     }
 
     #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    #[allow(clippy::too_many_arguments)]
     fn initial_tmux_presentation_pane(
         resources: TerminalViewResources,
         view_bounds: RectF,
@@ -3495,6 +3498,7 @@ impl PaneGroup {
         pane_contents: &mut HashMap<PaneId, Box<dyn AnyPaneContent>>,
         pane_history: &mut Vec<PaneId>,
         gateway_window: Option<WindowId>,
+        instance_id: Option<u64>,
         ctx: &mut ViewContext<Self>,
     ) -> (PaneData, InitialFocus) {
         let uuid = Uuid::new_v4();
@@ -3504,6 +3508,7 @@ impl PaneGroup {
                 view_bounds.size(),
                 ctx.window_id(),
                 gateway_window,
+                instance_id,
                 ctx,
             );
         Self::terminal_pane_data(
@@ -3598,6 +3603,7 @@ impl PaneGroup {
                                 pane_contents,
                                 pane_history,
                                 options.tmux_gateway_window,
+                                options.tmux_instance_id,
                                 ctx,
                             )
                         } else {
@@ -4217,12 +4223,16 @@ impl PaneGroup {
                 model_event_sender: self.model_event_sender.clone(),
             };
             let view_bounds = Self::estimated_view_bounds(ctx);
+            let instance_id = self
+                .tmux_presentation_binding(self.focused_pane_id(ctx), ctx)
+                .and_then(|binding| binding.instance_id);
             let terminal_init =
                 crate::terminal::tmux::presentation_manager::TmuxPresentationManager::create_model(
                     resources,
                     view_bounds.size(),
                     ctx.window_id(),
                     None,
+                    instance_id,
                     ctx,
                 );
             let uuid = Uuid::new_v4();
