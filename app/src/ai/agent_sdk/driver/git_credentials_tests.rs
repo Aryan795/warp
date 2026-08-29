@@ -457,7 +457,11 @@ fn public_address_policy_rejects_private_reserved_and_mixed_dns_members() {
         IpAddr::V6(Ipv6Addr::LOCALHOST),
         IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)),
         IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 1)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 2, 0, 0, 0, 0, 0, 1)),
         IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1)),
+        IpAddr::V6(Ipv6Addr::new(0x2002, 0x0a00, 1, 0, 0, 0, 0, 1)),
+        IpAddr::V6(Ipv6Addr::new(0x3fff, 0, 0, 0, 0, 0, 0, 1)),
         IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x0a00, 1)),
     ] {
         assert!(!ip_address_is_public(address), "{address}");
