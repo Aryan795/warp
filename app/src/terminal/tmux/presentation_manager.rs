@@ -54,19 +54,22 @@ impl TmuxPresentationManager {
         );
         model.set_tmux_presentation(true);
         model.set_tmux_control_mode(true);
-        if let Some(runtime) = instance_id
-            .and_then(|id| {
-                crate::terminal::tmux::bridge::TmuxRuntime::for_id(
-                    crate::terminal::tmux::bridge::TmuxInstanceId::from_u64(id),
-                )
-            })
-            .or_else(|| {
-                gateway_window.and_then(crate::terminal::tmux::bridge::TmuxRuntime::for_gateway)
-            })
-            .or_else(|| crate::terminal::tmux::bridge::TmuxRuntime::for_presentation(window_id))
-        {
+        let runtime = match instance_id {
+            Some(id) => crate::terminal::tmux::bridge::TmuxRuntime::for_id(
+                crate::terminal::tmux::bridge::TmuxInstanceId::from_u64(id),
+            ),
+            None => gateway_window
+                .and_then(crate::terminal::tmux::bridge::TmuxRuntime::for_gateway)
+                .or_else(|| {
+                    crate::terminal::tmux::bridge::TmuxRuntime::for_presentation(window_id)
+                }),
+        };
+        if let Some(runtime) = runtime {
             runtime.bind_presentation(window_id);
             model.set_tmux_instance_id(Some(runtime.id().as_u64()));
+            if let Some(shell_type) = runtime.shell_type() {
+                model.set_login_shell_spawned(shell_type);
+            }
         }
         let colors = model.colors();
         let model = Arc::new(FairMutex::new(model));

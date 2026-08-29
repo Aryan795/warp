@@ -689,6 +689,39 @@ fn tmux_app_bind_deadline_rolls_back_even_if_io_layout_is_ready() {
     });
 }
 
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+#[test]
+fn tmux_stale_open_after_reentry_does_not_create_a_blank_window() {
+    use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+
+    let _tmux = FeatureFlag::TmuxControlPrototype.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let gateway = mock_workspace(&mut app);
+        let first = TmuxRuntime::new();
+        let stale_id = first.id().as_u64();
+        configure_tmux_gateway(&gateway, &mut app, stale_id);
+        let gateway_window = gateway.update(&mut app, |_, ctx| ctx.window_id());
+        first.bind_gateway(gateway_window);
+        first.unregister();
+
+        let second = TmuxRuntime::new();
+        let live_id = second.id().as_u64();
+        assert_ne!(stale_id, live_id);
+        configure_tmux_gateway(&gateway, &mut app, live_id);
+        second.bind_gateway(gateway_window);
+
+        let initial_windows = app.window_ids().len();
+        gateway.update(&mut app, |workspace, ctx| {
+            workspace.open_tmux_presentation_window_for_tests(Some(stale_id), ctx);
+        });
+        assert_eq!(app.window_ids().len(), initial_windows);
+        assert!(TmuxRuntime::for_id(TmuxInstanceId::from_u64(stale_id)).is_none());
+        assert!(TmuxRuntime::for_id(TmuxInstanceId::from_u64(live_id)).is_some());
+        second.unregister();
+    });
+}
+
 #[test]
 fn test_open_new_window_for_team_reuses_existing_team_window() {
     App::test((), |mut app| async move {

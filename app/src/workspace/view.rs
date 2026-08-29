@@ -12801,10 +12801,11 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
-        let Some(runtime) = instance_id
-            .and_then(|id| TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)))
-            .or_else(|| TmuxRuntime::for_gateway(ctx.window_id()))
-        else {
+        let runtime = match instance_id {
+            Some(id) => TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)),
+            None => TmuxRuntime::for_gateway(ctx.window_id()),
+        };
+        let Some(runtime) = runtime else {
             return;
         };
         let events = runtime.take_client_events();
@@ -12838,9 +12839,13 @@ impl Workspace {
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         {
             use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
-            if let Some(id) = instance_id
-                && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
-            {
+            if let Some(id) = instance_id {
+                let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)) else {
+                    log::info!(
+                        "tmux open presentation aborted: instance {id} is no longer registered"
+                    );
+                    return;
+                };
                 log::info!(
                     "tmux open presentation: bind gateway window for instance {}",
                     id
@@ -13290,6 +13295,13 @@ impl Workspace {
             let instance_id = self
                 .tmux_runtime(ctx.window_id())
                 .map(|runtime| runtime.id().as_u64());
+            Self::write_tmux_to_gateway(
+                std::borrow::Cow::Borrowed(
+                    crate::terminal::tmux::protocol::detach_client_command().as_bytes(),
+                ),
+                instance_id,
+                ctx,
+            );
             let window_id = ctx.window_id();
             WorkspaceToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
                 toast_stack.add_ephemeral_toast(
@@ -13423,6 +13435,15 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         self.flush_buffered_tmux_client_events(instance_id, ctx);
+    }
+
+    #[cfg(all(test, unix, feature = "local_tty", not(feature = "remote_tty")))]
+    pub(crate) fn open_tmux_presentation_window_for_tests(
+        &mut self,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.open_tmux_presentation_window(instance_id, ctx);
     }
 
     #[cfg(all(test, unix, feature = "local_tty", not(feature = "remote_tty")))]

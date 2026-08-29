@@ -4196,6 +4196,8 @@ impl PaneGroup {
             locked.tmux_instance_id()
         };
         #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+        self.inject_tmux_pane_bootstrap(&model, tmux_pane_id, instance_id, ctx);
+        #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
         if let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), &model) {
             runtime.register_pane(tmux_pane_id, model);
         }
@@ -4207,6 +4209,40 @@ impl PaneGroup {
             instance_id,
             ctx,
         );
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn inject_tmux_pane_bootstrap(
+        &self,
+        model: &Arc<FairMutex<TerminalModel>>,
+        tmux_pane_id: &str,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), model) else {
+            return;
+        };
+        if !runtime.try_begin_pane_bootstrap(tmux_pane_id) {
+            return;
+        }
+        let shell_type = runtime
+            .shell_type()
+            .unwrap_or(crate::terminal::shell::ShellType::Zsh);
+        let session_id = warp_terminal::bootstrap::generate_session_id();
+        {
+            let mut locked = model.lock();
+            locked.register_session_id(session_id);
+            locked.set_login_shell_spawned(shell_type);
+        }
+        let Some(bytes) =
+            crate::terminal::tmux::protocol::in_band_init_bytes(shell_type, session_id)
+        else {
+            return;
+        };
+        let pane = crate::terminal::tmux::parser::PaneId::from(tmux_pane_id);
+        for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bytes) {
+            self.write_tmux_command(command.into_bytes(), instance_id, ctx);
+        }
     }
 
     pub fn add_tmux_presentation_pane(

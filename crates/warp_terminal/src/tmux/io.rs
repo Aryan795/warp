@@ -26,6 +26,11 @@ pub fn is_tmux_client_command(bytes: &[u8]) -> bool {
         || bytes.starts_with(b"list-windows")
         || bytes.starts_with(b"list-panes")
         || bytes.starts_with(b"display-message")
+        || bytes.starts_with(b"send-keys")
+}
+
+fn is_detach_client_command(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"detach-client")
 }
 
 pub fn is_tmux_cc_start(bytes: &[u8]) -> bool {
@@ -135,10 +140,16 @@ impl TmuxIoState {
             TmuxPhase::StartPending { pending_writes, .. }
             | TmuxPhase::OverflowRecovering { pending_writes }
             | TmuxPhase::PresentationRecovering { pending_writes } => {
+                if is_detach_client_command(&input) {
+                    return Vec::new();
+                }
                 pending_writes.push(input);
                 Vec::new()
             }
             TmuxPhase::InControl { .. } => {
+                if is_detach_client_command(&input) {
+                    return self.begin_detach_recovery();
+                }
                 if is_tmux_client_command(&input) {
                     self.note_outgoing_command(&input);
                     return vec![input];
@@ -333,14 +344,14 @@ impl TmuxIoState {
         }
         match event {
             ControlEvent::EnteredControlMode => {
-                let (pending_writes, pending_resize) = match &mut self.phase {
+                let (pending_writes, pending_resize, from_start) = match &mut self.phase {
                     TmuxPhase::StartPending {
                         pending_writes,
                         pending_resize,
                         ..
-                    } => (std::mem::take(pending_writes), pending_resize.take()),
-                    TmuxPhase::Inactive => (Vec::new(), None),
-                    _ => (Vec::new(), None),
+                    } => (std::mem::take(pending_writes), pending_resize.take(), true),
+                    TmuxPhase::Inactive => (Vec::new(), None, false),
+                    _ => (Vec::new(), None, false),
                 };
                 self.phase = TmuxPhase::InControl {
                     focused: None,
@@ -356,6 +367,9 @@ impl TmuxIoState {
                     layout_ready: false,
                     ready_deadline: Some(Instant::now() + PRESENTATION_READY_TIMEOUT),
                 };
+                if from_start {
+                    self.note_outgoing_command(b"tmux -CC");
+                }
                 let refresh_client =
                     pending_resize.map(|(columns, rows)| refresh_client_command(columns, rows));
                 if let Some(command) = refresh_client.as_ref() {
@@ -542,49 +556,18 @@ impl TmuxIoState {
         {
             self.note_pane(pane_id);
         }
-        let has_layout = !error
-            && payload
-                .iter()
-                .any(|line| parse_window_layout_line(line).is_some());
-        if has_layout {
-            return match self.take_snapshot_intent() {
-                Some(generation) if self.live_snapshot() == Some(generation) => {
-                    self.clear_live_snapshot_if(generation);
-                    self.apply_snapshot_payload(payload)
+        match self.pop_command_intent() {
+            Some(CommandIntent::Snapshot { generation }) => {
+                let is_live = self.live_snapshot() == Some(generation);
+                self.clear_live_snapshot_if(generation);
+                if !error && is_live {
+                    let has_layout = payload
+                        .iter()
+                        .any(|line| parse_window_layout_line(line).is_some());
+                    if has_layout {
+                        return self.apply_snapshot_payload(payload);
+                    }
                 }
-                Some(_) => Vec::new(),
-                None => vec![TmuxFeedItem::CommandEnd {
-                    number,
-                    error,
-                    payload,
-                    capture_pane: None,
-                }],
-            };
-        }
-        if error {
-            let capture_pane = match self.pop_command_intent() {
-                Some(CommandIntent::Snapshot { generation }) => {
-                    self.clear_live_snapshot_if(generation);
-                    None
-                }
-                Some(CommandIntent::Capture { pane_id }) => Some(pane_id),
-                Some(CommandIntent::Other) | None => None,
-            };
-            return vec![TmuxFeedItem::CommandEnd {
-                number,
-                error,
-                payload,
-                capture_pane,
-            }];
-        }
-        match self.take_nonsnapshot_intent() {
-            Some(CommandIntent::Capture { pane_id }) => vec![TmuxFeedItem::CommandEnd {
-                number,
-                error,
-                payload,
-                capture_pane: Some(pane_id),
-            }],
-            Some(CommandIntent::Other) | Some(CommandIntent::Snapshot { .. }) | None => {
                 vec![TmuxFeedItem::CommandEnd {
                     number,
                     error,
@@ -592,6 +575,18 @@ impl TmuxIoState {
                     capture_pane: None,
                 }]
             }
+            Some(CommandIntent::Capture { pane_id }) => vec![TmuxFeedItem::CommandEnd {
+                number,
+                error,
+                payload,
+                capture_pane: Some(pane_id),
+            }],
+            Some(CommandIntent::Other) | None => vec![TmuxFeedItem::CommandEnd {
+                number,
+                error,
+                payload,
+                capture_pane: None,
+            }],
         }
     }
 
@@ -719,6 +714,15 @@ impl TmuxIoState {
         }]
     }
 
+    fn begin_detach_recovery(&mut self) -> Vec<Cow<'static, [u8]>> {
+        if self.is_recovering() {
+            return Vec::new();
+        }
+        let pending_writes = self.take_pending_writes();
+        self.phase = TmuxPhase::PresentationRecovering { pending_writes };
+        vec![Cow::Borrowed(DETACH_CLIENT)]
+    }
+
     fn live_snapshot(&self) -> Option<u64> {
         match &self.phase {
             TmuxPhase::InControl { live_snapshot, .. } => *live_snapshot,
@@ -741,35 +745,6 @@ impl TmuxIoState {
             } => pending_commands.pop_front(),
             _ => None,
         }
-    }
-
-    fn take_snapshot_intent(&mut self) -> Option<u64> {
-        let TmuxPhase::InControl {
-            pending_commands, ..
-        } = &mut self.phase
-        else {
-            return None;
-        };
-        let index = pending_commands
-            .iter()
-            .position(|intent| matches!(intent, CommandIntent::Snapshot { .. }))?;
-        match pending_commands.remove(index) {
-            Some(CommandIntent::Snapshot { generation }) => Some(generation),
-            _ => None,
-        }
-    }
-
-    fn take_nonsnapshot_intent(&mut self) -> Option<CommandIntent> {
-        let TmuxPhase::InControl {
-            pending_commands, ..
-        } = &mut self.phase
-        else {
-            return None;
-        };
-        let index = pending_commands
-            .iter()
-            .position(|intent| !matches!(intent, CommandIntent::Snapshot { .. }))?;
-        pending_commands.remove(index)
     }
 }
 

@@ -203,6 +203,26 @@ fn presentation_pane_id_is_explicit() {
 }
 
 #[test]
+fn presentation_init_shell_hook_does_not_bypass_readiness() {
+    use crate::terminal::model::ansi::{Handler, InitShellValue};
+    use crate::terminal::model::session::get_local_hostname;
+
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_presentation(true);
+    model.set_tmux_pane_id(Some("%0".to_owned()));
+    let session_id = 4242.into();
+    model.register_session_id(session_id);
+    let hostname = get_local_hostname().unwrap_or_else(|_| "localhost".to_string());
+    model.init_shell(InitShellValue {
+        session_id,
+        shell: "zsh".to_owned(),
+        hostname,
+        ..Default::default()
+    });
+    assert_eq!(model.pending_session_id(), Some(session_id));
+}
+
+#[test]
 fn layout_events_are_queued_until_taken() {
     use crate::terminal::model::terminal_model::TmuxClientEvent;
     let mut model = TerminalModel::mock(None, None);

@@ -11,11 +11,11 @@ use warp_terminal::shell::ShellType;
 
 use super::{
     PaneBootstrap, capture_pane_command, cleanup_unspawned_dedicated_files, control_client_argv,
-    detach_client_command, kill_pane_command, kill_server_argv, kill_server_command,
-    kill_window_command, new_window_command, pane_bootstrap_for_shell, pipe_pane_journal_command,
-    refresh_client_command, register_dedicated_server, resize_pane_command,
-    schedule_kill_dedicated_server, select_pane_command, select_window_command, send_keys_commands,
-    split_window_command, zsh_init_bytes,
+    detach_client_command, in_band_init_bytes, kill_pane_command, kill_server_argv,
+    kill_server_command, kill_window_command, new_window_command, pane_bootstrap_for_shell,
+    pipe_pane_journal_command, refresh_client_command, register_dedicated_server,
+    resize_pane_command, schedule_kill_dedicated_server, select_pane_command,
+    select_window_command, send_keys_commands, split_window_command, zsh_init_bytes,
 };
 use crate::terminal::tmux::parser::{PaneId, WindowId};
 
@@ -659,4 +659,17 @@ fn zsh_pane_bootstrap_keeps_init_script_for_send_keys() {
     assert!(init_script.contains(&bootstrap.session_id.as_u64().to_string()));
     let bytes = zsh_init_bytes(&init_script, ShellType::Zsh);
     assert!(bytes.ends_with(b"\n"));
+}
+
+#[test]
+fn in_band_init_bytes_are_remote_safe_and_session_scoped() {
+    let session_id = SessionId::from(7);
+    let bytes = in_band_init_bytes(ShellType::Zsh, session_id).expect("zsh init");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("7"));
+    assert!(text.contains("InitShell"));
+    assert!(!text.contains('/'));
+    assert!(bytes.ends_with(b"\n"));
+    let bash = in_band_init_bytes(ShellType::Bash, session_id).expect("bash init");
+    assert_ne!(bytes, bash);
 }

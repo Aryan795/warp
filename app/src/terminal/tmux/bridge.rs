@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -10,10 +10,11 @@ use super::parser::PaneId;
 use crate::terminal::TerminalModel;
 use crate::terminal::model::ansi;
 use crate::terminal::model::terminal_model::TmuxClientEvent;
+use crate::terminal::shell::ShellType;
 use crate::terminal::tmux::pane_bytes::sink_writer;
 
 const MAX_BUFFERED_PANE_BYTES: usize = 64 * 1024;
-const MAX_PENDING_CLIENT_EVENTS: usize = 256;
+const MAX_PENDING_CLIENT_EVENT_BYTES: usize = 8 * 1024;
 pub const APP_BIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -47,6 +48,9 @@ struct Inner {
     buffers: HashMap<String, Vec<u8>>,
     pending_captures: VecDeque<String>,
     pending_client_events: Vec<TmuxClientEvent>,
+    pending_client_event_bytes: usize,
+    bootstrapped_panes: HashSet<String>,
+    shell_type: Option<ShellType>,
     app_bind_deadline: Option<instant::Instant>,
     presentation_ready: bool,
 }
@@ -88,6 +92,9 @@ impl TmuxRuntime {
                 buffers: HashMap::new(),
                 pending_captures: VecDeque::new(),
                 pending_client_events: Vec::new(),
+                pending_client_event_bytes: 0,
+                bootstrapped_panes: HashSet::new(),
+                shell_type: None,
                 app_bind_deadline: None,
                 presentation_ready: false,
             }),
@@ -158,6 +165,8 @@ impl TmuxRuntime {
         inner.buffers.clear();
         inner.pending_captures.clear();
         inner.pending_client_events.clear();
+        inner.pending_client_event_bytes = 0;
+        inner.bootstrapped_panes.clear();
         inner.app_bind_deadline = None;
         inner.presentation_ready = false;
     }
@@ -224,24 +233,50 @@ impl TmuxRuntime {
         }
         let mut inner = self.inner.lock();
         for event in events {
+            let incoming_bytes = client_event_retained_bytes(event);
+            if incoming_bytes > MAX_PENDING_CLIENT_EVENT_BYTES {
+                log::warn!(
+                    "tmux runtime {} pending client event overflow; rolling back",
+                    self.id.as_u64()
+                );
+                inner.pending_client_events.clear();
+                inner.pending_client_event_bytes = 0;
+                return false;
+            }
             if let TmuxClientEvent::LayoutChange { window_id, .. } = event
                 && let Some(TmuxClientEvent::LayoutChange {
                     window_id: last_id, ..
                 }) = inner.pending_client_events.last()
                 && last_id == window_id
             {
+                let previous_bytes =
+                    client_event_retained_bytes(inner.pending_client_events.last().unwrap());
+                let next_bytes = inner.pending_client_event_bytes - previous_bytes + incoming_bytes;
+                if next_bytes > MAX_PENDING_CLIENT_EVENT_BYTES {
+                    log::warn!(
+                        "tmux runtime {} pending client event overflow; rolling back",
+                        self.id.as_u64()
+                    );
+                    inner.pending_client_events.clear();
+                    inner.pending_client_event_bytes = 0;
+                    return false;
+                }
                 *inner.pending_client_events.last_mut().unwrap() = event.clone();
+                inner.pending_client_event_bytes = next_bytes;
                 continue;
             }
-            if inner.pending_client_events.len() >= MAX_PENDING_CLIENT_EVENTS {
+            let next_bytes = inner.pending_client_event_bytes + incoming_bytes;
+            if next_bytes > MAX_PENDING_CLIENT_EVENT_BYTES {
                 log::warn!(
-                    "tmux runtime {} pending client event queue overflow; rolling back",
+                    "tmux runtime {} pending client event overflow; rolling back",
                     self.id.as_u64()
                 );
                 inner.pending_client_events.clear();
+                inner.pending_client_event_bytes = 0;
                 return false;
             }
             inner.pending_client_events.push(event.clone());
+            inner.pending_client_event_bytes = next_bytes;
         }
         log::info!(
             "tmux runtime {} buffering {} client events until presentation binds",
@@ -252,7 +287,24 @@ impl TmuxRuntime {
     }
 
     pub fn take_client_events(&self) -> Vec<TmuxClientEvent> {
-        std::mem::take(&mut self.inner.lock().pending_client_events)
+        let mut inner = self.inner.lock();
+        inner.pending_client_event_bytes = 0;
+        std::mem::take(&mut inner.pending_client_events)
+    }
+
+    pub fn set_shell_type(&self, shell_type: ShellType) {
+        self.inner.lock().shell_type = Some(shell_type);
+    }
+
+    pub fn shell_type(&self) -> Option<ShellType> {
+        self.inner.lock().shell_type
+    }
+
+    pub fn try_begin_pane_bootstrap(&self, pane_id: &str) -> bool {
+        self.inner
+            .lock()
+            .bootstrapped_panes
+            .insert(pane_id.to_owned())
     }
 
     pub fn start_app_bind_deadline(&self) {
@@ -287,6 +339,35 @@ impl TmuxRuntime {
     }
 }
 
+fn client_event_retained_bytes(event: &TmuxClientEvent) -> usize {
+    match event {
+        TmuxClientEvent::LayoutChange {
+            window_id,
+            layout,
+            visible_layout,
+            flags,
+        } => {
+            window_id.len()
+                + layout.len()
+                + visible_layout.as_ref().map(String::len).unwrap_or(0)
+                + flags.as_ref().map(String::len).unwrap_or(0)
+        }
+        TmuxClientEvent::WindowAdd { window_id }
+        | TmuxClientEvent::WindowClose { window_id }
+        | TmuxClientEvent::SessionWindowChanged { window_id } => window_id.len(),
+        TmuxClientEvent::WindowRenamed { window_id, name } => window_id.len() + name.len(),
+        TmuxClientEvent::CommandEnd {
+            payload,
+            capture_pane,
+            ..
+        } => {
+            payload.iter().map(String::len).sum::<usize>()
+                + capture_pane.as_ref().map(String::len).unwrap_or(0)
+        }
+        TmuxClientEvent::PresentationUnready => 0,
+    }
+}
+
 fn feed_sink(sink: &mut PaneSink, bytes: &[u8]) {
     let mut writer = sink_writer();
     let mut model = sink.model.lock();
@@ -309,6 +390,9 @@ mod tests {
                 buffers: HashMap::new(),
                 pending_captures: VecDeque::new(),
                 pending_client_events: Vec::new(),
+                pending_client_event_bytes: 0,
+                bootstrapped_panes: HashSet::new(),
+                shell_type: None,
                 app_bind_deadline: None,
                 presentation_ready: false,
             }),
@@ -402,15 +486,22 @@ mod tests {
     #[test]
     fn pending_client_events_overflow_clears_and_reports_failure() {
         let runtime = runtime();
-        let event = TmuxClientEvent::WindowAdd {
+        let event = TmuxClientEvent::LayoutChange {
             window_id: "@0".to_owned(),
+            layout: "x".repeat(MAX_PENDING_CLIENT_EVENT_BYTES + 1),
+            visible_layout: None,
+            flags: None,
         };
-        let batch: Vec<_> = (0..MAX_PENDING_CLIENT_EVENTS)
-            .map(|_| event.clone())
-            .collect();
-        assert!(runtime.buffer_client_events(&batch));
         assert!(!runtime.buffer_client_events(&[event]));
         assert!(runtime.take_client_events().is_empty());
+    }
+
+    #[test]
+    fn pane_bootstrap_is_once_per_pane() {
+        let runtime = runtime();
+        assert!(runtime.try_begin_pane_bootstrap("%0"));
+        assert!(!runtime.try_begin_pane_bootstrap("%0"));
+        assert!(runtime.try_begin_pane_bootstrap("%1"));
     }
 
     #[test]

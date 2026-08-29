@@ -724,6 +724,16 @@ pub fn zsh_init_bytes(init_script: &str, shell_type: ShellType) -> Vec<u8> {
     bytes
 }
 
+pub fn in_band_init_bytes(shell_type: ShellType, session_id: SessionId) -> Option<Vec<u8>> {
+    match shell_type {
+        ShellType::PowerShell => None,
+        shell_type => {
+            let script = init_shell_script_for_shell(shell_type, &ASSETS, session_id);
+            Some(zsh_init_bytes(&script, shell_type))
+        }
+    }
+}
+
 pub fn fallback_supported_shell() -> Option<(PathBuf, ShellType)> {
     ["zsh", "bash", "fish"]
         .into_iter()

@@ -12871,6 +12871,10 @@ impl TerminalView {
             ModelEvent::Handler(AnsiHandlerEvent::InitShell {
                 pending_session_info,
             }) => {
+                self.write_tmux_presentation_bootstrap_script(
+                    pending_session_info.shell.shell_type(),
+                    ctx,
+                );
                 // The remote confirmed a subshell bootstrap is starting. Hide the
                 // original long-running block now so the user doesn't see the
                 // bootstrap payload echoed into it.
@@ -15200,6 +15204,31 @@ impl TerminalView {
                 &session_metadata,
                 DEFAULT_IGNORED_RULES_FOR_COMMAND_CORRECTIONS.into_iter(),
             )
+        }
+    }
+
+    fn write_tmux_presentation_bootstrap_script(
+        &mut self,
+        shell_type: ShellType,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let (pane_id, is_presentation) = {
+            let model = self.model.lock();
+            (
+                model.tmux_pane_id().map(str::to_owned),
+                model.is_tmux_presentation(),
+            )
+        };
+        if !is_presentation {
+            return;
+        }
+        let Some(pane_id) = pane_id else {
+            return;
+        };
+        let bootstrap = crate::terminal::bootstrap::script_for_shell(shell_type, &crate::ASSETS);
+        let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
+        for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bootstrap) {
+            self.write_to_pty(command.into_bytes(), ctx);
         }
     }
 
