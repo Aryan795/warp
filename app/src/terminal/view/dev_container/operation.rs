@@ -53,7 +53,7 @@ pub(crate) struct DevContainerBuildCancel {
 }
 
 impl DevContainerBuildCancel {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(DevContainerBuildCancelState::default())),
         }

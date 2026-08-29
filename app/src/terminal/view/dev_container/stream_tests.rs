@@ -111,9 +111,8 @@ os._exit(1)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let child = command.spawn().expect("spawn parent that forks");
         let started = Instant::now();
-        let (drain, success) = super::drain_dev_container_child(child, |_| {})
+        let (drain, success) = super::drain_dev_container_child(command, None, |_| {})
             .await
             .expect("drain after parent exit");
         assert!(

@@ -526,25 +526,15 @@ impl TerminalView {
         let model = self.model.clone();
         let event_proxy = self.model.lock().event_proxy.clone();
         let up_future = async move {
-            let mut command =
-                stream::dev_container_up_command(&cli, &workspace_folder, &config_file);
-            let mut child = command.spawn()?;
-            let process_group_id = child.id();
-            if !cancel.register_process_group(process_group_id) {
-                stream::terminate_process_group(process_group_id);
-                let _ = child.status().await;
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "cancelled",
-                ));
-            }
-            let (drain, exit_success) = stream::drain_dev_container_child(child, move |chunk| {
-                processor
-                    .lock()
-                    .parse_bytes(&mut *model.lock(), chunk, &mut std::io::sink());
-                event_proxy.send_wakeup_event();
-            })
-            .await?;
+            let command = stream::dev_container_up_command(&cli, &workspace_folder, &config_file);
+            let (drain, exit_success) =
+                stream::drain_dev_container_child(command, Some(&cancel), move |chunk| {
+                    processor
+                        .lock()
+                        .parse_bytes(&mut *model.lock(), chunk, &mut std::io::sink());
+                    event_proxy.send_wakeup_event();
+                })
+                .await?;
             std::io::Result::Ok((drain, exit_success, docker_path, workspace_folder))
         };
         ctx.spawn(up_future, move |me, result, ctx| {

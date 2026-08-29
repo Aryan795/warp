@@ -68,13 +68,22 @@ pub(crate) fn terminate_process_group(process_group_id: u32) {
 }
 
 pub(crate) async fn drain_dev_container_child<F>(
-    mut child: async_process::Child,
+    mut command: Command,
+    cancel: Option<&DevContainerBuildCancel>,
     on_stderr: F,
 ) -> io::Result<(DevContainerDrain, bool)>
 where
     F: FnMut(&[u8]) + Send,
 {
+    let mut child = command.spawn()?;
     let process_group_id = child.id();
+    if let Some(cancel) = cancel
+        && !cancel.register_process_group(process_group_id)
+    {
+        terminate_process_group(process_group_id);
+        let _ = child.status().await;
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+    }
     let stdout = child
         .stdout
         .take()
@@ -89,7 +98,8 @@ where
         terminate_process_group(process_group_id);
         io::Result::Ok(status)
     };
-    let (drain, status) = try_join(drain_fut, status_fut).await?;
+    let (drain, status): (DevContainerDrain, std::process::ExitStatus) =
+        try_join(drain_fut, status_fut).await?;
     Ok((drain, status.success()))
 }
 
@@ -123,7 +133,8 @@ pub(crate) async fn run_cancellable_process_group_command(
         terminate_process_group(process_group_id);
         io::Result::Ok(status)
     };
-    let (stdout, stderr, status) = try_join3(stdout_fut, stderr_fut, status_fut).await?;
+    let (stdout, stderr, status): (Vec<u8>, Vec<u8>, std::process::ExitStatus) =
+        try_join3(stdout_fut, stderr_fut, status_fut).await?;
     Ok(Output {
         status,
         stdout,
