@@ -1025,6 +1025,123 @@ fn end_of_run_actions(cause: RunEndCause, snapshot_allowed: bool) -> Vec<EndOfRu
     actions
 }
 
+trait EndOfRunOps {
+    fn snapshot(&mut self) -> impl Future<Output = ()>;
+    fn recording(&mut self) -> impl Future<Output = ()>;
+    fn unregister_handlers(&mut self);
+    fn unregister_consumers(&mut self) -> impl Future<Output = ()>;
+    fn cleanup(&mut self) -> impl Future<Output = ()>;
+    fn flush_status(&mut self) -> impl Future<Output = ()>;
+    fn send_result(&mut self);
+    fn reraise(&mut self, signal: InterruptSignal);
+}
+
+async fn execute_end_of_run_actions(
+    actions: impl IntoIterator<Item = EndOfRunAction>,
+    ops: &mut impl EndOfRunOps,
+) {
+    for action in actions {
+        match action {
+            EndOfRunAction::Snapshot => ops.snapshot().await,
+            EndOfRunAction::Recording => ops.recording().await,
+            EndOfRunAction::UnregisterHandlers => ops.unregister_handlers(),
+            EndOfRunAction::UnregisterConsumers => ops.unregister_consumers().await,
+            EndOfRunAction::Cleanup => ops.cleanup().await,
+            EndOfRunAction::FlushStatus => ops.flush_status().await,
+            EndOfRunAction::SendResult => ops.send_result(),
+            EndOfRunAction::Reraise(signal) => {
+                ops.reraise(signal);
+                break;
+            }
+        }
+    }
+}
+
+struct DriverEndOfRunOps {
+    foreground: ModelSpawner<AgentDriver>,
+    unregister_handlers: Option<Box<dyn FnOnce() + Send>>,
+    task_id: Option<AmbientAgentTaskId>,
+    finished_result: Option<Result<(), AgentDriverError>>,
+    server_api: Arc<dyn AIClient>,
+    result_tx: Option<oneshot::Sender<Result<(), AgentDriverError>>>,
+}
+
+impl EndOfRunOps for DriverEndOfRunOps {
+    fn snapshot(&mut self) -> impl Future<Output = ()> {
+        let foreground = self.foreground.clone();
+        async move {
+            AgentDriver::run_snapshot_upload(&foreground).await;
+        }
+    }
+
+    fn recording(&mut self) -> impl Future<Output = ()> {
+        let foreground = self.foreground.clone();
+        async move {
+            AgentDriver::finalize_run_recording(&foreground).await;
+        }
+    }
+
+    fn unregister_handlers(&mut self) {
+        if let Some(unregister) = self.unregister_handlers.take() {
+            unregister();
+        }
+    }
+
+    fn unregister_consumers(&mut self) -> impl Future<Output = ()> {
+        let foreground = self.foreground.clone();
+        async move {
+            AgentDriver::unregister_end_of_run_consumers(&foreground).await;
+        }
+    }
+
+    fn cleanup(&mut self) -> impl Future<Output = ()> {
+        let foreground = self.foreground.clone();
+        async move {
+            AgentDriver::cleanup(foreground).await;
+        }
+    }
+
+    fn flush_status(&mut self) -> impl Future<Output = ()> {
+        let task_id = self.task_id;
+        let run_succeeded = self.finished_result.as_ref().is_some_and(Result::is_ok);
+        let server_api = Arc::clone(&self.server_api);
+        let foreground = self.foreground.clone();
+        async move {
+            if let Some(task_id) = task_id {
+                AgentDriver::flush_task_status_before_exit(
+                    task_id,
+                    run_succeeded,
+                    &server_api,
+                    &foreground,
+                )
+                .await;
+            }
+        }
+    }
+
+    fn send_result(&mut self) {
+        let result = self
+            .finished_result
+            .take()
+            .unwrap_or(Err(AgentDriverError::InvalidRuntimeState));
+        if let Some(tx) = self.result_tx.take()
+            && tx.send(result).is_err()
+        {
+            report_error!("Caller did not wait for agent driver to finish");
+        }
+    }
+
+    fn reraise(&mut self, signal: InterruptSignal) {
+        #[cfg(unix)]
+        restore_default_and_reraise(signal);
+        #[cfg(not(unix))]
+        {
+            let _ = signal;
+            unreachable!("Unix signals are not delivered on this platform");
+        }
+    }
+}
+
 async fn select_run_outcome<RunFut, TimerFut, SignalFut>(
     run: RunFut,
     timer: TimerFut,
@@ -1614,7 +1731,7 @@ impl AgentDriver {
                 };
 
                 #[cfg(unix)]
-                let (select_result, mut registered_signal_ids) = select_result;
+                let (select_result, registered_signal_ids) = select_result;
                 #[cfg(not(unix))]
                 let select_result = select_result;
 
@@ -1629,63 +1746,25 @@ impl AgentDriver {
                     snapshot_disabled,
                 );
                 let actions = end_of_run_actions(cause, snapshot_allowed);
-                let mut finished_result: Option<Result<(), AgentDriverError>> = match select_result
-                {
+                let finished_result = match select_result {
                     RunSelect::Finished(result) => Some(result),
                     RunSelect::Signal(_) => None,
                 };
-                let mut result_tx = Some(tx);
-
-                for action in actions {
-                    match action {
-                        EndOfRunAction::Snapshot => {
-                            Self::run_snapshot_upload(&foreground).await;
-                        }
-                        EndOfRunAction::Recording => {
-                            Self::finalize_run_recording(&foreground).await;
-                        }
-                        EndOfRunAction::UnregisterHandlers => {
-                            #[cfg(unix)]
-                            unregister_signal_ids(std::mem::take(&mut registered_signal_ids));
-                        }
-                        EndOfRunAction::UnregisterConsumers => {
-                            Self::unregister_end_of_run_consumers(&foreground).await;
-                        }
-                        EndOfRunAction::Cleanup => {
-                            Self::cleanup(foreground.clone()).await;
-                        }
-                        EndOfRunAction::FlushStatus => {
-                            if let Some(task_id) = task_id {
-                                Self::flush_task_status_before_exit(
-                                    task_id,
-                                    finished_result.as_ref().is_some_and(Result::is_ok),
-                                    &server_api,
-                                    &foreground,
-                                )
-                                .await;
-                            }
-                        }
-                        EndOfRunAction::SendResult => {
-                            let result = finished_result
-                                .take()
-                                .unwrap_or(Err(AgentDriverError::InvalidRuntimeState));
-                            if let Some(tx) = result_tx.take()
-                                && tx.send(result).is_err()
-                            {
-                                report_error!("Caller did not wait for agent driver to finish");
-                            }
-                        }
-                        EndOfRunAction::Reraise(signal) => {
-                            #[cfg(unix)]
-                            restore_default_and_reraise(signal);
-                            #[cfg(not(unix))]
-                            {
-                                let _ = signal;
-                                unreachable!("Unix signals are not delivered on this platform");
-                            }
-                        }
-                    }
-                }
+                #[cfg(unix)]
+                let unregister_handlers = Some(Box::new(move || {
+                    unregister_signal_ids(registered_signal_ids);
+                }) as Box<dyn FnOnce() + Send>);
+                #[cfg(not(unix))]
+                let unregister_handlers = None;
+                let mut ops = DriverEndOfRunOps {
+                    foreground,
+                    unregister_handlers,
+                    task_id,
+                    finished_result,
+                    server_api,
+                    result_tx: Some(tx),
+                };
+                execute_end_of_run_actions(actions, &mut ops).await;
             },
             |_, _, _| {},
         );

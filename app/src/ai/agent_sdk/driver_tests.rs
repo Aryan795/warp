@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -34,14 +35,14 @@ use warpui::{App, SingletonEntity as _};
 
 use super::{
     AgentDriver, AgentDriverError, AgentRunPrompt, CLIAgentSessionStatus, EndOfRunAction,
-    IdleTimeoutSender, InterruptFlags, InterruptSignal,
+    EndOfRunOps, IdleTimeoutSender, InterruptFlags, InterruptSignal,
     LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV, LEGACY_OZ_PARENT_STATE_ROOT_ENV,
     MANAGED_MCP_RESOLVE_MAX_ATTEMPTS, OZ_MESSAGE_LISTENER_MANAGED_EXTERNALLY_ENV,
     OZ_MESSAGE_LISTENER_STATE_ROOT_ENV, PlatformErrorCode, RunEndCause,
     SDKConversationOutputStatus, WARP_MESSAGE_LISTENER_STATE_ROOT_ENV, build_secret_env_vars,
-    end_of_run_actions, idle_window_for_cli_session_status, idle_window_for_terminal_status,
-    run_end_cause, select_run_outcome, setup_failure_status_update,
-    should_attempt_handoff_snapshot, terminal_status_log_outcome,
+    end_of_run_actions, execute_end_of_run_actions, idle_window_for_cli_session_status,
+    idle_window_for_terminal_status, run_end_cause, select_run_outcome,
+    setup_failure_status_update, should_attempt_handoff_snapshot, terminal_status_log_outcome,
 };
 use crate::ai::agent::conversation::ConversationStatus;
 use crate::ai::agent::task::TaskId;
@@ -2754,16 +2755,81 @@ fn recorded_interrupt_flags(term: bool, int: bool) -> InterruptFlags {
     }
 }
 
-fn drive_end_of_run(cause: RunEndCause, snapshot_allowed: bool) -> Vec<EndOfRunAction> {
-    let actions = end_of_run_actions(cause, snapshot_allowed);
-    let mut invoked = Vec::new();
-    for action in actions {
-        invoked.push(action);
-        if matches!(action, EndOfRunAction::Reraise(_)) {
-            break;
-        }
+#[derive(Default)]
+struct RecordingEndOfRunOps {
+    invoked: Vec<EndOfRunAction>,
+}
+
+impl EndOfRunOps for RecordingEndOfRunOps {
+    fn snapshot(&mut self) -> impl Future<Output = ()> {
+        self.invoked.push(EndOfRunAction::Snapshot);
+        std::future::ready(())
     }
-    invoked
+
+    fn recording(&mut self) -> impl Future<Output = ()> {
+        self.invoked.push(EndOfRunAction::Recording);
+        std::future::ready(())
+    }
+
+    fn unregister_handlers(&mut self) {
+        self.invoked.push(EndOfRunAction::UnregisterHandlers);
+    }
+
+    fn unregister_consumers(&mut self) -> impl Future<Output = ()> {
+        self.invoked.push(EndOfRunAction::UnregisterConsumers);
+        std::future::ready(())
+    }
+
+    fn cleanup(&mut self) -> impl Future<Output = ()> {
+        self.invoked.push(EndOfRunAction::Cleanup);
+        std::future::ready(())
+    }
+
+    fn flush_status(&mut self) -> impl Future<Output = ()> {
+        self.invoked.push(EndOfRunAction::FlushStatus);
+        std::future::ready(())
+    }
+
+    fn send_result(&mut self) {
+        self.invoked.push(EndOfRunAction::SendResult);
+    }
+
+    fn reraise(&mut self, signal: InterruptSignal) {
+        self.invoked.push(EndOfRunAction::Reraise(signal));
+    }
+}
+
+fn drive_end_of_run(cause: RunEndCause, snapshot_allowed: bool) -> Vec<EndOfRunAction> {
+    let mut ops = RecordingEndOfRunOps::default();
+    block_on(execute_end_of_run_actions(
+        end_of_run_actions(cause, snapshot_allowed),
+        &mut ops,
+    ));
+    ops.invoked
+}
+
+#[test]
+fn executor_calls_snapshot_recording_and_reraise_ops() {
+    let mut ops = RecordingEndOfRunOps::default();
+    block_on(execute_end_of_run_actions(
+        [
+            EndOfRunAction::Snapshot,
+            EndOfRunAction::Recording,
+            EndOfRunAction::UnregisterHandlers,
+            EndOfRunAction::Reraise(InterruptSignal::Term),
+            EndOfRunAction::Cleanup,
+        ],
+        &mut ops,
+    ));
+    assert_eq!(
+        ops.invoked,
+        vec![
+            EndOfRunAction::Snapshot,
+            EndOfRunAction::Recording,
+            EndOfRunAction::UnregisterHandlers,
+            EndOfRunAction::Reraise(InterruptSignal::Term),
+        ]
+    );
 }
 
 #[test]
