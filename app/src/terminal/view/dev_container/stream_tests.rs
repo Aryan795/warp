@@ -55,9 +55,10 @@ os.write(1, b'\n{"outcome":"success","containerId":"abc","remoteWorkspaceFolder"
                 .windows(b"marker-before-exit".len())
                 .any(|window| window == b"marker-before-exit")
         );
-        let stdout_text = String::from_utf8_lossy(&result.bytes);
+        let stdout_text = String::from_utf8_lossy(&result.stdout.bytes);
         assert!(stdout_text.contains(r#""outcome":"success""#));
-        assert!(!result.oversized);
+        assert!(!result.stdout.oversized);
+        assert!(!result.stderr_tail.is_empty());
     });
 }
 
@@ -81,8 +82,8 @@ fn drain_marks_stdout_oversized_past_one_mib() {
             .await
             .expect("drain");
         let _ = child.status().await;
-        assert!(result.oversized);
-        assert!(result.bytes.is_empty());
+        assert!(result.stdout.oversized);
+        assert!(result.stdout.bytes.is_empty());
     });
 }
 

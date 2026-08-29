@@ -1,13 +1,11 @@
-//! Prototype `/devcontainer` flow.
+//! `/devcontainer` flow.
 //!
 //! Unlike the Docker sandbox (which creates its container as a side effect of
-//! spawning the PTY), Dev Container lifecycle is explicitly kept off the PTY
-//! spawn path: `devcontainer up` can take minutes (image pull, build,
-//! `postCreateCommand`), so it runs here, before any pane exists, with a
-//! real toast showing progress and a real error toast on failure. Only after
-//! `devcontainer up` reports success do we create a pane, using a
-//! `ShellStarter::DevContainer` that assumes the container is already
-//! running (see `crate::terminal::local_tty::dev_container`).
+//! spawning the PTY), Dev Container lifecycle is kept off the PTY spawn path:
+//! `devcontainer up` can take minutes, so it runs in a focused right split that
+//! streams logs. Only after attach setup succeeds is that split permanently
+//! replaced with a `ShellStarter::DevContainer` pane (see
+//! `crate::terminal::local_tty::dev_container`).
 
 #[cfg(feature = "local_tty")]
 mod newline;
@@ -266,16 +264,25 @@ impl TerminalView {
         operation: warpui::ModelHandle<operation::DevContainerBuildOperation>,
         ctx: &mut ViewContext<Self>,
     ) {
+        ctx.subscribe_to_model(&operation, |me, _, _, ctx| {
+            me.sync_dev_container_build_header(ctx);
+            ctx.notify();
+        });
         self.dev_container_build = Some(operation);
         self.model.lock().start_commandless_output_block();
+        self.sync_dev_container_build_header(ctx);
         self.start_dev_container_build_attempt(ctx);
         ctx.notify();
     }
 
+    #[cfg(feature = "local_tty")]
     pub(crate) fn retry_dev_container_build(&mut self, ctx: &mut ViewContext<Self>) {
         let Some(operation) = self.dev_container_build.clone() else {
             return;
         };
+        if !operation.read(ctx, |operation, _| operation.shows_retry_and_close()) {
+            return;
+        }
         let (attempt_id, prior_process_group) =
             operation.update(ctx, |operation, ctx| operation.begin_retry(ctx));
         if let Some(process_group_id) = prior_process_group {
@@ -285,7 +292,8 @@ impl TerminalView {
         registry::DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
             registry.set_attempt(&key, attempt_id);
         });
-        self.model.lock().start_commandless_output_block();
+        self.model.lock().reset_commandless_output_block();
+        self.sync_dev_container_build_header(ctx);
         self.start_dev_container_build_attempt(ctx);
         ctx.notify();
     }
@@ -302,6 +310,7 @@ impl TerminalView {
             let key = operation.read(ctx, |operation, _| operation.key().clone());
             operation.update(ctx, |operation, ctx| {
                 operation.tombstone(ctx);
+                operation.mark_cancelled(ctx);
             });
             if let Some(process_group_id) = process_group_id {
                 stream::terminate_process_group(process_group_id);
@@ -325,6 +334,82 @@ impl TerminalView {
         {
             false
         }
+    }
+
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn sync_dev_container_build_header(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(operation) = self.dev_container_build.clone() else {
+            return;
+        };
+        let title = operation.read(ctx, |operation, _| operation.header_title());
+        let error = operation.read(ctx, |operation, _| {
+            operation.header_error().map(str::to_owned)
+        });
+        self.pane_configuration.update(ctx, |pane_config, ctx| {
+            pane_config.set_title(title, ctx);
+            pane_config.set_title_secondary(error.unwrap_or_default(), ctx);
+            pane_config.notify_header_content_changed(ctx);
+        });
+    }
+
+    #[cfg(all(test, feature = "local_tty"))]
+    pub(crate) fn fail_dev_container_build_for_test(
+        &self,
+        phase: operation::DevContainerBuildPhase,
+        message: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.fail_dev_container_build(phase, message, ctx);
+    }
+
+    #[cfg(all(test, feature = "local_tty"))]
+    pub(crate) fn set_dev_container_build_phase_for_test(
+        &self,
+        phase: operation::DevContainerBuildPhase,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(operation) = &self.dev_container_build {
+            operation.update(ctx, |operation, ctx| operation.set_phase(phase, ctx));
+        }
+    }
+
+    #[cfg(all(test, feature = "local_tty"))]
+    pub(crate) fn dev_container_attempt_id(&self, ctx: &warpui::AppContext) -> Option<u64> {
+        self.dev_container_build
+            .as_ref()
+            .map(|operation| operation.read(ctx, |operation, _| operation.attempt_id()))
+    }
+
+    #[cfg(all(test, feature = "local_tty"))]
+    pub(crate) fn dev_container_shows_retry_and_close(&self, ctx: &warpui::AppContext) -> bool {
+        self.dev_container_build.as_ref().is_some_and(|operation| {
+            operation.read(ctx, |operation, _| operation.shows_retry_and_close())
+        })
+    }
+
+    #[cfg(all(test, feature = "local_tty"))]
+    pub(crate) fn dev_container_header_title(&self, ctx: &warpui::AppContext) -> Option<String> {
+        self.dev_container_build
+            .as_ref()
+            .map(|operation| operation.read(ctx, |operation, _| operation.header_title()))
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn is_current_dev_container_attempt(
+        &self,
+        operation_id: uuid::Uuid,
+        attempt_id: u64,
+        ctx: &warpui::AppContext,
+    ) -> bool {
+        let Some(operation) = &self.dev_container_build else {
+            return false;
+        };
+        let key = operation.read(ctx, |operation, _| operation.key().clone());
+        operation.read(ctx, |operation, _| {
+            operation.is_current_attempt(operation_id, attempt_id)
+        }) && registry::DevContainerBuildRegistry::handle(ctx).read(ctx, |registry, _| {
+            registry.matches(&key, operation_id, attempt_id)
+        })
     }
 
     #[cfg(feature = "local_tty")]
@@ -461,22 +546,20 @@ impl TerminalView {
                     .parse_bytes(&mut *model.lock(), chunk, &mut std::io::sink());
                 event_proxy.send_app_event(TerminalModelEvent::BackgroundBlockStarted);
             });
-            let stdout = drain.await?;
+            let drain = drain.await?;
             let status = child.status().await?;
-            std::io::Result::Ok((stdout, status.success(), docker_path, workspace_folder))
+            std::io::Result::Ok((drain, status.success(), docker_path, workspace_folder))
         };
         ctx.spawn(up_future, move |me, result, ctx| {
+            if !me.is_current_dev_container_attempt(operation_id, attempt_id, ctx) {
+                return;
+            }
             let Some(operation) = me.dev_container_build.clone() else {
                 return;
             };
-            if !operation.read(ctx, |operation, _| {
-                operation.is_current_attempt(operation_id, attempt_id)
-            }) {
-                return;
-            }
             match result {
-                Ok((stdout, exit_success, docker_path, workspace_folder)) => {
-                    if stdout.oversized {
+                Ok((drain, exit_success, docker_path, workspace_folder)) => {
+                    if drain.stdout.oversized {
                         me.fail_dev_container_build(
                             operation::DevContainerBuildPhase::Build,
                             "Dev container failed to start: stdout exceeded 1 MiB.".to_owned(),
@@ -484,7 +567,11 @@ impl TerminalView {
                         );
                         return;
                     }
-                    match interpret_dev_container_up_output(exit_success, &stdout.bytes, b"") {
+                    match interpret_dev_container_up_output(
+                        exit_success,
+                        &drain.stdout.bytes,
+                        &drain.stderr_tail,
+                    ) {
                         DevContainerUpOutcome::ReadyToAttach {
                             container_id,
                             remote_user,
@@ -502,6 +589,8 @@ impl TerminalView {
                                 remote_workspace_folder,
                                 generate_sandbox_id(),
                                 generate_session_id(),
+                                operation_id,
+                                attempt_id,
                                 ctx,
                             );
                         }
@@ -519,79 +608,6 @@ impl TerminalView {
                     format!("Failed to run `devcontainer up`: {error}"),
                     ctx,
                 ),
-            }
-        });
-    }
-
-    /// Runs `devcontainer up` for `workspace_folder` against `config_path`. Only opens a pane
-    /// once `up` reports success *and* [`Self::preflight_and_attach_dev_container`] has both
-    /// verified the container is attachable and staged the init/bootstrap scripts into it; shows
-    /// an error toast (never a pane) otherwise.
-    #[cfg(feature = "local_tty")]
-    fn bring_up_dev_container(
-        &self,
-        workspace_folder: PathBuf,
-        config_path: PathBuf,
-        devcontainer_path: PathBuf,
-        docker_path: PathBuf,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let sandbox_id = generate_sandbox_id();
-        // Generated here, before the container is even confirmed attachable,
-        // so the same ID can be baked into the init/bootstrap scripts staged
-        // by the preflight step below *and* into the `DevContainerShellStarter`
-        // eventually constructed for the pane; the terminal model validates
-        // the `InitShell` hook's session ID against the one it's told to
-        // expect, so the two must match.
-        let session_id = generate_session_id();
-
-        let up_future = {
-            let devcontainer_path = devcontainer_path.clone();
-            let workspace_folder = workspace_folder.clone();
-            async move {
-                Command::new(&devcontainer_path)
-                    .arg("up")
-                    .arg("--workspace-folder")
-                    .arg(&workspace_folder)
-                    .arg("--config")
-                    .arg(&config_path)
-                    .output()
-                    .await
-            }
-        };
-
-        ctx.spawn(up_future, move |me, result, ctx| match result {
-            Ok(output) => match interpret_dev_container_up_output(
-                output.status.success(),
-                &output.stdout,
-                &output.stderr,
-            ) {
-                DevContainerUpOutcome::ReadyToAttach {
-                    container_id,
-                    remote_user,
-                    remote_workspace_folder,
-                } => {
-                    me.preflight_and_attach_dev_container(
-                        workspace_folder,
-                        docker_path,
-                        container_id,
-                        remote_user,
-                        remote_workspace_folder,
-                        sandbox_id,
-                        session_id,
-                        ctx,
-                    );
-                }
-                DevContainerUpOutcome::Error(message) => {
-                    me.show_dev_container_toast(message, ToastFlavor::Error, ctx);
-                }
-            },
-            Err(e) => {
-                me.show_dev_container_toast(
-                    format!("Failed to run `devcontainer up`: {e}"),
-                    ToastFlavor::Error,
-                    ctx,
-                );
             }
         });
     }
@@ -625,6 +641,8 @@ impl TerminalView {
         remote_workspace_folder: String,
         sandbox_id: String,
         session_id: SessionId,
+        operation_id: uuid::Uuid,
+        attempt_id: u64,
         ctx: &mut ViewContext<Self>,
     ) {
         let preflight_future = {
@@ -644,51 +662,78 @@ impl TerminalView {
             }
         };
 
-        ctx.spawn(preflight_future, move |me, result, ctx| match result {
-            Ok(output) if output.status.success() => {
-                // Staging is several sequential `docker cp`/`exec` round trips (a
-                // default-user probe plus two copy+chown+chmod sequences), so it must
-                // run as its own spawned future rather than be awaited inline here:
-                // this closure runs on the main thread, and blocking it for that long
-                // right after `devcontainer up` would freeze the UI.
-                #[cfg(unix)]
-                let staging_future = crate::terminal::local_tty::prepare_dev_container(
-                    docker_path.clone(),
-                    container_id.clone(),
-                    remote_user.clone(),
-                    sandbox_id.clone(),
-                    session_id,
-                )
-                .boxed();
-                #[cfg(not(unix))]
-                let staging_future = futures::future::ready(Err(anyhow::Error::msg(
-                    "Dev Container sessions are only supported on Linux and macOS",
-                )))
-                .boxed();
+        ctx.spawn(preflight_future, move |me, result, ctx| {
+            if !me.is_current_dev_container_attempt(operation_id, attempt_id, ctx) {
+                return;
+            }
+            match result {
+                Ok(output) if output.status.success() => {
+                    // Staging is several sequential `docker cp`/`exec` round trips (a
+                    // default-user probe plus two copy+chown+chmod sequences), so it must
+                    // run as its own spawned future rather than be awaited inline here:
+                    // this closure runs on the main thread, and blocking it for that long
+                    // right after `devcontainer up` would freeze the UI.
+                    #[cfg(unix)]
+                    let staging_future = crate::terminal::local_tty::prepare_dev_container(
+                        docker_path.clone(),
+                        container_id.clone(),
+                        remote_user.clone(),
+                        sandbox_id.clone(),
+                        session_id,
+                    )
+                    .boxed();
+                    #[cfg(not(unix))]
+                    let staging_future = futures::future::ready(Err(anyhow::Error::msg(
+                        "Dev Container sessions are only supported on Linux and macOS",
+                    )))
+                    .boxed();
 
-                if me.dev_container_build.is_some() {
-                    me.dev_container_build
-                        .as_ref()
-                        .unwrap()
-                        .update(ctx, |operation, ctx| {
-                            operation.set_phase(operation::DevContainerBuildPhase::Staging, ctx);
-                        });
-                }
-                ctx.spawn(
-                    staging_future,
-                    move |me, staging_result, ctx| match staging_result {
-                        Ok(()) => {
-                            if me.dev_container_build.is_some() {
-                                me.dev_container_build.as_ref().unwrap().update(
+                    if me.dev_container_build.is_some() {
+                        me.dev_container_build
+                            .as_ref()
+                            .unwrap()
+                            .update(ctx, |operation, ctx| {
+                                operation
+                                    .set_phase(operation::DevContainerBuildPhase::Staging, ctx);
+                            });
+                    }
+                    ctx.spawn(staging_future, move |me, staging_result, ctx| {
+                        if !me.is_current_dev_container_attempt(operation_id, attempt_id, ctx) {
+                            return;
+                        }
+                        match staging_result {
+                            Ok(()) => {
+                                if me.dev_container_build.is_some() {
+                                    me.dev_container_build.as_ref().unwrap().update(
+                                        ctx,
+                                        |operation, ctx| {
+                                            operation.set_phase(
+                                                operation::DevContainerBuildPhase::Attach,
+                                                ctx,
+                                            );
+                                            operation.complete(ctx);
+                                        },
+                                    );
+                                    ctx.emit(super::Event::ReplaceDevContainerBuildPane {
+                                        workspace_folder,
+                                        docker_path,
+                                        container_id,
+                                        remote_user,
+                                        remote_workspace_folder,
+                                        sandbox_id,
+                                        session_id,
+                                    });
+                                    return;
+                                }
+                                me.show_dev_container_toast(
+                                    format!(
+                                        "Dev container ready — opening session in {}…",
+                                        workspace_folder.display()
+                                    ),
+                                    ToastFlavor::Success,
                                     ctx,
-                                    |operation, ctx| {
-                                        operation.set_phase(
-                                            operation::DevContainerBuildPhase::Attach,
-                                            ctx,
-                                        );
-                                    },
                                 );
-                                ctx.emit(super::Event::ReplaceDevContainerBuildPane {
+                                me.create_and_push_dev_container(
                                     workspace_folder,
                                     docker_path,
                                     container_id,
@@ -696,70 +741,53 @@ impl TerminalView {
                                     remote_workspace_folder,
                                     sandbox_id,
                                     session_id,
-                                });
-                                return;
-                            }
-                            me.show_dev_container_toast(
-                                format!(
-                                    "Dev container ready — opening session in {}…",
-                                    workspace_folder.display()
-                                ),
-                                ToastFlavor::Success,
-                                ctx,
-                            );
-                            me.create_and_push_dev_container(
-                                workspace_folder,
-                                docker_path,
-                                container_id,
-                                remote_user,
-                                remote_workspace_folder,
-                                sandbox_id,
-                                session_id,
-                                ctx,
-                            );
-                        }
-                        Err(e) => {
-                            let message =
-                                format!("Failed to prepare the Dev Container session: {e:#}");
-                            if me.dev_container_build.is_some() {
-                                me.fail_dev_container_build(
-                                    operation::DevContainerBuildPhase::Staging,
-                                    message,
                                     ctx,
                                 );
-                            } else {
-                                me.show_dev_container_toast(message, ToastFlavor::Error, ctx);
+                            }
+                            Err(e) => {
+                                let message =
+                                    format!("Failed to prepare the Dev Container session: {e:#}");
+                                if me.dev_container_build.is_some() {
+                                    me.fail_dev_container_build(
+                                        operation::DevContainerBuildPhase::Staging,
+                                        message,
+                                        ctx,
+                                    );
+                                } else {
+                                    me.show_dev_container_toast(message, ToastFlavor::Error, ctx);
+                                }
                             }
                         }
-                    },
-                );
-            }
-            Ok(output) => {
-                let detail = tail_lines(&String::from_utf8_lossy(&output.stderr), 5);
-                let message = format!(
-                    "Dev container isn't ready to attach: it may be missing `bash`, or its \
-                     configured remote user or workspace folder may not exist: {detail}"
-                );
-                if me.dev_container_build.is_some() {
-                    me.fail_dev_container_build(
-                        operation::DevContainerBuildPhase::Preflight,
-                        message,
-                        ctx,
-                    );
-                } else {
-                    me.show_dev_container_toast(message, ToastFlavor::Error, ctx);
+                    });
                 }
-            }
-            Err(e) => {
-                let message = format!("Failed to verify the Dev Container is ready to attach: {e}");
-                if me.dev_container_build.is_some() {
-                    me.fail_dev_container_build(
-                        operation::DevContainerBuildPhase::Preflight,
-                        message,
-                        ctx,
+                Ok(output) => {
+                    let detail = tail_lines(&String::from_utf8_lossy(&output.stderr), 5);
+                    let message = format!(
+                        "Dev container isn't ready to attach: it may be missing `bash`, or its \
+                     configured remote user or workspace folder may not exist: {detail}"
                     );
-                } else {
-                    me.show_dev_container_toast(message, ToastFlavor::Error, ctx);
+                    if me.dev_container_build.is_some() {
+                        me.fail_dev_container_build(
+                            operation::DevContainerBuildPhase::Preflight,
+                            message,
+                            ctx,
+                        );
+                    } else {
+                        me.show_dev_container_toast(message, ToastFlavor::Error, ctx);
+                    }
+                }
+                Err(e) => {
+                    let message =
+                        format!("Failed to verify the Dev Container is ready to attach: {e}");
+                    if me.dev_container_build.is_some() {
+                        me.fail_dev_container_build(
+                            operation::DevContainerBuildPhase::Preflight,
+                            message,
+                            ctx,
+                        );
+                    } else {
+                        me.show_dev_container_toast(message, ToastFlavor::Error, ctx);
+                    }
                 }
             }
         });
@@ -852,9 +880,8 @@ enum DevContainerUpOutcome {
 }
 
 /// Interprets a completed `devcontainer up` process's exit status and
-/// stdout/stderr. Pulled out of [`TerminalView::bring_up_dev_container`] as a
-/// pure function so the partial-result and JSON-fallback cases are unit
-/// testable without actually running `devcontainer`.
+/// stdout/stderr as a pure function so the partial-result and JSON-fallback
+/// cases are unit testable without actually running `devcontainer`.
 ///
 /// Takes the exit status and byte streams as plain primitives, rather than a
 /// `std::process::Output`, so callers (including tests) don't need a real,

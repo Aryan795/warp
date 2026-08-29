@@ -11,10 +11,16 @@ use parking_lot::Mutex;
 use super::newline::NewlineNormalizer;
 
 pub(crate) const STDOUT_LIMIT: usize = 1024 * 1024;
+const STDERR_TAIL_LIMIT: usize = 8 * 1024;
 
 pub(crate) struct DevContainerUpStdout {
     pub bytes: Vec<u8>,
     pub oversized: bool,
+}
+
+pub(crate) struct DevContainerDrain {
+    pub stdout: DevContainerUpStdout,
+    pub stderr_tail: Vec<u8>,
 }
 
 pub(crate) fn dev_container_up_command(
@@ -64,7 +70,7 @@ pub(crate) async fn drain_dev_container_pipes<R1, R2, F>(
     stdout: R1,
     stderr: R2,
     on_stderr: F,
-) -> io::Result<DevContainerUpStdout>
+) -> io::Result<DevContainerDrain>
 where
     R1: futures_util::AsyncRead + Unpin,
     R2: futures_util::AsyncRead + Unpin,
@@ -73,8 +79,11 @@ where
     let on_stderr = Arc::new(Mutex::new(on_stderr));
     let stdout_task = drain_stdout(stdout);
     let stderr_task = drain_stderr(stderr, on_stderr);
-    let (stdout, ()) = try_join(stdout_task, stderr_task).await?;
-    Ok(stdout)
+    let (stdout, stderr_tail) = try_join(stdout_task, stderr_task).await?;
+    Ok(DevContainerDrain {
+        stdout,
+        stderr_tail,
+    })
 }
 
 async fn drain_stdout<R>(mut stdout: R) -> io::Result<DevContainerUpStdout>
@@ -102,18 +111,20 @@ where
     Ok(DevContainerUpStdout { bytes, oversized })
 }
 
-async fn drain_stderr<R, F>(mut stderr: R, on_stderr: Arc<Mutex<F>>) -> io::Result<()>
+async fn drain_stderr<R, F>(mut stderr: R, on_stderr: Arc<Mutex<F>>) -> io::Result<Vec<u8>>
 where
     R: futures_util::AsyncRead + Unpin,
     F: FnMut(&[u8]),
 {
     let mut buf = [0_u8; 8192];
     let mut normalizer = NewlineNormalizer::new();
+    let mut stderr_tail = Vec::new();
     loop {
         let n = stderr.read(&mut buf).await?;
         if n == 0 {
             break;
         }
+        append_bounded_tail(&mut stderr_tail, &buf[..n]);
         let normalized = normalizer.push(&buf[..n]);
         (on_stderr.lock())(&normalized);
     }
@@ -121,7 +132,15 @@ where
     if !trailing.is_empty() {
         (on_stderr.lock())(&trailing);
     }
-    Ok(())
+    Ok(stderr_tail)
+}
+
+fn append_bounded_tail(tail: &mut Vec<u8>, chunk: &[u8]) {
+    tail.extend_from_slice(chunk);
+    if tail.len() > STDERR_TAIL_LIMIT {
+        let overflow = tail.len() - STDERR_TAIL_LIMIT;
+        tail.drain(..overflow);
+    }
 }
 
 #[cfg(test)]

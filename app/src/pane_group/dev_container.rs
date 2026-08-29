@@ -24,14 +24,17 @@ impl PaneGroup {
             config_file,
         };
 
-        let existing_live = DevContainerBuildRegistry::handle(ctx).read(ctx, |registry, ctx| {
-            registry
-                .get(&key)
-                .and_then(|entry| entry.locator.is_live(ctx).then(|| entry.locator.pane_id))
+        let existing_pane_id = DevContainerBuildRegistry::handle(ctx).read(ctx, |registry, _| {
+            registry.get(&key).map(|entry| entry.locator.pane_id)
         });
-        if let Some(pane_id) = existing_live {
-            self.focus_pane_by_id(pane_id, ctx);
-            return;
+        if let Some(pane_id) = existing_pane_id {
+            if self.has_pane(pane_id) {
+                self.focus_pane_by_id(pane_id, ctx);
+                return;
+            }
+            DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
+                registry.remove(&key);
+            });
         }
 
         let pane_id =
@@ -132,5 +135,36 @@ impl PaneGroup {
                 registry.remove(&key);
             });
         }
+    }
+}
+
+#[cfg(test)]
+impl PaneGroup {
+    pub(crate) fn replace_dev_container_build_pane_with_mock(
+        &mut self,
+        build_pane_id: PaneId,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let uuid = uuid::Uuid::new_v4();
+        let resources = TerminalViewResources {
+            tips_completed: self.tips_completed.clone(),
+            server_api: self.server_api.clone(),
+            model_event_sender: self.model_event_sender.clone(),
+        };
+        let view_bounds = Self::estimated_view_bounds(ctx);
+        let (terminal_view, terminal_manager) = Self::create_loading_terminal_manager_and_view(
+            resources,
+            view_bounds.size(),
+            ctx.window_id(),
+            ctx,
+        );
+        let pane_data = TerminalPane::new(
+            uuid.as_bytes().to_vec(),
+            terminal_manager,
+            terminal_view,
+            self.model_event_sender.clone(),
+            ctx,
+        );
+        self.replace_pane(build_pane_id, pane_data, false, ctx)
     }
 }

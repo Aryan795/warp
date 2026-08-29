@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
@@ -217,6 +218,13 @@ fn initialize_app_with_history(app: &mut App, conversations: Vec<AgentConversati
     app.add_singleton_model(OneTimeModalModel::new);
     app.add_singleton_model(|_| WorkspaceRegistry::new());
     app.add_singleton_model(UndoCloseStack::new);
+    app.add_singleton_model(|_| crate::workspace::ToastStack);
+    #[cfg(feature = "local_tty")]
+    app.add_singleton_model(|_| {
+        crate::terminal::view::dev_container::registry::DevContainerBuildRegistry::new()
+    });
+    #[cfg(feature = "local_tty")]
+    app.add_singleton_model(|_| crate::terminal::local_shell::LocalShellState::NotLoaded);
     app.add_singleton_model(|_| IgnoredSuggestionsModel::new(vec![]));
     app.add_singleton_model(|_| PricingInfoModel::new());
     app.add_singleton_model(crate::ai::pricing_promotion::PricingPromotionState::new);
@@ -3973,6 +3981,267 @@ fn test_undo_close_keeps_a_file_pane_watching_its_file() {
                 file_view.as_ref(ctx).file_id_for_test().is_none(),
                 "a permanently discarded pane should release its file"
             );
+        });
+    });
+}
+
+#[cfg(feature = "local_tty")]
+fn start_mocked_dev_container_build(
+    panes: &mut PaneGroup,
+    ctx: &mut ViewContext<PaneGroup>,
+) -> (PaneId, PaneId) {
+    let originating = get_newly_created_pane_id(panes, &[]);
+    panes.start_dev_container_build(
+        originating,
+        PathBuf::from("/tmp/ws"),
+        PathBuf::from("/tmp/ws/.devcontainer/devcontainer.json"),
+        ctx,
+    );
+    let build_pane = get_newly_created_pane_id(panes, &[originating]);
+    (originating, build_pane)
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn devcontainer_build_opens_focused_right_split() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        pane_group.update(&mut app, |panes, ctx| {
+            let originating = get_newly_created_pane_id(panes, &[]);
+            let originating_view_id = panes
+                .terminal_view_from_pane_id(originating, ctx)
+                .expect("originating terminal")
+                .id();
+            panes.start_dev_container_build(
+                originating,
+                PathBuf::from("/tmp/ws"),
+                PathBuf::from("/tmp/ws/.devcontainer/devcontainer.json"),
+                ctx,
+            );
+            assert_eq!(panes.visible_pane_count(), 2);
+            let build_pane = get_newly_created_pane_id(panes, &[originating]);
+            assert_eq!(panes.pane_id_by_index(0), Some(originating));
+            assert_eq!(panes.pane_id_by_index(1), Some(build_pane));
+            assert_eq!(panes.focused_pane_id(ctx), build_pane);
+            let originating_view = panes
+                .terminal_view_from_pane_id(originating, ctx)
+                .expect("originating still present");
+            assert_eq!(originating_view.id(), originating_view_id);
+            assert!(
+                !originating_view
+                    .as_ref(ctx)
+                    .is_dev_container_build_surface()
+            );
+            assert!(
+                panes
+                    .terminal_view_from_pane_id(build_pane, ctx)
+                    .expect("build pane")
+                    .as_ref(ctx)
+                    .is_dev_container_build_surface()
+            );
+        });
+    });
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn devcontainer_build_replaces_loading_pane_permanently() {
+    use crate::terminal::view::dev_container::operation::DevContainerBuildPhase;
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        pane_group.update(&mut app, |panes, ctx| {
+            let (originating, build_pane) = start_mocked_dev_container_build(panes, ctx);
+            let build_view = panes
+                .terminal_view_from_pane_id(build_pane, ctx)
+                .expect("build view");
+            build_view.update(ctx, |view, ctx| {
+                view.set_dev_container_build_phase_for_test(DevContainerBuildPhase::Preflight, ctx);
+                view.set_dev_container_build_phase_for_test(DevContainerBuildPhase::Staging, ctx);
+                view.set_dev_container_build_phase_for_test(DevContainerBuildPhase::Attach, ctx);
+            });
+            assert!(panes.replace_dev_container_build_pane_with_mock(build_pane, ctx));
+            assert_eq!(panes.visible_pane_count(), 2);
+            assert!(!panes.has_pane(build_pane));
+            assert!(panes.has_pane(originating));
+            let replacement = panes.focused_pane_id(ctx);
+            assert_ne!(replacement, originating);
+            assert!(
+                !panes
+                    .terminal_view_from_pane_id(replacement, ctx)
+                    .expect("replacement")
+                    .as_ref(ctx)
+                    .is_dev_container_build_surface()
+            );
+        });
+    });
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn devcontainer_failure_retains_logs_and_retries_in_place() {
+    use crate::terminal::view::dev_container::operation::DevContainerBuildPhase;
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        pane_group.update(&mut app, |panes, ctx| {
+            let (_, build_pane) = start_mocked_dev_container_build(panes, ctx);
+            let build_view = panes
+                .terminal_view_from_pane_id(build_pane, ctx)
+                .expect("build view");
+            for phase in [
+                DevContainerBuildPhase::Build,
+                DevContainerBuildPhase::Preflight,
+                DevContainerBuildPhase::Staging,
+                DevContainerBuildPhase::Attach,
+            ] {
+                build_view.update(ctx, |view, ctx| {
+                    view.fail_dev_container_build_for_test(phase, format!("{phase:?} failed"), ctx);
+                });
+                assert!(
+                    build_view
+                        .as_ref(ctx)
+                        .dev_container_shows_retry_and_close(ctx)
+                );
+                assert!(
+                    build_view
+                        .as_ref(ctx)
+                        .dev_container_header_title(ctx)
+                        .expect("title")
+                        .contains("failed")
+                );
+                let prior_attempt = build_view.as_ref(ctx).dev_container_attempt_id(ctx);
+                build_view.update(ctx, |view, ctx| {
+                    view.retry_dev_container_build(ctx);
+                });
+                let next_attempt = build_view.as_ref(ctx).dev_container_attempt_id(ctx);
+                assert_ne!(prior_attempt, next_attempt);
+                assert!(
+                    !build_view
+                        .as_ref(ctx)
+                        .dev_container_shows_retry_and_close(ctx)
+                );
+                assert_eq!(
+                    panes
+                        .terminal_view_from_pane_id(build_pane, ctx)
+                        .expect("same pane")
+                        .id(),
+                    build_view.id()
+                );
+            }
+        });
+    });
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn closing_devcontainer_build_cancels_process_group() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        pane_group.update(&mut app, |panes, ctx| {
+            let (originating, build_pane) = start_mocked_dev_container_build(panes, ctx);
+            let build_view = panes
+                .terminal_view_from_pane_id(build_pane, ctx)
+                .expect("build view");
+            let attempt_before = build_view.as_ref(ctx).dev_container_attempt_id(ctx);
+            panes.close_pane(build_pane, ctx);
+            assert_eq!(panes.visible_pane_count(), 1);
+            assert_eq!(panes.focused_pane_id(ctx), originating);
+            assert!(!panes.has_pane(build_pane));
+            assert!(attempt_before.is_some());
+        });
+    });
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn duplicate_devcontainer_invocation_focuses_existing_surface() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        pane_group.update(&mut app, |panes, ctx| {
+            let (originating, build_pane) = start_mocked_dev_container_build(panes, ctx);
+            panes.focus_pane_by_id(originating, ctx);
+            panes.start_dev_container_build(
+                originating,
+                PathBuf::from("/tmp/ws"),
+                PathBuf::from("/tmp/ws/.devcontainer/devcontainer.json"),
+                ctx,
+            );
+            assert_eq!(panes.visible_pane_count(), 2);
+            assert_eq!(panes.focused_pane_id(ctx), build_pane);
+
+            let build_view = panes
+                .terminal_view_from_pane_id(build_pane, ctx)
+                .expect("build view");
+            build_view.update(ctx, |view, ctx| {
+                view.fail_dev_container_build_for_test(
+                    crate::terminal::view::dev_container::operation::DevContainerBuildPhase::Build,
+                    "boom".to_owned(),
+                    ctx,
+                );
+            });
+            panes.focus_pane_by_id(originating, ctx);
+            panes.start_dev_container_build(
+                originating,
+                PathBuf::from("/tmp/ws"),
+                PathBuf::from("/tmp/ws/.devcontainer/devcontainer.json"),
+                ctx,
+            );
+            assert_eq!(panes.focused_pane_id(ctx), build_pane);
+            assert!(
+                build_view
+                    .as_ref(ctx)
+                    .dev_container_shows_retry_and_close(ctx)
+            );
+
+            panes.start_dev_container_build(
+                originating,
+                PathBuf::from("/tmp/other"),
+                PathBuf::from("/tmp/other/.devcontainer/devcontainer.json"),
+                ctx,
+            );
+            assert_eq!(panes.visible_pane_count(), 3);
+        });
+    });
+}
+
+#[cfg(all(feature = "local_tty", feature = "local_fs"))]
+#[test]
+fn devcontainer_build_surface_is_not_persisted() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        pane_group.update(&mut app, |panes, ctx| {
+            let (originating, _) = start_mocked_dev_container_build(panes, ctx);
+            let snapshot = panes.snapshot(ctx);
+            let mut saw_build = false;
+            let mut saw_originating = false;
+            fn walk(node: &PaneNodeSnapshot, saw_build: &mut bool, saw_originating: &mut bool) {
+                match node {
+                    PaneNodeSnapshot::Leaf(leaf) => match &leaf.contents {
+                        LeafContents::DevContainerBuild => {
+                            *saw_build = true;
+                            assert!(!leaf.contents.is_persisted());
+                        }
+                        LeafContents::Terminal(_) => *saw_originating = true,
+                        _ => {}
+                    },
+                    PaneNodeSnapshot::Branch(branch) => {
+                        for (_, child) in &branch.children {
+                            walk(child, saw_build, saw_originating);
+                        }
+                    }
+                }
+            }
+            walk(&snapshot, &mut saw_build, &mut saw_originating);
+            assert!(saw_build);
+            assert!(saw_originating);
+            assert!(panes.has_pane(originating));
         });
     });
 }

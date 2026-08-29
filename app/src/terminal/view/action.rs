@@ -201,6 +201,7 @@ pub enum TerminalAction {
     CtrlC,
     ClearSelectionsWhenShellMode,
     Close,
+    RetryDevContainerBuild,
     ToggleMaximizePane,
     SplitRight(Option<AvailableShell>),
     SplitLeft(Option<AvailableShell>),
@@ -560,6 +561,7 @@ impl fmt::Debug for TerminalAction {
                 f.write_str("ClearSelectionsWhenShellMode(TerminalAction)")
             }
             Close => f.write_str("Close"),
+            RetryDevContainerBuild => f.write_str("RetryDevContainerBuild"),
             SplitRight(_) => f.write_str("SplitRight"),
             SplitLeft(_) => f.write_str("SplitLeft"),
             SplitDown(_) => f.write_str("SplitDown"),

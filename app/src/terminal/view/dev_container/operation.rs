@@ -130,6 +130,33 @@ impl DevContainerBuildOperation {
         self.failure.as_ref()
     }
 
+    pub(crate) fn header_title(&self) -> String {
+        let workspace = self
+            .workspace_folder
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.workspace_folder.display().to_string());
+        match self.status() {
+            DevContainerBuildStatus::Failed => {
+                format!("{} · {} failed", workspace, self.phase().label())
+            }
+            DevContainerBuildStatus::Cancelling | DevContainerBuildStatus::Cancelled => {
+                format!("{} · Cancelling", workspace)
+            }
+            DevContainerBuildStatus::Running | DevContainerBuildStatus::Completed => {
+                format!("{} · {}", workspace, self.phase().label())
+            }
+        }
+    }
+
+    pub(crate) fn header_error(&self) -> Option<&str> {
+        self.failure().map(|failure| failure.message.as_str())
+    }
+
+    pub(crate) fn shows_retry_and_close(&self) -> bool {
+        self.status == DevContainerBuildStatus::Failed
+    }
+
     pub(crate) fn cancel_handle(&self) -> DevContainerBuildCancel {
         self.cancel.clone()
     }

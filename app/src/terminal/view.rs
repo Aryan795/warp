@@ -2370,6 +2370,10 @@ struct TerminalViewMouseStates {
     jump_to_bottom_of_block_button: MouseStateHandle,
 
     parent_conversation_header_link: MouseStateHandle,
+    #[cfg(feature = "local_tty")]
+    dev_container_retry: MouseStateHandle,
+    #[cfg(feature = "local_tty")]
+    dev_container_close: MouseStateHandle,
     /// Persistent horizontal scroll state for the orchestration breadcrumb
     /// row. Lives here (rather than as a `MouseStateHandle`) so the user's
     /// scroll position survives across renders — in narrow split-off panes
@@ -24774,7 +24778,9 @@ impl TerminalView {
             );
         }
 
-        if let Some(hovered_block_index) = self.hovered_block_index {
+        if let Some(hovered_block_index) = self.hovered_block_index
+            && !self.is_dev_container_build_surface()
+        {
             let block_list = model.block_list();
 
             // Is this block the first visible item in the viewport? If so, the tool tips should
@@ -26847,6 +26853,7 @@ impl TypedActionView for TerminalView {
             | CtrlC
             | ClearSelectionsWhenShellMode
             | Close
+            | RetryDevContainerBuild
             | TypedCharacters(_)
             | UserInputSequence(_)
             | ControlSequence(_)
@@ -27210,6 +27217,10 @@ impl TypedActionView for TerminalView {
             ClearSelectionsWhenShellMode => self.clear_selections_when_shell_mode(ctx),
             ContextMenu(context_action) => self.context_menu_action(context_action, ctx),
             Close => ctx.emit(Event::CloseRequested),
+            RetryDevContainerBuild => {
+                #[cfg(feature = "local_tty")]
+                self.retry_dev_container_build(ctx);
+            }
             SplitRight(chosen_shell) => {
                 ctx.emit(Event::Pane(PaneEvent::SplitRight(chosen_shell.to_owned())))
             }

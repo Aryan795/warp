@@ -168,6 +168,31 @@ fn parse_dev_container_up_stdout_reads_the_last_line_only() {
 fn parse_dev_container_up_stdout_returns_none_for_empty_or_malformed_input() {
     assert!(parse_dev_container_up_stdout(b"").is_none());
     assert!(parse_dev_container_up_stdout(b"not json").is_none());
+    assert!(parse_dev_container_up_stdout(b"{\"outcome\":").is_none());
+}
+
+#[test]
+fn interpret_dev_container_up_output_errors_on_missing_or_incomplete_stdout() {
+    assert!(matches!(
+        interpret_dev_container_up_output(true, b"", b""),
+        DevContainerUpOutcome::Error(_)
+    ));
+    assert!(matches!(
+        interpret_dev_container_up_output(true, b"{\"outcome\":", b""),
+        DevContainerUpOutcome::Error(_)
+    ));
+}
+
+#[test]
+fn interpret_dev_container_up_output_uses_bounded_stderr_tail_fallback() {
+    let stderr = "keep-me\nthis-is-the-tail\n";
+    let outcome = interpret_dev_container_up_output(false, b"", stderr.as_bytes());
+    assert_eq!(
+        outcome,
+        DevContainerUpOutcome::Error(
+            "Dev container failed to start:\nkeep-me\nthis-is-the-tail".to_owned()
+        )
+    );
 }
 
 #[test]

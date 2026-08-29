@@ -3,8 +3,8 @@
 use settings::Setting as _;
 use warp_core::context_flag::ContextFlag;
 use warpui::elements::{
-    ConstrainedBox, CrossAxisAlignment, Empty, Flex, MainAxisAlignment, MainAxisSize,
-    ParentElement, Shrinkable,
+    ConstrainedBox, CrossAxisAlignment, Empty, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
+    MouseStateHandle, ParentElement, Shrinkable, Text,
 };
 use warpui::prelude::{ChildView, Container};
 use warpui::text_layout::ClipConfig;
@@ -119,6 +119,11 @@ impl TerminalView {
 
     /// Set the pane title from agent chrome when available, falling back to the regular terminal title.
     pub(super) fn update_pane_configuration(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.is_dev_container_build_surface() {
+            #[cfg(feature = "local_tty")]
+            self.sync_dev_container_build_header(ctx);
+            return;
+        }
         let is_ambient_agent = self.is_ambient_agent_session(ctx);
         let selected_conversation_title = self.selected_conversation_display_title(ctx);
         let selected_cli_agent_title = self.selected_cli_agent_title_for_chrome(ctx);
@@ -373,6 +378,19 @@ impl TerminalView {
                 };
             center_row.add_child(title_element);
         }
+        let secondary = pane_config.title_secondary();
+        if !secondary.is_empty() {
+            let error_color = blended_colors::text_sub(theme, theme.background());
+            center_row.add_child(
+                Container::new(
+                    Text::new_inline(secondary.to_owned(), appearance.ui_font_family(), 11.)
+                        .with_color(error_color)
+                        .finish(),
+                )
+                .with_margin_left(8.)
+                .finish(),
+            );
+        }
 
         center_row.finish()
     }
@@ -456,6 +474,24 @@ impl TerminalView {
             .with_main_axis_size(MainAxisSize::Min);
         if let Some(content) = left_of_overflow {
             right_row.add_child(content);
+        }
+        #[cfg(feature = "local_tty")]
+        if self.dev_container_build.as_ref().is_some_and(|operation| {
+            operation.read(app, |operation, _| operation.shows_retry_and_close())
+        }) {
+            right_row.add_child(self.render_dev_container_header_button(
+                "Retry",
+                TerminalAction::RetryDevContainerBuild,
+                self.mouse_states.dev_container_retry.clone(),
+                app,
+            ));
+            right_row.add_child(self.render_dev_container_header_button(
+                "Close",
+                TerminalAction::Close,
+                self.mouse_states.dev_container_close.clone(),
+                app,
+            ));
+            icon_button_count += 2;
         }
         let sharing_element = header_ctx.sharing_controls(app, icon_color, button_size);
         let has_sharing_element = sharing_element.is_some();
@@ -725,6 +761,9 @@ impl BackingView for TerminalView {
     }
 
     fn should_render_header(&self, app: &AppContext) -> bool {
+        if self.is_dev_container_build_surface() {
+            return true;
+        }
         let is_shared = self
             .model
             .lock()
@@ -785,6 +824,35 @@ impl TerminalView {
         .on_click(|ctx, _, _| {
             ctx.dispatch_typed_action::<PaneHeaderAction<TerminalAction, TerminalAction>>(
                 PaneHeaderAction::CustomAction(TerminalAction::CancelAmbientAgentTask),
+            );
+        })
+        .finish()
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn render_dev_container_header_button(
+        &self,
+        label: &'static str,
+        action: TerminalAction,
+        mouse_state: MouseStateHandle,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+        let color = blended_colors::text_main(theme, theme.background());
+        let font_family = appearance.ui_font_family();
+        Hoverable::new(mouse_state, move |_| {
+            Container::new(
+                Text::new_inline(label, font_family, 12.)
+                    .with_color(color)
+                    .finish(),
+            )
+            .with_horizontal_padding(6.)
+            .finish()
+        })
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action::<PaneHeaderAction<TerminalAction, TerminalAction>>(
+                PaneHeaderAction::CustomAction(action.clone()),
             );
         })
         .finish()

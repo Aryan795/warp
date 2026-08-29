@@ -1246,6 +1246,10 @@ impl Block {
         self.wakeup_after_delay();
     }
 
+    pub(in crate::terminal) fn enable_full_output_grid_clear(&mut self) {
+        self.output_grid.enable_full_grid_clear_behavior();
+    }
+
     pub(super) fn disable_reset_grid_checks(&mut self) {
         self.header_grid.disable_reset_grid_checks();
         self.output_grid.disable_reset_grid_checks();

@@ -20,6 +20,7 @@ pub(crate) enum DevContainerBuildSurfaceStatus {
 
 #[derive(Clone)]
 pub(crate) struct DevContainerBuildLocator {
+    #[allow(dead_code)]
     pub window_id: WindowId,
     pub pane_group: WeakViewHandle<PaneGroup>,
     pub pane_id: PaneId,
@@ -43,12 +44,12 @@ pub(crate) struct DevContainerBuildRegistryEntry {
 pub(crate) enum DevContainerBuildClaim {
     Existing {
         locator: DevContainerBuildLocator,
-        surface: DevContainerBuildSurfaceStatus,
-        operation_id: Uuid,
-        attempt_id: u64,
+        _surface: DevContainerBuildSurfaceStatus,
+        _operation_id: Uuid,
+        _attempt_id: u64,
     },
     Claimed {
-        operation_id: Uuid,
+        _operation_id: Uuid,
     },
 }
 
@@ -74,9 +75,9 @@ impl DevContainerBuildRegistry {
             if entry.locator.is_live(ctx) {
                 return DevContainerBuildClaim::Existing {
                     locator: entry.locator.clone(),
-                    surface: entry.surface,
-                    operation_id: entry.operation_id,
-                    attempt_id: entry.attempt_id,
+                    _surface: entry.surface,
+                    _operation_id: entry.operation_id,
+                    _attempt_id: entry.attempt_id,
                 };
             }
             self.entries.remove(&key);
@@ -90,7 +91,9 @@ impl DevContainerBuildRegistry {
                 surface: DevContainerBuildSurfaceStatus::Running,
             },
         );
-        DevContainerBuildClaim::Claimed { operation_id }
+        DevContainerBuildClaim::Claimed {
+            _operation_id: operation_id,
+        }
     }
 
     pub(crate) fn get(

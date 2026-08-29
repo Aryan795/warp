@@ -1826,6 +1826,15 @@ impl TerminalModel {
         self.block_list.active_block_mut().start_background(None);
     }
 
+    pub fn reset_commandless_output_block(&mut self) {
+        self.block_list
+            .active_block_mut()
+            .enable_full_output_grid_clear();
+        let mut processor = super::ansi::Processor::new();
+        processor.parse_bytes(self, b"\x1b[2J\x1b[H", &mut std::io::sink());
+        self.start_commandless_output_block();
+    }
+
     pub fn is_receiving_in_band_command_output(&self) -> bool {
         matches!(
             self.is_receiving_in_band_command_output,
