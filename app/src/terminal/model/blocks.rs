@@ -4125,6 +4125,14 @@ impl ansi::Handler for BlockList {
     fn on_finish_byte_processing(&mut self, input: &ansi::ProcessorInput<'_>) {
         delegate!(self.on_finish_byte_processing(input));
 
+        // A commandless output block is the active block in Background state.
+        // Piped logs scroll into grid-storage history, which live height/paint
+        // ignore; compact so later batches grow the block instead of staying
+        // one screen tall.
+        if self.active_block().is_background() {
+            self.active_block_mut().compact_output_scrollback();
+        }
+
         // After processing a chunk of data from the PTY, make sure the active
         // block and background block heights are up-to-date.  We do this once
         // at the end of a chunk instead of incrementally to improve performance.

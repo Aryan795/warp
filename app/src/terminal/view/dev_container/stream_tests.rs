@@ -175,6 +175,43 @@ fn devcontainer_text_stream_renders_incrementally() {
     }
 }
 
+#[test]
+fn commandless_output_block_height_grows_with_later_batches() {
+    use warpui::units::Lines;
+
+    use crate::terminal::model::block::TranscriptScope;
+
+    let mut model = TerminalModel::mock(None, None);
+    model.start_commandless_output_block();
+    let mut processor = Processor::new();
+
+    // The mock screen is 7 rows. A later batch must still increase visible
+    // height after that viewport is already full; nonzero height alone matches
+    // the broken one-line-tall block.
+    let first: String = (0..10).map(|i| format!("first-{i}\r\n")).collect();
+    processor.parse_bytes(&mut model, first.as_bytes(), &mut io::sink());
+    let height_after_first = model.block_list().block_heights().summary().height;
+    assert!(
+        height_after_first > Lines::zero(),
+        "first batch must be visible, got {height_after_first:?}"
+    );
+
+    let later: String = (0..20).map(|i| format!("later-{i}\r\n")).collect();
+    processor.parse_bytes(&mut model, later.as_bytes(), &mut io::sink());
+    let height_after_later = model.block_list().block_heights().summary().height;
+    assert!(
+        height_after_later > height_after_first,
+        "later batch must grow visible height from {height_after_first:?} to more than that, \
+         got {height_after_later:?}"
+    );
+    assert!(
+        model
+            .block_list()
+            .active_block()
+            .is_visible(&TranscriptScope::Terminal)
+    );
+}
+
 struct WriteCapture<'a>(&'a mut Vec<u8>);
 
 impl io::Write for WriteCapture<'_> {

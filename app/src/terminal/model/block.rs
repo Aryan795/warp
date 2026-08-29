@@ -1250,6 +1250,10 @@ impl Block {
         self.wakeup_after_delay();
     }
 
+    pub(super) fn compact_output_scrollback(&mut self) {
+        self.output_grid.compact_scrollback_into_flat_storage();
+    }
+
     pub(in crate::terminal) fn enable_full_output_grid_clear(&mut self) {
         self.output_grid.enable_full_grid_clear_behavior();
     }
