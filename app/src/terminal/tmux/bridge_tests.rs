@@ -15,6 +15,8 @@ fn runtime() -> TmuxRuntime {
             pending_bootstrap_panes: VecDeque::new(),
             bootstrap_stage_count: HashMap::new(),
             bootstrap_script_count: HashMap::new(),
+            bootstrap_generation: HashMap::new(),
+            early_init_shell: HashMap::new(),
             shell_type: None,
             app_bind_deadline: None,
             presentation_ready: false,
@@ -269,7 +271,8 @@ fn dropped_first_injection_schedules_one_retry() {
     assert_eq!(armed.1, BOOTSTRAP_INFLIGHT_TIMEOUT);
     match runtime.handle_bootstrap_timeout("%0", claim.generation) {
         BootstrapTimeoutResult::Retry(retry) => {
-            assert_eq!(retry.session_id, sid(1));
+            assert_ne!(retry.session_id, sid(1));
+            assert_eq!(retry.retired_session_id, Some(sid(1)));
             assert_eq!(retry.generation, claim.generation + 1);
         }
         other => panic!("expected retry, got {other:?}"),
@@ -326,6 +329,12 @@ fn pane_removal_invalidates_stale_retry_and_allows_reuse() {
         .begin_pane_bootstrap("%0", sid(2))
         .expect("reuse after removal");
     assert_eq!(reused.session_id, sid(2));
+    assert_ne!(reused.generation, claim.generation);
+    assert!(matches!(
+        runtime.handle_bootstrap_timeout("%0", claim.generation),
+        BootstrapTimeoutResult::Stale
+    ));
+    assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
 }
 
 #[test]
@@ -341,4 +350,42 @@ fn correlated_hook_cancels_timeout() {
         BootstrapTimeoutResult::Stale
     ));
     assert!(runtime.arm_bootstrap_timeout("%0").is_none());
+}
+
+#[test]
+fn delayed_first_hook_is_ignored_after_retry_session_rotates() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    let first = runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
+    let BootstrapTimeoutResult::Retry(retry) =
+        runtime.handle_bootstrap_timeout("%0", first.generation)
+    else {
+        panic!("expected retry");
+    };
+    assert!(runtime.on_init_shell("%0", first.session_id).is_none());
+    assert_eq!(runtime.bootstrap_script_count("%0"), 0);
+    assert_eq!(
+        runtime.on_init_shell("%0", retry.session_id),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+}
+
+#[test]
+fn early_init_shell_before_bind_reaches_ready_once() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_early_init_shell("%0", sid(3));
+    let claim = runtime.begin_pane_bootstrap("%0", sid(3)).expect("stage");
+    assert_eq!(claim.generation, 1);
+    assert_eq!(
+        runtime.complete_if_early_init_shell("%0"),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert!(runtime.complete_if_early_init_shell("%0").is_none());
+    assert!(runtime.begin_pane_bootstrap("%0", sid(3)).is_none());
 }

@@ -12917,6 +12917,18 @@ impl TerminalView {
                 if self.model.lock().is_tmux_presentation() {
                     self.write_tmux_presentation_bootstrap_script(shell_type, session_id, ctx);
                 } else {
+                    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+                    {
+                        use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
+                        if let Some(id) = self.model.lock().tmux_instance_id()
+                            && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
+                        {
+                            if let Some(pane) = self.model.lock().tmux_pane_id() {
+                                runtime.note_early_init_shell(pane, session_id);
+                            }
+                            runtime.note_shell_type(shell_type);
+                        }
+                    }
                     self.flush_queued_tmux_pane_bootstrap(shell_type, ctx);
                 }
                 // The remote confirmed a subshell bootstrap is starting. Hide the
@@ -15329,6 +15341,7 @@ impl TerminalView {
         };
         match runtime.handle_bootstrap_timeout(&pane_id, generation) {
             BootstrapTimeoutResult::Retry(claim) => {
+                runtime.apply_claim_session(&claim);
                 let Some(bytes) = crate::terminal::tmux::protocol::in_band_init_bytes(
                     claim.shell_type,
                     claim.session_id,

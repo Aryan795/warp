@@ -2687,6 +2687,10 @@ impl TerminalModel {
         self.registered_session_ids.insert(session_id);
     }
 
+    pub fn unregister_session_id(&mut self, session_id: SessionId) {
+        self.registered_session_ids.remove(&session_id);
+    }
+
     pub fn needs_bracketed_paste(&mut self) -> bool {
         delegate!(self.needs_bracketed_paste())
     }

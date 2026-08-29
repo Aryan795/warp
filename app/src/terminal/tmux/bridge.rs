@@ -61,6 +61,7 @@ pub struct PaneBootstrapClaim {
     pub shell_type: ShellType,
     pub session_id: SessionId,
     pub generation: u64,
+    pub retired_session_id: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +98,8 @@ struct Inner {
     pending_bootstrap_panes: VecDeque<String>,
     bootstrap_stage_count: HashMap<String, u32>,
     bootstrap_script_count: HashMap<String, u32>,
+    bootstrap_generation: HashMap<String, u64>,
+    early_init_shell: HashMap<String, SessionId>,
     shell_type: Option<ShellType>,
     app_bind_deadline: Option<instant::Instant>,
     presentation_ready: bool,
@@ -145,6 +148,8 @@ impl TmuxRuntime {
                 pending_bootstrap_panes: VecDeque::new(),
                 bootstrap_stage_count: HashMap::new(),
                 bootstrap_script_count: HashMap::new(),
+                bootstrap_generation: HashMap::new(),
+                early_init_shell: HashMap::new(),
                 shell_type: None,
                 app_bind_deadline: None,
                 presentation_ready: false,
@@ -222,6 +227,8 @@ impl TmuxRuntime {
         inner.pending_bootstrap_panes.clear();
         inner.bootstrap_stage_count.clear();
         inner.bootstrap_script_count.clear();
+        inner.bootstrap_generation.clear();
+        inner.early_init_shell.clear();
         inner.app_bind_deadline = None;
         inner.presentation_ready = false;
         inner.unregistered_bytes = 0;
@@ -259,6 +266,7 @@ impl TmuxRuntime {
         inner.pending_bootstrap_panes.retain(|id| id != pane_id);
         inner.bootstrap_stage_count.remove(pane_id);
         inner.bootstrap_script_count.remove(pane_id);
+        inner.early_init_shell.remove(pane_id);
     }
 
     pub fn deliver_output(&self, pane_id: &PaneId, bytes: &[u8]) -> bool {
@@ -421,10 +429,11 @@ impl TmuxRuntime {
             }
             return None;
         };
+        let generation = Self::next_bootstrap_generation(inner, pane_id);
         inner.pane_bootstrap.insert(
             pane_id.to_owned(),
             PaneBootstrapEntry::Staging {
-                generation: 1,
+                generation,
                 session_id,
                 retried: false,
                 timer_armed: false,
@@ -438,8 +447,20 @@ impl TmuxRuntime {
             pane_id: pane_id.to_owned(),
             shell_type,
             session_id,
-            generation: 1,
+            generation,
+            retired_session_id: None,
         })
+    }
+
+    fn next_bootstrap_generation(inner: &mut Inner, pane_id: &str) -> u64 {
+        let next = inner
+            .bootstrap_generation
+            .get(pane_id)
+            .copied()
+            .unwrap_or(0)
+            + 1;
+        inner.bootstrap_generation.insert(pane_id.to_owned(), next);
+        next
     }
 
     pub fn on_init_shell(&self, pane_id: &str, session_id: SessionId) -> Option<ShellType> {
@@ -506,12 +527,13 @@ impl TmuxRuntime {
             );
             return BootstrapTimeoutResult::Failed;
         }
-        let next_gen = generation + 1;
+        let next_gen = Self::next_bootstrap_generation(&mut inner, pane_id);
+        let next_session = warp_terminal::bootstrap::generate_session_id();
         inner.pane_bootstrap.insert(
             pane_id.to_owned(),
             PaneBootstrapEntry::Staging {
                 generation: next_gen,
-                session_id,
+                session_id: next_session,
                 retried: true,
                 timer_armed: false,
             },
@@ -523,8 +545,9 @@ impl TmuxRuntime {
         BootstrapTimeoutResult::Retry(PaneBootstrapClaim {
             pane_id: pane_id.to_owned(),
             shell_type,
-            session_id,
+            session_id: next_session,
             generation: next_gen,
+            retired_session_id: Some(session_id),
         })
     }
 
@@ -577,6 +600,33 @@ impl TmuxRuntime {
             Some(PaneBootstrapEntry::Staging { session_id, .. }) => Some(*session_id),
             _ => None,
         }
+    }
+
+    pub fn note_early_init_shell(&self, pane_id: &str, session_id: SessionId) {
+        self.inner
+            .lock()
+            .early_init_shell
+            .insert(pane_id.to_owned(), session_id);
+    }
+
+    pub fn take_early_init_shell(&self, pane_id: &str) -> Option<SessionId> {
+        self.inner.lock().early_init_shell.remove(pane_id)
+    }
+
+    pub fn complete_if_early_init_shell(&self, pane_id: &str) -> Option<ShellType> {
+        let session_id = self.take_early_init_shell(pane_id)?;
+        self.on_init_shell(pane_id, session_id)
+    }
+
+    pub fn apply_claim_session(&self, claim: &PaneBootstrapClaim) {
+        let Some(model) = self.pane_model(&claim.pane_id) else {
+            return;
+        };
+        let mut locked = model.lock();
+        if let Some(retired) = claim.retired_session_id {
+            locked.unregister_session_id(retired);
+        }
+        locked.register_session_id(claim.session_id);
     }
 
     pub fn pane_model(&self, pane_id: &str) -> Option<Arc<FairMutex<TerminalModel>>> {
