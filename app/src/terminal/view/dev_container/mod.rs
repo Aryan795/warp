@@ -272,6 +272,24 @@ impl TerminalView {
         ctx.notify();
     }
 
+    pub(crate) fn retry_dev_container_build(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(operation) = self.dev_container_build.clone() else {
+            return;
+        };
+        let (attempt_id, prior_process_group) =
+            operation.update(ctx, |operation, ctx| operation.begin_retry(ctx));
+        if let Some(process_group_id) = prior_process_group {
+            stream::terminate_process_group(process_group_id);
+        }
+        let key = operation.read(ctx, |operation, _| operation.key().clone());
+        registry::DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
+            registry.set_attempt(&key, attempt_id);
+        });
+        self.model.lock().start_commandless_output_block();
+        self.start_dev_container_build_attempt(ctx);
+        ctx.notify();
+    }
+
     pub(crate) fn cancel_dev_container_build(&mut self, ctx: &mut ViewContext<Self>) {
         #[cfg(feature = "local_tty")]
         {

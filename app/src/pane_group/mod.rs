@@ -4511,6 +4511,13 @@ impl PaneGroup {
             self.close_pane(pane_id, ctx);
             return;
         }
+        if self
+            .terminal_view_from_pane_id(pane_id, ctx)
+            .is_some_and(|view| view.as_ref(ctx).is_dev_container_build_surface())
+        {
+            self.close_pane(pane_id, ctx);
+            return;
+        }
 
         if let Some(terminal_manager) = self
             .terminal_session_by_id(pane_id)
