@@ -17,10 +17,11 @@ use rangemap::{RangeMap, RangeSet};
 use string_offset::CharOffset;
 use syntax_tree::{ColorMap, DecorationStateEvent, SyntaxTreeState};
 use vec1::{Vec1, vec1};
+use vim::handler::{CaseTransform as VimCaseTransform, VimBufferOps};
 use vim::vim::{
     BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
-    InsertPosition, LineMotion, MotionType, TextObjectInclusion, TextObjectType, VimOperator,
-    VimTextObject, WordBound, WordMotion, WordType,
+    InsertPosition, LineMotion, MotionType, TextObjectInclusion, TextObjectType, VimMotion,
+    VimOperand, VimOperator, VimTextObject, WordBound, WordMotion, WordType,
 };
 use vim::{
     find_next_paragraph_end, find_previous_paragraph_start, vim_a_block, vim_a_paragraph,
@@ -302,6 +303,8 @@ pub struct CodeEditorModel {
     /// Stores the selection "tails" when entering Vim visual mode so we can derive
     /// visual selections that may differ from the cursor positions.
     vim_visual_tails: Vec<CharOffset>,
+    /// Selections saved across a yank so the cursor can be restored afterward.
+    vim_selection_stash: Option<Vec1<SelectionOffsets>>,
     hovered_symbol_range: Option<HoverableLink>,
     /// Automatically hide lines outside of the active diff with X context lines.
     hide_lines_outside_of_active_diff: Option<usize>,
@@ -464,6 +467,7 @@ impl CodeEditorModel {
             show_current_line_highlights,
             delay_rendering: None,
             vim_visual_tails: vec![],
+            vim_selection_stash: None,
             hovered_symbol_range: None,
             hide_lines_outside_of_active_diff: None,
             recalculate_hidden_lines_after_diff: None,
@@ -4105,6 +4109,256 @@ impl CodeEditorModel {
             self.get_diff_content_for_line(&updated_loc, ctx)
         };
         (updated_loc, content, used_fallback)
+    }
+
+    /// Select the range described by a vim operand so a pending operator can run.
+    pub fn vim_select_for_operand(
+        &mut self,
+        operator: &VimOperator,
+        operand_count: u32,
+        operand: &VimOperand,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        match operand {
+            VimOperand::Motion {
+                motion,
+                motion_type,
+            } => match motion {
+                VimMotion::Character(char_motion) => {
+                    self.vim_select_for_char_motion(
+                        char_motion,
+                        motion_type,
+                        operator,
+                        operand_count,
+                        ctx,
+                    );
+                }
+                VimMotion::Word(word_motion) => {
+                    self.vim_select_for_word_motion(
+                        word_motion,
+                        operand_count,
+                        motion_type,
+                        operator,
+                        ctx,
+                    );
+                }
+                VimMotion::Line(line_motion) => {
+                    self.vim_select_for_line_motion(
+                        line_motion,
+                        operand_count,
+                        motion_type,
+                        operator,
+                        ctx,
+                    );
+                }
+                VimMotion::FirstNonWhitespace(nonws_motion) => {
+                    self.vim_select_for_first_nonwhitespace_motion(
+                        nonws_motion,
+                        motion_type,
+                        operator,
+                        operand_count,
+                        ctx,
+                    );
+                }
+                VimMotion::Paragraph(direction) => {
+                    self.vim_move_by_paragraph(operand_count, direction, true, ctx);
+                    if *motion_type == MotionType::Linewise {
+                        self.vim_extend_selection_linewise(
+                            operator.includes_trailing_newline(),
+                            *operator == VimOperator::Delete,
+                            ctx,
+                        );
+                    }
+                }
+                VimMotion::JumpToLastLine => {
+                    self.vim_select_to_buffer_end(ctx);
+                    if *motion_type == MotionType::Linewise {
+                        self.vim_extend_selection_linewise(
+                            operator.includes_trailing_newline(),
+                            *operator == VimOperator::Delete,
+                            ctx,
+                        );
+                    }
+                }
+                VimMotion::JumpToFirstLine => {
+                    self.vim_select_to_buffer_start(ctx);
+                    if *motion_type == MotionType::Linewise {
+                        self.vim_extend_selection_linewise(
+                            operator.includes_trailing_newline(),
+                            *operator == VimOperator::Delete,
+                            ctx,
+                        );
+                    }
+                }
+                VimMotion::FindChar(m) => {
+                    self.vim_find_char(true, operand_count, m, ctx);
+                }
+                VimMotion::JumpToLine(line_number) => {
+                    self.vim_select_to_line(*line_number, motion_type, operator, ctx);
+                }
+                VimMotion::JumpToMatchingBracket => {
+                    self.vim_select_for_matching_bracket(ctx);
+                }
+                VimMotion::JumpToUnmatchedBracket(bracket) => {
+                    self.vim_jump_to_unmatched_bracket(bracket, true, ctx);
+                }
+            },
+            VimOperand::Line => {
+                if operand_count > 1 {
+                    self.vim_move_vertical_by_offset(
+                        operand_count - 1,
+                        TextDirection::Forwards,
+                        true,
+                        ctx,
+                    );
+                }
+                let include_newline =
+                    operator.includes_trailing_newline() && *operator != VimOperator::ToggleComment;
+                self.vim_extend_selection_linewise(
+                    include_newline,
+                    *operator == VimOperator::Delete,
+                    ctx,
+                );
+            }
+            VimOperand::TextObject(text_object) => {
+                self.vim_select_text_object(text_object, Some(operator), ctx);
+            }
+        }
+    }
+}
+
+impl VimBufferOps for CodeEditorModel {
+    type Ctx<'a> = ModelContext<'a, Self>;
+
+    fn select_for_operand(
+        &mut self,
+        operator: &VimOperator,
+        operand_count: u32,
+        operand: &VimOperand,
+        ctx: &mut Self::Ctx<'_>,
+    ) {
+        self.vim_select_for_operand(operator, operand_count, operand, ctx);
+    }
+
+    fn selected_text(&mut self, ctx: &mut Self::Ctx<'_>) -> String {
+        self.content()
+            .as_ref(ctx)
+            .selected_text_as_plain_text(self.buffer_selection_model().clone(), ctx)
+            .into_string()
+    }
+
+    fn delete_selection(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.delete(TextDirection::Forwards, TextUnit::Character, false, ctx);
+    }
+
+    fn insert_text(&mut self, text: &str, ctx: &mut Self::Ctx<'_>) {
+        self.insert(text, EditOrigin::UserInitiated, ctx);
+    }
+
+    fn change_line_smart_indent(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.vim_change_line_with_smart_indent(ctx);
+    }
+
+    fn move_to_line_start(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.vim_move_to_line_bound(LineBound::Start, false, ctx);
+    }
+
+    fn stash_selections(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.vim_selection_stash = Some(self.selections(ctx).clone());
+    }
+
+    fn restore_stashed_selections(&mut self, ctx: &mut Self::Ctx<'_>) {
+        if let Some(selections) = self.vim_selection_stash.take() {
+            self.vim_set_selections(selections, AutoScrollBehavior::None, ctx);
+        }
+    }
+
+    fn collapse_to_selection_start(&mut self, ctx: &mut Self::Ctx<'_>) {
+        let starts = self
+            .buffer_selection_model()
+            .as_ref(ctx)
+            .selection_offsets()
+            .mapped(|selection| {
+                let start = selection.head.min(selection.tail);
+                SelectionOffsets {
+                    head: start,
+                    tail: start,
+                }
+            });
+        self.vim_set_selections(starts, AutoScrollBehavior::None, ctx);
+    }
+
+    fn transform_case(&mut self, transform: VimCaseTransform, ctx: &mut Self::Ctx<'_>) {
+        let transform = match transform {
+            VimCaseTransform::Toggle => CaseTransform::Toggle,
+            VimCaseTransform::Uppercase => CaseTransform::Uppercase,
+            VimCaseTransform::Lowercase => CaseTransform::Lowercase,
+        };
+        self.transform_current_selections_case(transform, ctx);
+    }
+
+    fn toggle_comments(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.toggle_comments(ctx);
+    }
+
+    fn indent(&mut self, dedent: bool, ctx: &mut Self::Ctx<'_>) {
+        CoreEditorModel::indent(self, dedent, ctx);
+    }
+
+    fn move_to_first_nonwhitespace(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.vim_move_to_first_nonwhitespace(false, ctx);
+    }
+
+    fn expand_visual_selection(
+        &mut self,
+        motion_type: MotionType,
+        include_newline: bool,
+        ctx: &mut Self::Ctx<'_>,
+    ) {
+        self.vim_visual_selection_range(motion_type, include_newline, ctx);
+    }
+
+    fn clear_selections(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.vim_clear_selections(ctx);
+    }
+
+    fn apply_insert_position(&mut self, position: &InsertPosition, ctx: &mut Self::Ctx<'_>) {
+        match position {
+            InsertPosition::AtCursor => {}
+            InsertPosition::AfterCursor => {
+                self.vim_move_horizontal_by_offset(1, &Direction::Forward, false, true, ctx);
+            }
+            InsertPosition::LineFirstNonWhitespace => {
+                self.vim_move_to_first_nonwhitespace(false, ctx);
+            }
+            InsertPosition::LineEnd => {
+                self.vim_move_to_line_bound(LineBound::End, false, ctx);
+            }
+            InsertPosition::LineAbove => {
+                self.vim_newline(true, ctx);
+            }
+            InsertPosition::LineBelow => {
+                self.vim_newline(false, ctx);
+            }
+        }
+    }
+
+    fn move_left_exiting_insert(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.vim_move_horizontal_by_offset(1, &Direction::Backward, false, true, ctx);
+    }
+
+    fn enforce_cursor_line_cap(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.vim_enforce_cursor_line_cap(ctx);
+    }
+
+    fn set_visual_tails_to_heads(&mut self, ctx: &mut Self::Ctx<'_>) {
+        self.vim_set_visual_tail_to_selection_heads(ctx);
+    }
+
+    fn enforce_normal_mode_line_cap(&mut self, ctx: &mut Self::Ctx<'_>) {
+        if self.vim_needs_line_capping(ctx) {
+            self.vim_enforce_cursor_line_cap(ctx);
+        }
     }
 }
 

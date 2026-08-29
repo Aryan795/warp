@@ -12,7 +12,7 @@ use pathfinder_geometry::vector::vec2f;
 use settings::Setting as _;
 use string_offset::CharOffset;
 use vec1::{Vec1, vec1};
-use vim::vim::{Direction, InsertPosition, VimMode, VimModel, VimState, VimSubscriber};
+use vim::vim::{Direction, VimMode, VimModel, VimState, VimSubscriber};
 use warp_core::platform::SessionPlatform;
 use warp_editor::content::buffer::{
     Buffer, BufferEditAction, EditOrigin, InitialBufferState, ToBufferCharOffset as _,
@@ -65,7 +65,7 @@ use crate::code::editor::find::view::{CodeEditorFind as Find, Event as FindViewE
 use crate::code::editor::goto_line::view::{Event as GoToLineEvent, GoToLineView};
 use crate::code::editor::line::EditorLineLocation;
 use crate::code::editor::model::{
-    CodeEditorModel, CodeEditorModelEvent, HoverableLink, LineBound, StableEditorLine,
+    CodeEditorModel, CodeEditorModelEvent, HoverableLink, StableEditorLine,
 };
 use crate::code::editor::nav_bar::{NavBar, NavBarBehavior, NavBarEvent};
 use crate::code::editor::scroll::{ScrollPosition, ScrollTrigger, ScrollWheelBehavior};
@@ -2012,43 +2012,6 @@ impl CodeEditorView {
     /// Send the 'escape' keystroke to the VimFSA.
     fn vim_escape(&mut self, ctx: &mut ViewContext<Self>) {
         self.vim_keystroke(&Keystroke::parse("escape").expect("escape parses"), ctx)
-    }
-
-    fn vim_apply_insert_position(
-        &mut self,
-        position: &InsertPosition,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        match position {
-            InsertPosition::AtCursor => {}
-            InsertPosition::AfterCursor => {
-                self.model.update(ctx, |model, ctx| {
-                    model.vim_move_horizontal_by_offset(
-                        1,
-                        &Direction::Forward,
-                        false, // keep_selection
-                        true,  // stop_at_line_boundary
-                        ctx,
-                    );
-                });
-            }
-            InsertPosition::LineFirstNonWhitespace => self.model.update(ctx, |model, ctx| {
-                model.vim_move_to_first_nonwhitespace(false, ctx);
-            }),
-            InsertPosition::LineEnd => self.model.update(ctx, |model, ctx| {
-                model.vim_move_to_line_bound(LineBound::End, false, ctx);
-            }),
-            InsertPosition::LineAbove => {
-                self.model.update(ctx, |model, ctx| {
-                    model.vim_newline(true, ctx);
-                });
-            }
-            InsertPosition::LineBelow => {
-                self.model.update(ctx, |model, ctx| {
-                    model.vim_newline(false, ctx);
-                });
-            }
-        }
     }
 
     /// When in Vim mode, specifically normal mode, the block cursor cannot go past the last

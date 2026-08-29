@@ -2349,3 +2349,69 @@ fn test_clicking_find_input_after_vim_search_word_restores_editing() {
         assert!(is_find_input_focused(&find_editor, &app));
     });
 }
+
+#[test]
+fn test_vim_inner_word_text_object_delete() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+        let editor = add_code_editor("hello world", &mut app);
+        vim_user_insert(&editor, "diw", &mut app);
+        assert_eq!(buffer_text(&editor, &app), " world");
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+    });
+}
+
+#[test]
+fn test_vim_change_word_enters_insert() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+        let editor = add_code_editor("hello world", &mut app);
+        vim_user_insert(&editor, "cw", &mut app);
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Insert));
+        vim_user_insert(&editor, "hey", &mut app);
+        editor.update(&mut app, |view, ctx| {
+            view.vim_keystroke(&Keystroke::parse("escape").unwrap(), ctx);
+        });
+        assert!(buffer_text(&editor, &app).starts_with("hey"));
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+    });
+}
+
+#[test]
+fn test_vim_toggle_case_and_yank_word() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+        let editor = add_code_editor("abc def", &mut app);
+        vim_user_insert(&editor, "gUl", &mut app);
+        assert_eq!(buffer_text(&editor, &app).chars().next(), Some('A'));
+
+        set_cursor_position(&editor, 1, 4, &mut app);
+        vim_user_insert(&editor, "yw", &mut app);
+        vim_user_insert(&editor, "P", &mut app);
+        assert!(buffer_text(&editor, &app).contains("def"));
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+    });
+}
+
+#[test]
+fn test_vim_visual_delete_and_find_char_operator() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+        let editor = add_code_editor("abcdef", &mut app);
+        vim_user_insert(&editor, "vllld", &mut app);
+        assert_eq!(buffer_text(&editor, &app), "ef");
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+
+        let editor = add_code_editor("abXcd", &mut app);
+        vim_user_insert(&editor, "dfX", &mut app);
+        assert_eq!(buffer_text(&editor, &app), "cd");
+    });
+}

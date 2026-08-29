@@ -14,16 +14,16 @@
 //! - Scroll helpers (`center_cursor_vertically`, `scroll_half_page_*`) — no-op.
 //!
 
+use vim::handler::{apply_mode_change, apply_operator, apply_visual_operator, apply_visual_paste};
 use vim::vim::{
     BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
-    InsertPosition, LineMotion, ModeTransition, MotionType, VimHandler, VimMode, VimMotion,
-    VimOperand, VimOperator, VimTextObject, WordMotion,
+    InsertPosition, LineMotion, ModeTransition, MotionType, VimHandler, VimMode, VimOperand,
+    VimOperator, VimTextObject, WordMotion,
 };
-use warp::editor::{CodeEditorModel, LineBound};
-use warp_editor::content::buffer::AutoScrollBehavior;
+use warp::editor::LineBound;
 use warp_editor::model::{CoreEditorModel, PlainTextEditorModel};
 use warp_editor::selection::{TextDirection, TextUnit};
-use warpui_core::{ModelContext, ViewContext};
+use warpui_core::ViewContext;
 
 use super::TuiInputView;
 const MAX_VIM_PASTE_BYTES: usize = 1024 * 1024;
@@ -189,56 +189,19 @@ impl VimHandler for TuiInputView {
         replacement_text: &str,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !matches!(
-            operator,
-            VimOperator::Delete | VimOperator::Change | VimOperator::Yank
-        ) {
-            ctx.notify();
-            return;
-        }
-        let motion_type = vim_operand_motion_type(operand);
         let yanked = self.model.update(ctx, |model, ctx| {
-            let existing_selections = model.selections(ctx).clone();
-            select_vim_operand(model, operator, operand_count, operand, ctx);
-
-            let selected_text = model
-                .content()
-                .as_ref(ctx)
-                .selected_text_as_plain_text(model.buffer_selection_model().clone(), ctx)
-                .into_string();
-
-            match operator {
-                VimOperator::Delete | VimOperator::Change if !selected_text.is_empty() => {
-                    if *operator == VimOperator::Change && matches!(operand, VimOperand::Line) {
-                        model.vim_change_line_with_smart_indent(ctx);
-                    } else {
-                        model.delete(TextDirection::Forwards, TextUnit::Character, false, ctx);
-                    }
-                    if *operator == VimOperator::Change && !replacement_text.is_empty() {
-                        model.user_insert(replacement_text, ctx);
-                    }
-                }
-                VimOperator::Yank => {
-                    model.vim_set_selections(existing_selections, AutoScrollBehavior::None, ctx);
-                }
-                VimOperator::Delete
-                | VimOperator::Change
-                | VimOperator::ToggleCase
-                | VimOperator::Uppercase
-                | VimOperator::Lowercase
-                | VimOperator::ToggleComment
-                | VimOperator::Indent
-                | VimOperator::Dedent => {}
-            }
-            if selected_text.is_empty() && motion_type == MotionType::Linewise {
-                "\n".to_owned()
-            } else {
-                selected_text
-            }
+            apply_operator(
+                model,
+                operator,
+                operand_count,
+                operand,
+                replacement_text,
+                ctx,
+            )
         });
-        if !yanked.is_empty() {
-            self.yank_buffer = yanked;
-            self.yank_motion_type = motion_type;
+        if let Some(yanked) = yanked {
+            self.yank_buffer = yanked.text;
+            self.yank_motion_type = yanked.motion_type;
         }
         self.follow_cursor(ctx);
         ctx.notify();
@@ -299,47 +262,37 @@ impl VimHandler for TuiInputView {
         ctx: &mut ViewContext<Self>,
     ) {
         let yanked = self.model.update(ctx, |model, ctx| {
-            model.vim_visual_selection_range(
-                motion_type,
-                operator.includes_trailing_newline(),
-                ctx,
-            );
-            let selected_text = model
-                .content()
-                .as_ref(ctx)
-                .selected_text_as_plain_text(model.buffer_selection_model().clone(), ctx)
-                .into_string();
-            match operator {
-                VimOperator::Delete | VimOperator::Change => {
-                    model.delete(TextDirection::Forwards, TextUnit::Character, false, ctx);
-                }
-                VimOperator::Yank => model.vim_clear_selections(ctx),
-                VimOperator::ToggleCase
-                | VimOperator::Uppercase
-                | VimOperator::Lowercase
-                | VimOperator::ToggleComment
-                | VimOperator::Indent
-                | VimOperator::Dedent => model.vim_clear_selections(ctx),
-            }
-            selected_text
+            apply_visual_operator(model, operator, motion_type, ctx)
         });
-        if !yanked.is_empty() {
-            self.yank_buffer = yanked;
-            self.yank_motion_type = motion_type;
+        if let Some(yanked) = yanked {
+            self.yank_buffer = yanked.text;
+            self.yank_motion_type = yanked.motion_type;
         }
         self.follow_cursor(ctx);
         ctx.notify();
     }
 
-    /// Prompt-specific: visual paste is a no-op for TUI; use the plain
-    /// `paste` method instead (the TUI has no register system).
     fn visual_paste(
         &mut self,
-        _motion_type: MotionType,
+        motion_type: MotionType,
         _read_register_name: char,
         _write_register_name: char,
         ctx: &mut ViewContext<Self>,
     ) {
+        if self.yank_buffer.is_empty() {
+            ctx.notify();
+            return;
+        }
+        let paste_text = self.yank_buffer.clone();
+        let yanked_motion = self.yank_motion_type;
+        let yanked = self.model.update(ctx, |model, ctx| {
+            apply_visual_paste(model, motion_type, &paste_text, yanked_motion, ctx)
+        });
+        if let Some(yanked) = yanked {
+            self.yank_buffer = yanked.text;
+            self.yank_motion_type = yanked.motion_type;
+        }
+        self.follow_cursor(ctx);
         ctx.notify();
     }
 
@@ -460,61 +413,9 @@ impl VimHandler for TuiInputView {
     }
 
     fn change_mode(&mut self, old: &VimMode, new: &ModeTransition, ctx: &mut ViewContext<Self>) {
-        match new.mode {
-            VimMode::Normal => {
-                if *old == VimMode::Insert {
-                    self.model.update(ctx, |model, ctx| {
-                        model.vim_move_horizontal_by_offset(
-                            1,
-                            &Direction::Backward,
-                            false,
-                            true,
-                            ctx,
-                        );
-                    });
-                }
-            }
-            VimMode::Insert => {
-                // Apply cursor movement or newline insertion implied by the
-                // entry command (i/a/A/I/o/O).
-                match &new.position {
-                    InsertPosition::AtCursor => {}
-                    InsertPosition::AfterCursor => {
-                        self.model.update(ctx, |m, ctx| m.move_right(ctx));
-                    }
-                    InsertPosition::LineEnd => {
-                        self.model.update(ctx, |model, ctx| {
-                            model.vim_move_to_line_bound(LineBound::End, false, ctx);
-                        });
-                    }
-                    InsertPosition::LineFirstNonWhitespace => {
-                        self.model.update(ctx, |m, ctx| {
-                            m.vim_move_to_first_nonwhitespace(false, ctx);
-                        });
-                    }
-                    InsertPosition::LineAbove => {
-                        self.model
-                            .update(ctx, |model, ctx| model.vim_newline(true, ctx));
-                    }
-                    InsertPosition::LineBelow => {
-                        self.model.update(ctx, |model, ctx| {
-                            model.vim_newline(false, ctx);
-                            model.move_right(ctx);
-                        });
-                    }
-                }
-            }
-            VimMode::Visual(_) => {
-                self.model.update(ctx, |model, ctx| {
-                    model.vim_set_visual_tail_to_selection_heads(ctx);
-                });
-            }
-            VimMode::Replace => {
-                self.model.update(ctx, |model, ctx| {
-                    model.vim_enforce_cursor_line_cap(ctx);
-                });
-            }
-        }
+        self.model.update(ctx, |model, ctx| {
+            apply_mode_change(model, old, new, ctx);
+        });
         self.follow_cursor(ctx);
         ctx.notify();
     }
@@ -545,102 +446,7 @@ impl VimHandler for TuiInputView {
     }
 }
 
-fn vim_operand_motion_type(operand: &VimOperand) -> MotionType {
-    match operand {
-        VimOperand::Motion { motion_type, .. } => *motion_type,
-        VimOperand::Line => MotionType::Linewise,
-        VimOperand::TextObject(_) => MotionType::Charwise,
-    }
-}
 fn bounded_repeated_text(text: &str, count: u32) -> String {
     let max_count = (MAX_VIM_PASTE_BYTES / text.len().max(1)).max(1);
     text.repeat((count as usize).min(max_count))
-}
-
-fn select_vim_operand(
-    model: &mut CodeEditorModel,
-    operator: &VimOperator,
-    operand_count: u32,
-    operand: &VimOperand,
-    ctx: &mut ModelContext<CodeEditorModel>,
-) {
-    match operand {
-        VimOperand::Motion {
-            motion,
-            motion_type,
-        } => match motion {
-            VimMotion::Character(motion) => {
-                model.vim_select_for_char_motion(motion, motion_type, operator, operand_count, ctx);
-            }
-            VimMotion::Word(motion) => {
-                model.vim_select_for_word_motion(motion, operand_count, motion_type, operator, ctx);
-            }
-            VimMotion::Line(motion) => {
-                model.vim_select_for_line_motion(motion, operand_count, motion_type, operator, ctx);
-            }
-            VimMotion::FirstNonWhitespace(motion) => {
-                model.vim_select_for_first_nonwhitespace_motion(
-                    motion,
-                    motion_type,
-                    operator,
-                    operand_count,
-                    ctx,
-                );
-            }
-            VimMotion::Paragraph(direction) => {
-                model.vim_move_by_paragraph(operand_count, direction, true, ctx);
-                if *motion_type == MotionType::Linewise {
-                    model.vim_extend_selection_linewise(
-                        operator.includes_trailing_newline(),
-                        *operator == VimOperator::Delete,
-                        ctx,
-                    );
-                }
-            }
-            VimMotion::JumpToLastLine => {
-                model.vim_select_to_buffer_end(ctx);
-                if *motion_type == MotionType::Linewise {
-                    model.vim_extend_selection_linewise(
-                        operator.includes_trailing_newline(),
-                        *operator == VimOperator::Delete,
-                        ctx,
-                    );
-                }
-            }
-            VimMotion::JumpToFirstLine => {
-                model.vim_select_to_buffer_start(ctx);
-                if *motion_type == MotionType::Linewise {
-                    model.vim_extend_selection_linewise(
-                        operator.includes_trailing_newline(),
-                        *operator == VimOperator::Delete,
-                        ctx,
-                    );
-                }
-            }
-            VimMotion::FindChar(_)
-            | VimMotion::JumpToMatchingBracket
-            | VimMotion::JumpToUnmatchedBracket(_) => {}
-            VimMotion::JumpToLine(line_number) => {
-                model.vim_select_to_line(*line_number, motion_type, operator, ctx);
-            }
-        },
-        VimOperand::Line => {
-            if operand_count > 1 {
-                model.vim_move_vertical_by_offset(
-                    operand_count - 1,
-                    TextDirection::Forwards,
-                    true,
-                    ctx,
-                );
-            }
-            model.vim_extend_selection_linewise(
-                operator.includes_trailing_newline(),
-                *operator == VimOperator::Delete,
-                ctx,
-            );
-        }
-        VimOperand::TextObject(text_object) => {
-            model.vim_select_text_object(text_object, Some(operator), ctx);
-        }
-    }
 }

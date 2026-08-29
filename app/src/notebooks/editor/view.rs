@@ -4,8 +4,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use markdown_parser::{FormattedText, parse_html, parse_markdown};
+use num_traits::SaturatingSub;
 use pathfinder_geometry::vector::vec2f;
 use string_offset::CharOffset;
+use vim::vim::{Direction, VimMode, VimModel, VimSubscriber};
 use warp_editor::content::anchor::Anchor;
 use warp_editor::content::text::{BufferTextStyle, CodeBlockType, TextStyles};
 use warp_editor::content::version::BufferVersion;
@@ -33,7 +35,7 @@ use warpui::elements::{
 use warpui::event::ModifiersState;
 use warpui::fonts::{FallbackFontEvent, FallbackFontModel};
 use warpui::image_cache::ImageType;
-use warpui::keymap::{EditableBinding, FixedBinding, PerPlatformKeystroke};
+use warpui::keymap::{EditableBinding, FixedBinding, Keystroke, PerPlatformKeystroke};
 use warpui::platform::{Cursor, OperatingSystem};
 use warpui::presenter::ChildView;
 #[cfg(feature = "local_fs")]
@@ -77,9 +79,16 @@ use crate::util::tooltips::{
 use crate::view_components::DismissibleToast;
 use crate::workspace::WorkspaceAction;
 
+#[path = "vim_handler.rs"]
+mod vim_handler;
+
 #[cfg(test)]
 #[path = "view_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "vim_handler_tests.rs"]
+mod vim_handler_tests;
 
 const SCROLLBAR_WIDTH: ScrollbarWidth = ScrollbarWidth::Auto;
 const MAX_EDITOR_TIP_WIDTH: f32 = 300.;
@@ -107,12 +116,22 @@ pub fn init(app: &mut AppContext) {
             EditorViewAction::Enter,
             // The BlockInsertionMenu guard is needed because menus don't handle Enter via keybindings.
             // Without this, Enter is processed by both the menu and the editor view.
-            id!("RichTextEditorView") & !id!("IMEOpen") & !id!("BlockInsertionMenu"),
+            id!("RichTextEditorView") & !id!("IMEOpen") & !id!("BlockInsertionMenu") & !id!("Vim"),
+        ),
+        FixedBinding::new(
+            "enter",
+            EditorViewAction::VimEnter,
+            id!("RichTextEditorView") & !id!("IMEOpen") & !id!("BlockInsertionMenu") & id!("Vim"),
         ),
         FixedBinding::new(
             "numpadenter",
             EditorViewAction::Enter,
-            id!("RichTextEditorView") & !id!("IMEOpen") & !id!("BlockInsertionMenu"),
+            id!("RichTextEditorView") & !id!("IMEOpen") & !id!("BlockInsertionMenu") & !id!("Vim"),
+        ),
+        FixedBinding::new(
+            "numpadenter",
+            EditorViewAction::VimEnter,
+            id!("RichTextEditorView") & !id!("IMEOpen") & !id!("BlockInsertionMenu") & id!("Vim"),
         ),
         FixedBinding::new(
             "shift-enter",
@@ -122,14 +141,33 @@ pub fn init(app: &mut AppContext) {
         FixedBinding::new(
             "backspace",
             EditorViewAction::Backspace,
-            id!("RichTextEditorView") & !id!("IMEOpen"),
+            id!("RichTextEditorView") & !id!("IMEOpen") & !id!("Vim"),
+        ),
+        FixedBinding::new(
+            "backspace",
+            EditorViewAction::VimBackspace,
+            id!("RichTextEditorView") & !id!("IMEOpen") & id!("Vim"),
         ),
         FixedBinding::new(
             "shift-backspace",
             EditorViewAction::Backspace,
-            id!("RichTextEditorView") & !id!("IMEOpen"),
+            id!("RichTextEditorView") & !id!("IMEOpen") & !id!("Vim"),
         ),
-        FixedBinding::new("delete", EditorViewAction::Delete, text_entry.clone()),
+        FixedBinding::new(
+            "delete",
+            EditorViewAction::Delete,
+            text_entry.clone() & !id!("Vim"),
+        ),
+        FixedBinding::new(
+            "delete",
+            EditorViewAction::VimDelete,
+            text_entry.clone() & id!("Vim"),
+        ),
+        FixedBinding::new(
+            "escape",
+            EditorViewAction::VimEscape,
+            id!("RichTextEditorView") & id!("Vim") & !id!("HasCommandSelection"),
+        ),
         FixedBinding::new(
             "shift-up",
             EditorViewAction::SelectUp,
@@ -732,6 +770,10 @@ pub fn init(app: &mut AppContext) {
 pub enum EditorViewAction {
     UserTyped(UserInput<String>),
     VimUserTyped(UserInput<String>),
+    VimEnter,
+    VimBackspace,
+    VimDelete,
+    VimEscape,
     Enter,
     ShiftEnter,
     /// Cmd/Ctrl+Enter pressed (used by comment editor mode to submit comments).
@@ -1069,6 +1111,8 @@ pub struct RichTextEditorView {
 
     /// When true, the block insertion menu (slash menu) is disabled.
     disable_block_insertion_menu: bool,
+    vim_model: ModelHandle<VimModel>,
+    last_search_direction: Direction,
 }
 
 #[derive(Default)]
@@ -1147,6 +1191,16 @@ impl RichTextEditorView {
         let insertion_menu_state =
             BlockInsertionMenuState::new(ctx, config.embedded_objects_enabled.unwrap_or(true));
 
+        let vim_model = ctx.add_model(|_| VimModel::new());
+        ctx.subscribe_to_model(&vim_model, Self::handle_vim_event);
+        if AppEditorSettings::as_ref(ctx).vim_mode_enabled() {
+            vim_model.update(ctx, |vim_model, ctx| {
+                if let Ok(escape) = Keystroke::parse("escape") {
+                    vim_model.keypress(&escape, ctx);
+                }
+            });
+        }
+
         Self {
             omnibar,
             link_editor,
@@ -1176,6 +1230,8 @@ impl RichTextEditorView {
             can_execute_shell_commands: config.can_execute_shell_commands.unwrap_or(true),
             disable_scrolling: config.disable_scrolling,
             disable_block_insertion_menu: config.disable_block_insertion_menu,
+            vim_model,
+            last_search_direction: Direction::Forward,
         }
     }
 
@@ -1511,6 +1567,33 @@ impl RichTextEditorView {
     /// Whether or not the view is currently editable.
     pub fn is_editable(&self, app: &AppContext) -> bool {
         matches!(self.interaction_state(app), InteractionState::Editable)
+    }
+
+    pub fn vim_mode_enabled(&self, ctx: &AppContext) -> bool {
+        AppEditorSettings::as_ref(ctx).vim_mode_enabled()
+    }
+
+    pub fn vim_mode(&self, ctx: &AppContext) -> Option<VimMode> {
+        self.vim_mode_enabled(ctx)
+            .then(|| self.vim_model.as_ref(ctx).state().mode)
+    }
+
+    fn vim_user_insert(&mut self, text: &str, ctx: &mut ViewContext<Self>) {
+        self.vim_model.update(ctx, |vim_model, ctx| {
+            for c in text.chars() {
+                vim_model.typed_character(c, ctx);
+            }
+        });
+    }
+
+    fn vim_keystroke(&mut self, keystroke: &Keystroke, ctx: &mut ViewContext<Self>) {
+        self.vim_model.update(ctx, |vim_model, ctx| {
+            vim_model.keypress(keystroke, ctx);
+        });
+    }
+
+    fn vim_escape(&mut self, ctx: &mut ViewContext<Self>) {
+        self.vim_keystroke(&Keystroke::parse("escape").expect("escape parses"), ctx);
     }
 
     /// Update the editor model with user typed content.
@@ -2678,13 +2761,20 @@ impl View for RichTextEditorView {
             ..Default::default()
         };
 
+        let vim_visual_tails = self
+            .model
+            .as_ref(app)
+            .vim_visual_tails()
+            .iter()
+            .map(|t| t.saturating_sub(&CharOffset::from(1)))
+            .collect::<Vec<_>>();
         let rich_text = RichTextElement::<Self>::new(
             render_state.clone(),
             self.self_handle.clone(),
             display_options,
             self.display_state.clone(),
-            None,       // Not currently supporting vim in notebooks
-            Vec::new(), // Not currently supporting vim in notebooks
+            self.vim_mode(app),
+            vim_visual_tails,
         )
         .with_max_width(self.max_width)
         .finish_scrollable();
@@ -2782,6 +2872,19 @@ impl View for RichTextEditorView {
             context.set.insert("CanExecuteShellCommands");
         }
 
+        if let Some(vim_mode) = self.vim_mode(ctx) {
+            context.set.insert("Vim");
+            match vim_mode {
+                VimMode::Normal => {
+                    context.set.insert("VimNormalMode");
+                }
+                VimMode::Visual(_) => {
+                    context.set.insert("VimVisualMode");
+                }
+                _ => {}
+            }
+        }
+
         context
     }
 
@@ -2815,16 +2918,21 @@ impl TypedActionView for RichTextEditorView {
                 }
             }
             VimUserTyped(content) => {
-                if self.can_edit(ctx) {
-                    // Not supporting vim mode for notebooks yet.
-                    // This should never be triggered because VimMode should be set to None for
-                    // `RichTextEditorView`.
-                    //
-                    // If we do reach this, log a warning and handle text as if in non-vim mode.
-                    log::warn!("vim mode triggered in a notebook, should not be enabled");
-                    self.user_typed(content, ctx)
+                if self.can_edit(ctx) && self.vim_mode_enabled(ctx) {
+                    self.vim_user_insert(content, ctx);
+                } else if self.can_edit(ctx) {
+                    self.user_typed(content, ctx);
                 }
             }
+            VimEnter => self.vim_keystroke(&Keystroke::parse("enter").expect("enter parses"), ctx),
+            VimBackspace => self.vim_keystroke(
+                &Keystroke::parse("backspace").expect("backspace parses"),
+                ctx,
+            ),
+            VimDelete => {
+                self.vim_keystroke(&Keystroke::parse("delete").expect("delete parses"), ctx)
+            }
+            VimEscape => self.vim_escape(ctx),
             Enter => self.enter(ctx),
             ShiftEnter => self.shift_enter(ctx),
             CmdEnter => ctx.emit(EditorViewEvent::CmdEnter),
@@ -3341,7 +3449,11 @@ impl TypedActionView for RichTextEditorView {
             | EditorViewAction::OpenFile { .. }
             | EditorViewAction::MermaidDisplayModeSelected { .. }
             | EditorViewAction::OpenMermaidDiagramLightbox { .. }
-            | EditorViewAction::VimUserTyped(_) => ActionAccessibilityContent::Empty,
+            | EditorViewAction::VimUserTyped(_)
+            | EditorViewAction::VimEnter
+            | EditorViewAction::VimBackspace
+            | EditorViewAction::VimDelete
+            | EditorViewAction::VimEscape => ActionAccessibilityContent::Empty,
         }
     }
 }
@@ -3431,7 +3543,6 @@ impl RichTextAction<RichTextEditorView> for EditorViewAction {
         _view: &WeakViewHandle<RichTextEditorView>,
         _ctx: &AppContext,
     ) -> Option<Self> {
-        // Vim mode not enabled yet for notebooks; this should not be triggered.
         Some(EditorViewAction::VimUserTyped(UserInput::new(chars)))
     }
 

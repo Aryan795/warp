@@ -92,6 +92,9 @@ lazy_static! {
 #[path = "model_tests.rs"]
 mod tests;
 
+#[path = "vim_buffer.rs"]
+mod vim_buffer;
+
 /// Model for managing the state of the editor.
 pub struct NotebooksEditorModel {
     pub(super) render_state: ModelHandle<RenderState>,
@@ -108,6 +111,8 @@ pub struct NotebooksEditorModel {
     /// Context used to generate clickable file path links for notebooks.
     file_link_resolution_context: Option<FileLinkResolutionContext>,
     default_mermaid_display_mode: MarkdownDisplayMode,
+    vim_visual_tails: Vec<CharOffset>,
+    vim_selection_stash: Option<Vec1<SelectionOffsets>>,
 }
 
 #[derive(Clone)]
@@ -228,6 +233,8 @@ impl NotebooksEditorModel {
             resize_tx,
             file_link_resolution_context: None,
             default_mermaid_display_mode: MarkdownDisplayMode::Raw,
+            vim_visual_tails: Vec::new(),
+            vim_selection_stash: None,
         }
     }
 
