@@ -743,14 +743,17 @@ if saw_dcs:
         if b"WARP_INIT_OK" in out:
             saw_ok = True
             break
-reaped = False
-while time.time() < deadline:
-    wpid, _ = os.waitpid(pid, os.WNOHANG)
-    if wpid == pid:
-        reaped = True
-        saw_eof = True
-        break
-    time.sleep(0.05)
+def reap(until):
+    while time.time() < until:
+        try:
+            wpid, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return True
+        if wpid == pid:
+            return True
+        time.sleep(0.05)
+    return False
+reaped = reap(time.time() + 2)
 if not reaped:
     try:
         os.kill(pid, signal.SIGKILL)
@@ -758,18 +761,21 @@ if not reaped:
         pass
     except OSError:
         pass
-    while time.time() < deadline:
-        try:
-            wpid, _ = os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
-            reaped = True
-            saw_eof = True
-            break
-        if wpid == pid:
-            reaped = True
-            saw_eof = True
-            break
-        time.sleep(0.05)
+    reaped = reap(time.time() + 2)
+eof_until = time.time() + 2
+while time.time() < eof_until and not saw_eof:
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        saw_eof = True
+        break
+    if not chunk:
+        saw_eof = True
+        break
+    out += chunk
 sys.stdout.buffer.write(out)
 sys.exit(0 if saw_dcs and saw_ok and reaped and saw_eof else 1)
 "#,

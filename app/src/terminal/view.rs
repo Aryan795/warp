@@ -15306,9 +15306,24 @@ impl TerminalView {
                     locked.register_session_id(claim.session_id);
                     locked.set_login_shell_spawned(claim.shell_type);
                 }
-                if runtime.control_pane_owns_retained_init(&claim.pane_id)
-                    || runtime.early_init_session_id(&claim.pane_id) == Some(claim.session_id)
-                {
+                if runtime.pane_bootstrap_ready(&claim.pane_id) {
+                    continue;
+                }
+                if runtime.control_pane_owns_retained_init(&claim.pane_id) {
+                    Self::schedule_tmux_pane_bootstrap_timeout(&runtime, &claim.pane_id, ctx);
+                    continue;
+                }
+                if runtime.early_init_session_id(&claim.pane_id) == Some(claim.session_id) {
+                    let bytes = crate::terminal::tmux::protocol::stage_complete_script(
+                        claim.shell_type,
+                        claim.session_id,
+                    );
+                    let pane = crate::terminal::tmux::parser::PaneId::from(claim.pane_id.as_str());
+                    for command in
+                        crate::terminal::tmux::protocol::send_keys_commands(&pane, &bytes)
+                    {
+                        self.write_tmux_control_command(command.into_bytes(), ctx);
+                    }
                     Self::schedule_tmux_pane_bootstrap_timeout(&runtime, &claim.pane_id, ctx);
                     continue;
                 }
@@ -15324,6 +15339,7 @@ impl TerminalView {
                 }
                 Self::schedule_tmux_pane_bootstrap_timeout(&runtime, &claim.pane_id, ctx);
             }
+            self.flush_pending_tmux_silent_bootstrap(&runtime, ctx);
         }
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
         {
