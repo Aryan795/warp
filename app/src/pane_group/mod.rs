@@ -176,6 +176,8 @@ use crate::{cmd_or_ctrl_shift, send_telemetry_from_ctx};
 
 mod ambient_pane_restoration;
 mod child_agent;
+#[cfg(feature = "local_tty")]
+mod dev_container;
 pub(crate) use child_agent::materialization::{
     ChildPaneMaterialization, decide_child_pane_materialization,
 };

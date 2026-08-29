@@ -1772,6 +1772,11 @@ pub enum Event {
     },
     OpenCodeReviewPane(CodeReviewPanelArg),
     ToggleCodeReviewPane(CodeReviewPanelArg),
+    #[cfg(feature = "local_tty")]
+    StartDevContainerBuild {
+        workspace_folder: PathBuf,
+        config_file: PathBuf,
+    },
     InsertCodeReviewComments {
         repo_path: LocalOrRemotePath,
         comments: Vec<PendingImportedReviewComment>,
@@ -2890,6 +2895,8 @@ pub struct TerminalView {
     /// A passive orchestration child whose live execution session could not
     /// be joined. Task refresh may later replace this with a transcript.
     orchestration_child_live_unavailable: bool,
+    #[cfg(feature = "local_tty")]
+    dev_container_build: Option<ModelHandle<dev_container::operation::DevContainerBuildOperation>>,
 
     /// Conversation details panel (side panel showing conversation/task metadata).
     /// Available for cloud Oz runs and for any active local AI conversation.
@@ -4472,6 +4479,8 @@ impl TerminalView {
             conversation_details_panel_auto_open_policy: Default::default(),
             pending_cloud_followup_task_id: None,
             orchestration_child_live_unavailable: false,
+            #[cfg(feature = "local_tty")]
+            dev_container_build: None,
             conversation_details_panel_toggle_mouse_state: Default::default(),
             ambient_agent_cancel_mouse_state: Default::default(),
             active_init_project_model: None,

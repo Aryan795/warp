@@ -12,7 +12,7 @@
 #[cfg(feature = "local_tty")]
 mod newline;
 #[cfg(feature = "local_tty")]
-mod operation;
+pub(crate) mod operation;
 #[cfg(feature = "local_tty")]
 pub(crate) mod registry;
 #[cfg(feature = "local_tty")]
@@ -254,47 +254,21 @@ impl TerminalView {
         config_path: PathBuf,
         ctx: &mut ViewContext<Self>,
     ) {
-        self.show_dev_container_toast(
-            format!(
-                "Building dev container for {}… this can take a few minutes.",
-                workspace_folder.display()
-            ),
-            ToastFlavor::Default,
-            ctx,
-        );
+        ctx.emit(super::Event::StartDevContainerBuild {
+            workspace_folder,
+            config_file: config_path,
+        });
+    }
 
-        let devcontainer_cli_future = resolve_devcontainer_cli_path(ctx);
-        let docker_cli_future = resolve_docker_cli_path(ctx);
-        ctx.spawn(
-            async move { (devcontainer_cli_future.await, docker_cli_future.await) },
-            move |me, (devcontainer_path, docker_path), ctx| {
-                let Some(devcontainer_path) = devcontainer_path else {
-                    me.show_dev_container_toast(
-                        "devcontainer CLI not found on PATH. Install it with \
-                         `npm install -g @devcontainers/cli` and try again."
-                            .to_owned(),
-                        ToastFlavor::Error,
-                        ctx,
-                    );
-                    return;
-                };
-                let Some(docker_path) = docker_path else {
-                    me.show_dev_container_toast(
-                        "docker CLI not found on PATH.".to_owned(),
-                        ToastFlavor::Error,
-                        ctx,
-                    );
-                    return;
-                };
-                me.bring_up_dev_container(
-                    workspace_folder,
-                    config_path,
-                    devcontainer_path,
-                    docker_path,
-                    ctx,
-                );
-            },
-        );
+    #[cfg(feature = "local_tty")]
+    pub(crate) fn bind_dev_container_build(
+        &mut self,
+        operation: warpui::ModelHandle<operation::DevContainerBuildOperation>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.dev_container_build = Some(operation);
+        self.model.lock().start_commandless_output_block();
+        ctx.notify();
     }
 
     /// Runs `devcontainer up` for `workspace_folder` against `config_path`. Only opens a pane

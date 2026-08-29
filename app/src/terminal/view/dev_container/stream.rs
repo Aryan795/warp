@@ -3,7 +3,6 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use async_process::Child;
 use command::r#async::Command;
 use futures_util::future::try_join;
 use futures_util::io::AsyncReadExt;
@@ -18,11 +17,11 @@ pub(crate) struct DevContainerUpStdout {
     pub oversized: bool,
 }
 
-pub(crate) fn spawn_dev_container_up(
+pub(crate) fn dev_container_up_command(
     cli: &Path,
     workspace_folder: &Path,
     config_file: &Path,
-) -> io::Result<Child> {
+) -> Command {
     let mut command = Command::new_with_process_group(cli);
     command
         .arg("up")
@@ -35,7 +34,7 @@ pub(crate) fn spawn_dev_container_up(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    command.spawn()
+    command
 }
 
 pub(crate) fn terminate_process_group(process_group_id: u32) {

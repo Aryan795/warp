@@ -1496,6 +1496,18 @@ fn handle_terminal_view_event(
             Event::StopAgentConversation { conversation_id } => {
                 stop_agent_conversation(group, *conversation_id, ctx);
             }
+            #[cfg(feature = "local_tty")]
+            Event::StartDevContainerBuild {
+                workspace_folder,
+                config_file,
+            } => {
+                group.start_dev_container_build(
+                    pane_id,
+                    workspace_folder.clone(),
+                    config_file.clone(),
+                    ctx,
+                );
+            }
             Event::KillAgentConversation { conversation_id } => {
                 let source_terminal_view_id = group
                     .terminal_view_from_pane_id(terminal_pane_id, ctx)
