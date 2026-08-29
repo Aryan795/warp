@@ -12935,14 +12935,15 @@ impl TerminalView {
                         {
                             let pane = runtime.tracked_control_pane().or(fallback_pane);
                             if let Some(pane) = pane {
-                                let _ =
-                                    runtime.note_early_init_shell(&pane, session_id, shell_type);
-                                self.flush_pending_tmux_silent_bootstrap(&runtime, ctx);
+                                if let Some(accepted) =
+                                    runtime.note_early_init_shell(&pane, session_id, shell_type)
+                                {
+                                    self.flush_pending_tmux_silent_bootstrap(&runtime, ctx);
+                                    self.flush_queued_tmux_pane_bootstrap(accepted, ctx);
+                                }
                             } else {
                                 runtime.note_shell_type(shell_type);
-                            }
-                            if let Some(current) = runtime.shell_type() {
-                                self.flush_queued_tmux_pane_bootstrap(current, ctx);
+                                self.flush_queued_tmux_pane_bootstrap(shell_type, ctx);
                             }
                         }
                     }
@@ -15305,7 +15306,9 @@ impl TerminalView {
                     locked.register_session_id(claim.session_id);
                     locked.set_login_shell_spawned(claim.shell_type);
                 }
-                if runtime.control_pane_owns_retained_init(&claim.pane_id) {
+                if runtime.control_pane_owns_retained_init(&claim.pane_id)
+                    || runtime.early_init_session_id(&claim.pane_id) == Some(claim.session_id)
+                {
                     Self::schedule_tmux_pane_bootstrap_timeout(&runtime, &claim.pane_id, ctx);
                     continue;
                 }
@@ -15437,10 +15440,11 @@ impl TerminalView {
                 use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
                 if let Some(id) = instance_id
                     && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
+                    && let Some(accepted) =
+                        runtime.note_early_init_shell(&pane_id, session_id, shell_type)
                 {
-                    let _ = runtime.note_early_init_shell(&pane_id, session_id, shell_type);
                     self.flush_pending_tmux_silent_bootstrap(&runtime, ctx);
-                    self.flush_queued_tmux_pane_bootstrap(shell_type, ctx);
+                    self.flush_queued_tmux_pane_bootstrap(accepted, ctx);
                 }
             }
             #[cfg(feature = "remote_tty")]

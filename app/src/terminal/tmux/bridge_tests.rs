@@ -1042,7 +1042,9 @@ fn timeout_clears_accepted_init_shell_so_recovery_does_not_reuse_it() {
 }
 
 fn skips_in_band_staging(runtime: &TmuxRuntime, pane_id: &str) -> bool {
-    runtime.pane_bootstrap_ready(pane_id) || runtime.control_pane_owns_retained_init(pane_id)
+    runtime.pane_bootstrap_ready(pane_id)
+        || runtime.control_pane_owns_retained_init(pane_id)
+        || runtime.early_init_session_id(pane_id) == runtime.pane_bootstrap_session_id(pane_id)
 }
 
 fn record_retained_zsh_init(
@@ -1134,7 +1136,8 @@ fn bash_or_fish_bind_does_not_own_retained_init(shell: ShellType) {
     );
     assert!(!runtime.control_pane_owns_retained_init("%0"));
     runtime.begin_pane_bootstrap("%0", sid(99)).expect("stage");
-    assert!(!skips_in_band_staging(&runtime, "%0"));
+    assert!(!runtime.control_pane_owns_retained_init("%0"));
+    assert!(skips_in_band_staging(&runtime, "%0"));
     assert_eq!(runtime.on_stage_complete("%0", sid(7)), Some(shell));
     assert!(runtime.pane_bootstrap_ready("%0"));
     assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
@@ -1172,6 +1175,85 @@ fn pane_unregister_clears_retained_zsh_init_ownership() {
     assert!(runtime.control_pane_owns_retained_init("%0"));
     runtime.unregister_pane("%0");
     assert!(!runtime.control_pane_owns_retained_init("%0"));
+}
+
+#[test]
+fn rejected_hook_does_not_overwrite_shell_type_or_claims() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(sid(7));
+    runtime.begin_pane_bootstrap("%0", sid(7)).expect("stage");
+    assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
+    assert!(
+        runtime
+            .note_early_init_shell("%0", sid(99), ShellType::Bash)
+            .is_none()
+    );
+    assert_eq!(runtime.shell_type(), Some(ShellType::Zsh));
+    assert!(runtime.early_init_session_id("%0").is_none());
+    assert_eq!(runtime.bootstrap_script_count("%0"), 0);
+    assert!(runtime.take_pending_silent_bootstrap().is_empty());
+    assert!(!runtime.pane_bootstrap_ready("%0"));
+}
+
+#[test]
+fn non_control_pane_staging_hook_reaches_ready_once() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(sid(1));
+    runtime
+        .begin_pane_bootstrap("%1", sid(2))
+        .expect("stage second pane");
+    assert_eq!(
+        runtime.note_early_init_shell("%1", sid(2), ShellType::Zsh),
+        Some(ShellType::Zsh)
+    );
+    assert_eq!(
+        runtime.on_stage_complete("%1", sid(2)),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%1"));
+    assert_eq!(runtime.bootstrap_script_count("%1"), 1);
+    assert_eq!(runtime.take_pending_silent_bootstrap().len(), 1);
+    assert!(
+        runtime
+            .note_early_init_shell("%1", sid(1), ShellType::Bash)
+            .is_none()
+    );
+    assert!(
+        runtime
+            .note_early_init_shell("%1", sid(99), ShellType::Bash)
+            .is_none()
+    );
+    assert_eq!(runtime.shell_type(), Some(ShellType::Zsh));
+    assert!(runtime.on_stage_complete("%1", sid(2)).is_none());
+    assert_eq!(runtime.bootstrap_script_count("%1"), 1);
+    assert!(runtime.take_pending_silent_bootstrap().is_empty());
+}
+
+#[test]
+fn init_shell_before_ack_does_not_terminate_runtime() {
+    let runtime = TmuxRuntime::new();
+    let id = runtime.id();
+    record_retained_zsh_init(&runtime, "%0", sid(7));
+    assert!(runtime.begin_pane_bootstrap("%0", sid(99)).is_none());
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(7), ShellType::Zsh),
+        Some(ShellType::Zsh)
+    );
+    let claims = runtime.set_authoritative_shell_type(ShellType::Zsh);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].session_id, sid(7));
+    assert!(skips_in_band_staging(&runtime, "%0"));
+    assert_eq!(runtime.early_init_session_id("%0"), Some(sid(7)));
+    assert!(!runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.bootstrap_script_count("%0"), 0);
+    assert!(runtime.take_pending_silent_bootstrap().is_empty());
+    assert!(TmuxRuntime::for_id(id).is_some());
+    assert_eq!(runtime.tracked_control_pane().as_deref(), Some("%0"));
+    runtime.unregister();
 }
 
 #[test]

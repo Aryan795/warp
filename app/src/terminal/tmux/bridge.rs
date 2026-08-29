@@ -891,18 +891,6 @@ impl TmuxRuntime {
         shell_type: ShellType,
     ) -> Option<ShellType> {
         let mut inner = self.inner.lock();
-        if inner
-            .tracked_control_pane
-            .as_deref()
-            .is_some_and(|tracked| tracked != pane_id)
-        {
-            return None;
-        }
-        if inner.tracked_control_pane.as_deref() != Some(pane_id)
-            && !inner.panes.contains_key(pane_id)
-        {
-            return None;
-        }
         let matches_expected = inner.tracked_control_pane.as_deref() == Some(pane_id)
             && inner.tracked_expected_session == Some(session_id);
         let matches_staging = matches!(

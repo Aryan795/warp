@@ -689,7 +689,7 @@ fn zsh_retained_init_bytes_reach_prompt_without_quote_ps2() {
     std::fs::create_dir_all(&home).expect("zsh retained home");
     let runner = format!(
         r#"
-import os, pty, select, signal, sys, time
+import os, pty, select, signal, sys, termios, time
 zsh = {zsh:?}
 script = sys.stdin.buffer.read()
 pid, fd = pty.fork()
@@ -698,54 +698,80 @@ if pid == 0:
     os.environ["HOME"] = {home:?}
     os.environ.pop("HISTFILE", None)
     os.execv(zsh, [zsh, "--no-rcs", "-i"])
+attrs = termios.tcgetattr(fd)
+attrs[3] = attrs[3] & ~termios.ECHO
+termios.tcsetattr(fd, termios.TCSANOW, attrs)
 for i in range(0, len(script), 128):
     os.write(fd, script[i:i+128])
 out = b""
 deadline = time.time() + 6
-saw_hook = False
+saw_dcs = False
+saw_ok = False
+saw_eof = False
 while time.time() < deadline:
     ready, _, _ = select.select([fd], [], [], 0.2)
-    if ready:
-        try:
-            chunk = os.read(fd, 4096)
-        except OSError:
-            break
-        if not chunk:
-            break
-        out += chunk
-        if b"\x1bP$d" in out or b"InitShell" in out:
-            saw_hook = True
-            break
-if saw_hook:
-    os.write(fd, b"stty -echo 2>/dev/null || true\n")
+    if not ready:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        saw_eof = True
+        break
+    if not chunk:
+        saw_eof = True
+        break
+    out += chunk
+    if b"\x1bP$d" in out:
+        saw_dcs = True
+        break
+if saw_dcs:
     os.write(fd, b"printf 'WARP_INIT_OK\\n'\n")
     os.write(fd, b"exit\n")
     while time.time() < deadline:
         ready, _, _ = select.select([fd], [], [], 0.2)
-        if ready:
-            try:
-                chunk = os.read(fd, 4096)
-            except OSError:
-                break
-            if not chunk:
-                break
-            out += chunk
-            if b"WARP_INIT_OK" in out:
-                break
-living = True
-while living and time.time() < deadline:
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            saw_eof = True
+            break
+        if not chunk:
+            saw_eof = True
+            break
+        out += chunk
+        if b"WARP_INIT_OK" in out:
+            saw_ok = True
+            break
+reaped = False
+while time.time() < deadline:
     wpid, _ = os.waitpid(pid, os.WNOHANG)
     if wpid == pid:
-        living = False
+        reaped = True
+        saw_eof = True
         break
     time.sleep(0.05)
-if living:
-    os.kill(pid, signal.SIGKILL)
+if not reaped:
     try:
-        os.waitpid(pid, 0)
-    except ChildProcessError:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
         pass
+    except OSError:
+        pass
+    while time.time() < deadline:
+        try:
+            wpid, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            reaped = True
+            saw_eof = True
+            break
+        if wpid == pid:
+            reaped = True
+            saw_eof = True
+            break
+        time.sleep(0.05)
 sys.stdout.buffer.write(out)
+sys.exit(0 if saw_dcs and saw_ok and reaped and saw_eof else 1)
 "#,
         zsh = zsh.display(),
         home = home.display(),
@@ -766,6 +792,18 @@ sys.stdout.buffer.write(out)
     let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
     let text = String::from_utf8_lossy(&combined);
     assert!(
+        output.status.success(),
+        "python pty runner failed: {text:?}"
+    );
+    assert!(
+        combined.windows(4).any(|w| w == [0x1b, b'P', b'$', b'd']),
+        "retained zsh init must emit InitShell DCS: {text:?}"
+    );
+    assert!(
+        text.contains("WARP_INIT_OK"),
+        "non-echo completion marker missing: {text:?}"
+    );
+    assert!(
         !text.contains("quote>")
             && !text.contains("heredoc>")
             && !text.contains("function>")
@@ -775,10 +813,6 @@ sys.stdout.buffer.write(out)
     assert!(
         !text.contains("fc -p") && !text.contains("fc -P"),
         "retained zsh init must not inject in-band history setup: {text:?}"
-    );
-    assert!(
-        text.contains("InitShell") || text.contains("WARP_INIT_OK"),
-        "retained zsh init must emit InitShell and reach a prompt: {text:?}"
     );
 }
 
