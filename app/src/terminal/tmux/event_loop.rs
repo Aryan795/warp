@@ -489,6 +489,9 @@ where
             if let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(instance_id)) {
                 runtime.note_tracked_control_pane(pane_id.as_str());
                 runtime.set_tracked_expected_session(expected_session);
+                if zsh_init.is_some() {
+                    runtime.note_retained_zsh_init(pane_id.as_str(), expected_session);
+                }
             }
         }
 

@@ -19,6 +19,7 @@ fn runtime() -> TmuxRuntime {
             tracked_control_pane: None,
             control_incarnation: 0,
             tracked_expected_session: None,
+            retained_zsh_init: None,
             early_init_shell: HashMap::new(),
             early_stage_complete: HashMap::new(),
             pending_silent_bootstrap: VecDeque::new(),
@@ -712,6 +713,7 @@ fn assert_runtime_maps_cleared(runtime: &TmuxRuntime, pane_id: &str) {
     assert_eq!(runtime.bootstrap_script_count(pane_id), 0);
     assert!(runtime.tracked_control_pane().is_none());
     assert!(runtime.take_early_init_shell(pane_id).is_none());
+    assert!(!runtime.control_pane_owns_retained_init(pane_id));
 }
 
 #[test]
@@ -1039,13 +1041,135 @@ fn timeout_clears_accepted_init_shell_so_recovery_does_not_reuse_it() {
     assert_eq!(runtime.bootstrap_script_count("%0"), 1);
 }
 
+fn skips_in_band_staging(runtime: &TmuxRuntime, pane_id: &str) -> bool {
+    runtime.pane_bootstrap_ready(pane_id) || runtime.control_pane_owns_retained_init(pane_id)
+}
+
+fn record_retained_zsh_init(
+    runtime: &TmuxRuntime,
+    pane_id: &str,
+    session_id: warp_core::SessionId,
+) {
+    runtime.note_tracked_control_pane(pane_id);
+    runtime.set_tracked_expected_session(session_id);
+    runtime.note_retained_zsh_init(pane_id, session_id);
+}
+
 #[test]
-fn tracked_zsh_pane_owns_retained_init_not_in_band_staging() {
+fn retained_zsh_init_ownership_ignores_shell_type() {
     let runtime = runtime();
-    runtime.note_shell_type(ShellType::Zsh);
-    runtime.note_tracked_control_pane("%0");
+    record_retained_zsh_init(&runtime, "%0", sid(7));
     assert!(runtime.control_pane_owns_retained_init("%0"));
     assert!(!runtime.control_pane_owns_retained_init("%1"));
     runtime.note_shell_type(ShellType::Bash);
+    assert!(runtime.control_pane_owns_retained_init("%0"));
+    runtime.note_shell_type(ShellType::Zsh);
+    assert!(runtime.control_pane_owns_retained_init("%0"));
+}
+
+#[test]
+fn presentation_bind_before_initshell_skips_in_band_for_retained_zsh() {
+    let runtime = runtime();
+    record_retained_zsh_init(&runtime, "%0", sid(7));
+    assert_eq!(runtime.shell_type(), None);
+    assert!(runtime.control_pane_owns_retained_init("%0"));
+    assert!(runtime.begin_pane_bootstrap("%0", sid(99)).is_none());
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(7), ShellType::Zsh),
+        Some(ShellType::Zsh)
+    );
+    let claims = runtime.set_authoritative_shell_type(ShellType::Zsh);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].session_id, sid(7));
+    assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
+    assert!(skips_in_band_staging(&runtime, "%0"));
+    assert_eq!(runtime.bootstrap_script_count("%0"), 0);
+    assert_eq!(
+        runtime.on_stage_complete("%0", sid(7)),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert!(!runtime.control_pane_owns_retained_init("%0"));
+    assert!(runtime.on_stage_complete("%0", sid(7)).is_none());
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert!(runtime.begin_pane_bootstrap("%0", sid(7)).is_none());
+}
+
+#[test]
+fn presentation_bind_after_initshell_skips_in_band_for_retained_zsh() {
+    let runtime = runtime();
+    record_retained_zsh_init(&runtime, "%0", sid(7));
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(7), ShellType::Zsh),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.control_pane_owns_retained_init("%0"));
+    let claim = runtime.begin_pane_bootstrap("%0", sid(99)).expect("stage");
+    assert_eq!(claim.session_id, sid(7));
+    assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
+    assert!(skips_in_band_staging(&runtime, "%0"));
+    assert_eq!(runtime.bootstrap_script_count("%0"), 0);
+    assert_eq!(
+        runtime.on_stage_complete("%0", sid(7)),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert!(!runtime.control_pane_owns_retained_init("%0"));
+    assert!(runtime.on_stage_complete("%0", sid(7)).is_none());
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+}
+
+fn bash_or_fish_bind_does_not_own_retained_init(shell: ShellType) {
+    let runtime = runtime();
+    runtime.note_tracked_control_pane("%0");
+    runtime.set_tracked_expected_session(sid(7));
+    assert!(!runtime.control_pane_owns_retained_init("%0"));
+    assert_eq!(
+        runtime.note_early_init_shell("%0", sid(7), shell),
+        Some(shell)
+    );
+    assert!(!runtime.control_pane_owns_retained_init("%0"));
+    runtime.begin_pane_bootstrap("%0", sid(99)).expect("stage");
+    assert!(!skips_in_band_staging(&runtime, "%0"));
+    assert_eq!(runtime.on_stage_complete("%0", sid(7)), Some(shell));
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.bootstrap_stage_count("%0"), 1);
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+}
+
+#[test]
+fn bash_bind_does_not_own_retained_init() {
+    bash_or_fish_bind_does_not_own_retained_init(ShellType::Bash);
+}
+
+#[test]
+fn fish_bind_does_not_own_retained_init() {
+    bash_or_fish_bind_does_not_own_retained_init(ShellType::Fish);
+}
+
+#[test]
+fn timeout_clears_retained_zsh_init_ownership() {
+    let runtime = runtime();
+    record_retained_zsh_init(&runtime, "%0", sid(1));
+    runtime.note_shell_type(ShellType::Zsh);
+    let claim = runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
+    assert!(runtime.control_pane_owns_retained_init("%0"));
+    let BootstrapTimeoutResult::Retry(_) = runtime.handle_bootstrap_timeout("%0", claim.generation)
+    else {
+        panic!("expected retry");
+    };
+    assert!(!runtime.control_pane_owns_retained_init("%0"));
+}
+
+#[test]
+fn pane_unregister_clears_retained_zsh_init_ownership() {
+    let runtime = runtime();
+    record_retained_zsh_init(&runtime, "%0", sid(1));
+    assert!(runtime.control_pane_owns_retained_init("%0"));
+    runtime.unregister_pane("%0");
     assert!(!runtime.control_pane_owns_retained_init("%0"));
 }

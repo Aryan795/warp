@@ -841,6 +841,7 @@ fn silent_zsh_script(body: &[u8]) -> Vec<u8> {
     // painted. INT/TERM still restores echo because the epilogue may not run.
     let mut wrapped = br"stty -echo 2>/dev/null || true
 if [[ -o banghist ]]; then typeset __warp_banghist=1; else typeset __warp_banghist=0; fi
+if [[ -o histfcntllock ]]; then typeset __warp_hist_fcntl=1; else typeset __warp_hist_fcntl=0; fi
 if (( ${+HISTFILE} )); then typeset __warp_histfile=$HISTFILE; typeset __warp_histfile_set=1; else typeset __warp_histfile_set=0; fi
 if (( ${+SAVEHIST} )); then typeset __warp_savehist=$SAVEHIST; typeset __warp_savehist_set=1; else typeset __warp_savehist_set=0; fi
 __warp_silent_cleanup() {
@@ -849,7 +850,8 @@ __warp_silent_cleanup() {
   if (( __warp_histfile_set )); then HISTFILE=$__warp_histfile; else unset HISTFILE; fi
   if (( __warp_savehist_set )); then SAVEHIST=$__warp_savehist; else unset SAVEHIST; fi
   if (( __warp_banghist )); then setopt BANG_HIST; else unsetopt BANG_HIST; fi
-  unset __warp_histfile __warp_histfile_set __warp_savehist __warp_savehist_set __warp_banghist
+  if (( __warp_hist_fcntl )); then setopt HIST_FCNTL_LOCK 2>/dev/null || true; else unsetopt HIST_FCNTL_LOCK 2>/dev/null || true; fi
+  unset __warp_histfile __warp_histfile_set __warp_savehist __warp_savehist_set __warp_banghist __warp_hist_fcntl
   unfunction __warp_silent_cleanup 2>/dev/null || true
   stty echo 2>/dev/null || true
 }
@@ -870,7 +872,8 @@ SAVEHIST=0
   if (( __warp_histfile_set )); then HISTFILE=$__warp_histfile; else unset HISTFILE; fi
   if (( __warp_savehist_set )); then SAVEHIST=$__warp_savehist; else unset SAVEHIST; fi
   if (( __warp_banghist )); then setopt BANG_HIST; else unsetopt BANG_HIST; fi
-  unset __warp_histfile __warp_histfile_set __warp_savehist __warp_savehist_set __warp_banghist __warp_silent_cleaned
+  if (( __warp_hist_fcntl )); then setopt HIST_FCNTL_LOCK 2>/dev/null || true; else unsetopt HIST_FCNTL_LOCK 2>/dev/null || true; fi
+  unset __warp_histfile __warp_histfile_set __warp_savehist __warp_savehist_set __warp_banghist __warp_hist_fcntl __warp_silent_cleaned
   unfunction __warp_silent_cleanup 2>/dev/null || true
 else
   unset __warp_silent_cleaned

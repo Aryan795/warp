@@ -724,10 +724,13 @@ fn silent_bootstrap_framing_hides_setup_and_clears_before_prompt() {
     let clear = text.rfind("printf").expect("clear");
     let echo_on = text.rfind("stty echo").expect("echo restore");
     assert!(text.contains("setopt NO_BANG_HIST"));
+    let fcntl_snap = text.find("__warp_hist_fcntl").expect("fcntl snapshot");
     let fcntl = text
         .find("unsetopt HIST_FCNTL_LOCK")
         .expect("fcntl lock off");
+    assert!(fcntl_snap < fcntl);
     assert!(fcntl < hist);
+    assert!(text.contains("if (( __warp_hist_fcntl )); then setopt HIST_FCNTL_LOCK"));
     assert!(text.contains("__warp_histfile_set"));
     assert!(text.contains("__warp_banghist"));
     assert!(text.contains("(( ${+__warp_silent_cleaned} )) && return"));
@@ -1074,8 +1077,8 @@ sys.stdout.buffer.write(out)
 #[test]
 fn zsh_silent_restores_unset_hist_and_banghist_on() {
     let Some(text) = zsh_silent_probe(
-        b"unsetopt BANG_HIST\nsetopt BANG_HIST\nunset HISTFILE\nunset SAVEHIST\n",
-        b"[[ -o banghist ]] && echo BANG_ON || echo BANG_OFF\n[[ -v HISTFILE ]] && echo HIST_SET || echo HIST_UNSET\n[[ -v SAVEHIST ]] && echo SAVE_SET || echo SAVE_UNSET\n",
+        b"unsetopt BANG_HIST\nsetopt BANG_HIST\nsetopt HIST_FCNTL_LOCK\nunset HISTFILE\nunset SAVEHIST\n",
+        b"[[ -o banghist ]] && echo BANG_ON || echo BANG_OFF\n[[ -o histfcntllock ]] && echo FCNTL_ON || echo FCNTL_OFF\n[[ -v HISTFILE ]] && echo HIST_SET || echo HIST_UNSET\n[[ -v SAVEHIST ]] && echo SAVE_SET || echo SAVE_UNSET\n[[ -v __warp_hist_fcntl ]] && echo FCNTL_VAR_SET || echo FCNTL_VAR_UNSET\n",
     ) else {
         return;
     };
@@ -1086,6 +1089,14 @@ fn zsh_silent_restores_unset_hist_and_banghist_on() {
     assert!(
         text.contains("BANG_ON"),
         "BANG_HIST must be restored on: {text:?}"
+    );
+    assert!(
+        text.contains("FCNTL_ON"),
+        "HIST_FCNTL_LOCK must be restored on: {text:?}"
+    );
+    assert!(
+        text.contains("FCNTL_VAR_UNSET"),
+        "fcntl snapshot must be unset: {text:?}"
     );
     assert!(
         text.contains("HIST_UNSET"),
@@ -1101,8 +1112,8 @@ fn zsh_silent_restores_unset_hist_and_banghist_on() {
 #[test]
 fn zsh_silent_restores_set_hist_and_banghist_off() {
     let Some(text) = zsh_silent_probe(
-        b"unsetopt BANG_HIST\nHISTFILE=/tmp/warp-silent-hist\nSAVEHIST=42\n",
-        b"[[ -o banghist ]] && echo BANG_ON || echo BANG_OFF\n[[ -v HISTFILE ]] && echo HIST_SET:$HISTFILE || echo HIST_UNSET\n[[ -v SAVEHIST ]] && echo SAVE_SET:$SAVEHIST || echo SAVE_UNSET\n",
+        b"unsetopt BANG_HIST\nunsetopt HIST_FCNTL_LOCK\nHISTFILE=/tmp/warp-silent-hist\nSAVEHIST=42\n",
+        b"[[ -o banghist ]] && echo BANG_ON || echo BANG_OFF\n[[ -o histfcntllock ]] && echo FCNTL_ON || echo FCNTL_OFF\n[[ -v HISTFILE ]] && echo HIST_SET:$HISTFILE || echo HIST_UNSET\n[[ -v SAVEHIST ]] && echo SAVE_SET:$SAVEHIST || echo SAVE_UNSET\n[[ -v __warp_hist_fcntl ]] && echo FCNTL_VAR_SET || echo FCNTL_VAR_UNSET\n",
     ) else {
         return;
     };
@@ -1113,6 +1124,14 @@ fn zsh_silent_restores_set_hist_and_banghist_off() {
     assert!(
         text.contains("BANG_OFF"),
         "BANG_HIST must stay off: {text:?}"
+    );
+    assert!(
+        text.contains("FCNTL_OFF"),
+        "HIST_FCNTL_LOCK must stay off: {text:?}"
+    );
+    assert!(
+        text.contains("FCNTL_VAR_UNSET"),
+        "fcntl snapshot must be unset: {text:?}"
     );
     assert!(
         text.contains("HIST_SET:/tmp/warp-silent-hist"),
@@ -1218,8 +1237,8 @@ sys.stdout.buffer.write(out)
 fn assert_zsh_silent_signal_restored(signum: i32, name: &str) {
     let Some(text) = zsh_silent_signal_probe(
         signum,
-        b"unsetopt BANG_HIST\nsetopt BANG_HIST\nunset HISTFILE\nunset SAVEHIST\n",
-        b"[[ -o banghist ]] && echo BANG_ON || echo BANG_OFF\n[[ -v HISTFILE ]] && echo HIST_SET || echo HIST_UNSET\n[[ -v SAVEHIST ]] && echo SAVE_SET || echo SAVE_UNSET\n",
+        b"unsetopt BANG_HIST\nsetopt BANG_HIST\nsetopt HIST_FCNTL_LOCK\nunset HISTFILE\nunset SAVEHIST\n",
+        b"[[ -o banghist ]] && echo BANG_ON || echo BANG_OFF\n[[ -o histfcntllock ]] && echo FCNTL_ON || echo FCNTL_OFF\n[[ -v HISTFILE ]] && echo HIST_SET || echo HIST_UNSET\n[[ -v SAVEHIST ]] && echo SAVE_SET || echo SAVE_UNSET\n[[ -v __warp_hist_fcntl ]] && echo FCNTL_VAR_SET || echo FCNTL_VAR_UNSET\n",
     ) else {
         return;
     };
@@ -1243,6 +1262,14 @@ fn assert_zsh_silent_signal_restored(signum: i32, name: &str) {
     assert!(
         text.contains("BANG_ON"),
         "{name}: BANG_HIST must be restored on: {text:?}"
+    );
+    assert!(
+        text.contains("FCNTL_ON"),
+        "{name}: HIST_FCNTL_LOCK must be restored on: {text:?}"
+    );
+    assert!(
+        text.contains("FCNTL_VAR_UNSET"),
+        "{name}: fcntl snapshot must be unset: {text:?}"
     );
     assert!(
         text.contains("HIST_UNSET"),

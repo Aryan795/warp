@@ -423,6 +423,40 @@ fn bound_pane_writes_retained_zsh_init_send_keys_exactly_once() {
     );
 }
 
+#[test]
+fn bound_pane_records_retained_zsh_init_ownership_before_write() {
+    use crate::terminal::tmux::bridge::TmuxRuntime;
+
+    let runtime = TmuxRuntime::new();
+    let script = "WARP_ZSH_INIT_MARKER".to_owned();
+    let init_bytes = zsh_init_bytes(&script, ShellType::Zsh, SessionId::from(7));
+    let encoded = send_keys_commands(&PaneId::from("%0"), &init_bytes);
+    let expected: Vec<u8> = encoded.iter().flat_map(|c| c.as_bytes()).copied().collect();
+    let mut control = CONTROL_MODE_DCS.to_vec();
+    control.extend_from_slice(b"%window-pane-changed @0 %0\n");
+    let mut harness = start_loop_with(
+        None,
+        None,
+        Some((script, ShellType::Zsh, SessionId::from(7))),
+        control,
+    );
+    harness
+        .model
+        .lock()
+        .set_tmux_instance_id(Some(runtime.id().as_u64()));
+    let mut peer = harness.peer.take().expect("peer");
+    peer.write_all(&[1]).expect("wake readable");
+    wait_for_written(&harness.written, &expected);
+    assert!(runtime.control_pane_owns_retained_init("%0"));
+    assert!(!runtime.control_pane_owns_retained_init("%1"));
+    harness
+        .sender
+        .send(Message::Shutdown)
+        .expect("send shutdown");
+    join_loop(harness.handle);
+    runtime.unregister();
+}
+
 fn octal_escape_output(bytes: &[u8]) -> String {
     let mut out = String::new();
     for &b in bytes {

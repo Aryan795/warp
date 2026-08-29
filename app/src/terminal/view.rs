@@ -15305,6 +15305,10 @@ impl TerminalView {
                     locked.register_session_id(claim.session_id);
                     locked.set_login_shell_spawned(claim.shell_type);
                 }
+                if runtime.control_pane_owns_retained_init(&claim.pane_id) {
+                    Self::schedule_tmux_pane_bootstrap_timeout(&runtime, &claim.pane_id, ctx);
+                    continue;
+                }
                 let Some(bytes) = crate::terminal::tmux::protocol::in_band_init_bytes(
                     claim.shell_type,
                     claim.session_id,

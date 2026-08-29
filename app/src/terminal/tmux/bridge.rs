@@ -116,6 +116,7 @@ struct Inner {
     tracked_control_pane: Option<String>,
     control_incarnation: u64,
     tracked_expected_session: Option<SessionId>,
+    retained_zsh_init: Option<(String, SessionId)>,
     early_init_shell: HashMap<String, (SessionId, u64)>,
     early_stage_complete: HashMap<String, SessionId>,
     pending_silent_bootstrap: VecDeque<(String, ShellType)>,
@@ -171,6 +172,7 @@ impl TmuxRuntime {
                 tracked_control_pane: None,
                 control_incarnation: 0,
                 tracked_expected_session: None,
+                retained_zsh_init: None,
                 early_init_shell: HashMap::new(),
                 early_stage_complete: HashMap::new(),
                 pending_silent_bootstrap: VecDeque::new(),
@@ -264,6 +266,7 @@ impl TmuxRuntime {
             inner.tracked_control_pane = None;
             inner.control_incarnation = 0;
             inner.tracked_expected_session = None;
+            Self::clear_retained_zsh_init_locked(&mut inner, None);
             inner.early_init_shell.clear();
             inner.early_stage_complete.clear();
             inner.pending_silent_bootstrap.clear();
@@ -309,6 +312,7 @@ impl TmuxRuntime {
                 .pane_bootstrap
                 .remove(pane_id)
                 .map(|entry| entry.session_id());
+            Self::clear_retained_zsh_init_locked(&mut inner, Some(pane_id));
             inner.early_init_shell.remove(pane_id);
             inner.early_stage_complete.remove(pane_id);
             inner
@@ -623,6 +627,7 @@ impl TmuxRuntime {
         )?;
         inner.early_init_shell.remove(pane_id);
         inner.early_stage_complete.remove(pane_id);
+        Self::clear_retained_zsh_init_locked(inner, Some(pane_id));
         let model = inner.panes.get(pane_id).map(|sink| sink.model.clone());
         Some((shell_type, staged_id, model))
     }
@@ -717,6 +722,7 @@ impl TmuxRuntime {
             return BootstrapTimeoutResult::Stale;
         };
         inner.tracked_expected_session = None;
+        Self::clear_retained_zsh_init_locked(&mut inner, Some(pane_id));
         inner.early_stage_complete.remove(pane_id);
         inner.early_init_shell.remove(pane_id);
         if retried {
@@ -811,6 +817,7 @@ impl TmuxRuntime {
         if inner.tracked_control_pane.as_deref() == Some(pane_id) {
             return;
         }
+        Self::clear_retained_zsh_init_locked(&mut inner, None);
         inner.tracked_control_pane = Some(pane_id.to_owned());
         inner.control_incarnation = next_control_incarnation(inner.control_incarnation);
     }
@@ -818,6 +825,13 @@ impl TmuxRuntime {
     pub fn set_tracked_expected_session(&self, session_id: SessionId) {
         let mut inner = self.inner.lock();
         if inner.tracked_control_pane.is_some() {
+            if inner
+                .retained_zsh_init
+                .as_ref()
+                .is_some_and(|(_, owned)| *owned != session_id)
+            {
+                inner.retained_zsh_init = None;
+            }
             inner.tracked_expected_session = Some(session_id);
         }
     }
@@ -826,9 +840,41 @@ impl TmuxRuntime {
         self.inner.lock().tracked_control_pane.clone()
     }
 
+    pub fn note_retained_zsh_init(&self, pane_id: &str, session_id: SessionId) {
+        let mut inner = self.inner.lock();
+        if inner.tracked_control_pane.as_deref() != Some(pane_id) {
+            return;
+        }
+        inner.retained_zsh_init = Some((pane_id.to_owned(), session_id));
+    }
+
     pub fn control_pane_owns_retained_init(&self, pane_id: &str) -> bool {
-        self.tracked_control_pane().as_deref() == Some(pane_id)
-            && self.shell_type() == Some(ShellType::Zsh)
+        let inner = self.inner.lock();
+        Self::owns_retained_init_locked(&inner, pane_id)
+    }
+
+    fn owns_retained_init_locked(inner: &Inner, pane_id: &str) -> bool {
+        let Some((owned_pane, owned_session)) = inner.retained_zsh_init.as_ref() else {
+            return false;
+        };
+        owned_pane == pane_id
+            && inner.tracked_control_pane.as_deref() == Some(pane_id)
+            && inner.tracked_expected_session == Some(*owned_session)
+    }
+
+    fn clear_retained_zsh_init_locked(inner: &mut Inner, pane_id: Option<&str>) {
+        match pane_id {
+            Some(pane_id) => {
+                if inner
+                    .retained_zsh_init
+                    .as_ref()
+                    .is_some_and(|(owned, _)| owned == pane_id)
+                {
+                    inner.retained_zsh_init = None;
+                }
+            }
+            None => inner.retained_zsh_init = None,
+        }
     }
 
     pub fn bootstrap_failed_client_event() -> TmuxClientEvent {
