@@ -12920,13 +12920,17 @@ impl TerminalView {
                     #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
                     {
                         use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
-                        if let Some(id) = self.model.lock().tmux_instance_id()
+                        let instance_id = self.model.lock().tmux_instance_id();
+                        let fallback_pane = self.model.lock().tmux_pane_id().map(str::to_owned);
+                        if let Some(id) = instance_id
                             && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
                         {
-                            if let Some(pane) = runtime.tracked_control_pane() {
-                                runtime.note_early_init_shell(&pane, session_id);
-                            } else if let Some(pane) = self.model.lock().tmux_pane_id() {
-                                runtime.note_early_init_shell(pane, session_id);
+                            let pane = runtime.tracked_control_pane().or(fallback_pane);
+                            if let Some(pane) = pane
+                                && let Some(completed) =
+                                    runtime.note_early_init_shell(&pane, session_id)
+                            {
+                                self.write_tmux_silent_pane_bootstrap(&pane, completed, ctx);
                             }
                             runtime.note_shell_type(shell_type);
                         }
@@ -15362,6 +15366,20 @@ impl TerminalView {
                 ]));
             }
             BootstrapTimeoutResult::Stale => {}
+        }
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn write_tmux_silent_pane_bootstrap(
+        &mut self,
+        pane_id: &str,
+        shell_type: ShellType,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let framed = crate::terminal::tmux::protocol::silent_bootstrap_bytes(shell_type);
+        let pane = crate::terminal::tmux::parser::PaneId::from(pane_id);
+        for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &framed) {
+            self.write_tmux_control_command(command.into_bytes(), ctx);
         }
     }
 

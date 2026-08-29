@@ -505,6 +505,16 @@ impl TmuxRuntime {
 
     pub fn on_init_shell(&self, pane_id: &str, session_id: SessionId) -> Option<ShellType> {
         let mut inner = self.inner.lock();
+        Self::complete_staging_to_ready_locked(&mut inner, pane_id, session_id, false)
+            .map(|(shell, _)| shell)
+    }
+
+    fn complete_staging_to_ready_locked(
+        inner: &mut Inner,
+        pane_id: &str,
+        session_id: SessionId,
+        accept_mismatch: bool,
+    ) -> Option<(ShellType, SessionId)> {
         let (generation, staged_id) = match inner.pane_bootstrap.get(pane_id) {
             Some(PaneBootstrapEntry::Staging {
                 generation,
@@ -513,7 +523,7 @@ impl TmuxRuntime {
             }) => (*generation, *staged_id),
             _ => return None,
         };
-        if staged_id != session_id {
+        if staged_id != session_id && !accept_mismatch {
             return None;
         }
         let shell_type = inner.shell_type?;
@@ -528,7 +538,7 @@ impl TmuxRuntime {
             .bootstrap_script_count
             .entry(pane_id.to_owned())
             .or_insert(0) += 1;
-        Some(shell_type)
+        Some((shell_type, staged_id))
     }
 
     pub fn arm_bootstrap_timeout(&self, pane_id: &str) -> Option<(u64, Duration)> {
@@ -663,11 +673,33 @@ impl TmuxRuntime {
         TmuxClientEvent::PresentationUnready
     }
 
-    pub fn note_early_init_shell(&self, pane_id: &str, session_id: SessionId) {
-        self.inner
-            .lock()
-            .early_init_shell
-            .insert(pane_id.to_owned(), session_id);
+    pub fn note_early_init_shell(&self, pane_id: &str, session_id: SessionId) -> Option<ShellType> {
+        let (shell_type, staged_id, model) = {
+            let mut inner = self.inner.lock();
+            inner
+                .early_init_shell
+                .insert(pane_id.to_owned(), session_id);
+            if inner
+                .tracked_control_pane
+                .as_deref()
+                .is_some_and(|tracked| tracked != pane_id)
+            {
+                return None;
+            }
+            let (shell_type, staged_id) =
+                Self::complete_staging_to_ready_locked(&mut inner, pane_id, session_id, true)?;
+            inner.early_init_shell.remove(pane_id);
+            let model = inner.panes.get(pane_id).map(|sink| sink.model.clone());
+            (shell_type, staged_id, model)
+        };
+        if let Some(model) = model {
+            let mut locked = model.lock();
+            if staged_id != session_id {
+                locked.unregister_session_id(staged_id);
+            }
+            locked.register_session_id(session_id);
+        }
+        Some(shell_type)
     }
 
     pub fn early_init_session_id(&self, pane_id: &str) -> Option<SessionId> {

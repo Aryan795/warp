@@ -431,6 +431,63 @@ fn tracked_control_pane_hands_off_early_init_shell() {
 }
 
 #[test]
+fn late_tracked_init_shell_completes_staged_pane_without_retry() {
+    use crate::terminal::model::ansi::Handler as _;
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    let model = Arc::new(FairMutex::new(crate::terminal::TerminalModel::mock(
+        None, None,
+    )));
+    runtime.register_pane("%0", model.clone());
+    let minted = sid(99);
+    let retained = sid(11);
+    let claim = runtime
+        .begin_pane_bootstrap("%0", minted)
+        .expect("stage first");
+    assert_eq!(claim.session_id, minted);
+    runtime.apply_claim_session(&claim);
+    let armed = runtime.arm_bootstrap_timeout("%0").expect("arm timer");
+    assert_eq!(armed.0, claim.generation);
+    assert_eq!(
+        runtime.note_early_init_shell("%0", retained),
+        Some(ShellType::Zsh)
+    );
+    assert!(runtime.pane_bootstrap_ready("%0"));
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert_eq!(runtime.pane_bootstrap_session_id("%0"), Some(retained));
+    assert!(!model.lock().is_registered_session(minted));
+    assert!(model.lock().is_registered_session(retained));
+    assert!(matches!(
+        runtime.handle_bootstrap_timeout("%0", claim.generation),
+        BootstrapTimeoutResult::Stale
+    ));
+    assert!(runtime.begin_pane_bootstrap("%0", sid(3)).is_none());
+    assert!(runtime.note_early_init_shell("%0", retained).is_none());
+    assert_eq!(runtime.bootstrap_script_count("%0"), 1);
+    assert!(runtime.complete_if_early_init_shell("%0").is_none());
+}
+
+#[test]
+fn late_init_shell_after_pane_removal_does_not_complete() {
+    let runtime = runtime();
+    runtime.note_shell_type(ShellType::Zsh);
+    runtime.note_tracked_control_pane("%0");
+    let claim = runtime.begin_pane_bootstrap("%0", sid(1)).expect("stage");
+    runtime.unregister_pane("%0");
+    assert!(runtime.note_early_init_shell("%0", sid(11)).is_none());
+    assert_eq!(
+        runtime.pane_bootstrap_state("%0"),
+        PaneBootstrapState::Unsent
+    );
+    assert_eq!(runtime.early_init_session_id("%0"), Some(sid(11)));
+    assert!(matches!(
+        runtime.handle_bootstrap_timeout("%0", claim.generation),
+        BootstrapTimeoutResult::Stale
+    ));
+}
+
+#[test]
 fn unbind_retires_session_id_from_presentation_model() {
     use crate::terminal::model::ansi::Handler as _;
     let runtime = runtime();
