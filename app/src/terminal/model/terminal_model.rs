@@ -1584,6 +1584,9 @@ impl TerminalModel {
 
     pub fn set_tmux_presentation(&mut self, presentation: bool) {
         self.tmux_presentation = presentation;
+        if presentation {
+            self.enter_alt_screen(false);
+        }
     }
 
     pub fn tmux_pane_id(&self) -> Option<&str> {
@@ -1708,10 +1711,10 @@ impl TerminalModel {
     }
 
     pub fn terminal_input_state(&self) -> TerminalInputState {
-        if !self.block_list().is_bootstrapped() {
-            TerminalInputState::NotBootstrapped
-        } else if self.is_alt_screen_active() {
+        if self.is_alt_screen_active() {
             TerminalInputState::AltScreen
+        } else if !self.block_list().is_bootstrapped() {
+            TerminalInputState::NotBootstrapped
         } else if self
             .block_list()
             .active_block()
@@ -2294,6 +2297,11 @@ impl TerminalModel {
     /// against programs that set or unset the alternate screen mode multiple
     /// times, like `info`  (see WAR-5897).
     fn exit_alt_screen(&mut self, restore_cursor: bool) {
+        // Presentation panes are classic grids; Warp hooks and in-pane TUIs must not drop back to
+        // the hidden block-list editor.
+        if self.tmux_presentation {
+            return;
+        }
         if !self.alt_screen_active {
             log::info!("Tried to exit the alternate screen, but it was already inactive");
             return;

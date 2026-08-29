@@ -203,6 +203,77 @@ fn presentation_pane_id_is_explicit() {
 }
 
 #[test]
+fn presentation_output_paints_on_the_alt_screen_grid() {
+    use crate::terminal::model::ansi::{Handler, Mode};
+    use crate::terminal::model::terminal_model::TerminalInputState;
+
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_presentation(true);
+    assert!(
+        model.is_alt_screen_active(),
+        "presentation must take the alt-screen paint path"
+    );
+    assert!(matches!(
+        model.terminal_input_state(),
+        TerminalInputState::AltScreen
+    ));
+    model.process_bytes("prompt $ hello-from-tmux");
+    let painted = model.alt_screen().output_to_string();
+    assert!(
+        painted.contains("hello-from-tmux"),
+        "populated grid must be on the alt-screen paint path, got {painted:?}"
+    );
+    model.unset_mode(Mode::SwapScreen {
+        save_cursor_and_clear_screen: true,
+    });
+    model.finish_block();
+    assert!(
+        model.is_alt_screen_active(),
+        "presentation must keep the alt-screen paint path after SwapScreen unset and command finish"
+    );
+    assert!(
+        model
+            .alt_screen()
+            .output_to_string()
+            .contains("hello-from-tmux"),
+        "live grid content must survive Warp hook / TUI alt-screen exits"
+    );
+}
+
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+#[test]
+fn bound_presentation_pane_output_paints_on_the_alt_screen_grid() {
+    use std::sync::Arc;
+
+    use parking_lot::FairMutex;
+
+    use crate::terminal::model::terminal_model::TerminalInputState;
+    use crate::terminal::tmux::bridge::TmuxRuntime;
+
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_presentation(true);
+    model.set_tmux_pane_id(Some("%0".to_owned()));
+    let model = Arc::new(FairMutex::new(model));
+    let runtime = TmuxRuntime::new();
+    runtime.register_pane("%0", model.clone());
+    assert!(runtime.deliver_output(&PaneId::from("%0"), b"zsh% live-grid"));
+    {
+        let locked = model.lock();
+        assert!(locked.is_alt_screen_active());
+        assert!(matches!(
+            locked.terminal_input_state(),
+            TerminalInputState::AltScreen
+        ));
+        let painted = locked.alt_screen().output_to_string();
+        assert!(
+            painted.contains("live-grid"),
+            "bound %0 snapshot/%output must paint on the alt-screen grid, got {painted:?}"
+        );
+    }
+    runtime.unregister();
+}
+
+#[test]
 fn init_shell_remote_bash_is_authoritative_over_local_zsh_launch() {
     use crate::terminal::ShellLaunchState;
     use crate::terminal::model::ansi::{Handler, InitShellValue};

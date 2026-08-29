@@ -442,6 +442,82 @@ fn tmux_36a_startup_without_layout_change_binds_at0_percent0() {
 
 #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
 #[test]
+fn bound_presentation_terminal_paints_populated_grid_on_alt_screen() {
+    use std::sync::Arc;
+
+    use crate::pane_group::{NewTerminalOptions, PanesLayout};
+    use crate::terminal::model::terminal_model::{TerminalInputState, TmuxClientEvent};
+    use crate::terminal::tmux::bridge::TmuxRuntime;
+    use crate::terminal::tmux::parser::PaneId;
+
+    let _tmux = FeatureFlag::TmuxControlPrototype.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+        let runtime = TmuxRuntime::new();
+        let window_id = workspace.update(&mut app, |_, ctx| ctx.window_id());
+        runtime.bind_presentation(window_id);
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.clear_tabs_for_tests();
+            workspace.add_tab_with_pane_layout(
+                PanesLayout::SingleTerminal(Box::new(NewTerminalOptions {
+                    tmux_presentation: true,
+                    hide_homepage: true,
+                    ..Default::default()
+                })),
+                Arc::new(HashMap::new()),
+                None,
+                ctx,
+            );
+            workspace.apply_tmux_client_events_for_tests(
+                &[
+                    TmuxClientEvent::WindowAdd {
+                        window_id: "@0".to_owned(),
+                    },
+                    TmuxClientEvent::LayoutChange {
+                        window_id: "@0".to_owned(),
+                        layout: "80x24,0,0,0".to_owned(),
+                        visible_layout: None,
+                        flags: None,
+                    },
+                ],
+                ctx,
+            );
+        });
+        assert!(runtime.deliver_output(&PaneId::from("%0"), b"hello-from-tmux"));
+        workspace.read(&app, |workspace, ctx| {
+            let view = workspace
+                .active_tab_pane_group()
+                .as_ref(ctx)
+                .active_session_view(ctx)
+                .expect("bound presentation has a terminal view");
+            view.read(ctx, |view, ctx| {
+                let model = view.model.lock();
+                assert!(
+                    model.is_alt_screen_active(),
+                    "bound presentation must take the alt-screen paint path"
+                );
+                assert!(matches!(
+                    model.terminal_input_state(),
+                    TerminalInputState::AltScreen
+                ));
+                let painted = model.alt_screen().output_to_string();
+                assert!(
+                    painted.contains("hello-from-tmux"),
+                    "populated grid must be paintable, got {painted:?}"
+                );
+                assert!(
+                    !view.is_input_box_visible(&model, ctx),
+                    "presentation must keep TmuxPaneInput routing, not the Warp editor"
+                );
+            });
+        });
+        runtime.unregister();
+    });
+}
+
+#[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+#[test]
 fn tmux_36a_gateway_events_before_presentation_bind_are_flushed() {
     use std::sync::Arc;
 
