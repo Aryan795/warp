@@ -329,6 +329,10 @@ impl VimHandler for RichTextEditorView {
             self.find_bar.hide(ctx);
             return;
         }
+        if matches!(self.vim_mode(ctx), Some(VimMode::Normal)) {
+            ctx.notify();
+            return;
+        }
         self.vim_escape(ctx);
         ctx.notify();
     }

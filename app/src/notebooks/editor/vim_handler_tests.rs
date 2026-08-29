@@ -305,3 +305,55 @@ fn notebook_vim_unsupported_text_object_is_a_noop() {
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
     });
 }
+
+fn set_vim_mode_value(app: &mut App, enabled: bool) {
+    app.update_model(
+        &AppEditorSettings::handle(app),
+        |settings: &mut AppEditorSettings, ctx| {
+            settings.vim_mode.set_value(enabled, ctx).unwrap();
+        },
+    );
+}
+
+#[test]
+fn notebook_vim_toggle_off_on_stays_normal_without_inserting() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim(&editor, &mut app);
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+
+        set_vim_mode_value(&mut app, false);
+        assert_eq!(vim_mode(&editor, &app), None);
+
+        set_vim_mode_value(&mut app, true);
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+
+        let before = markdown(&editor, &app);
+        vim_type(&editor, "l", &mut app);
+        assert_eq!(markdown(&editor, &app), before);
+        vim_escape(&editor, &mut app);
+        vim_escape(&editor, &mut app);
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+        assert_eq!(markdown(&editor, &app), before);
+
+        vim_type(&editor, "/", &mut app);
+        assert!(find_bar_open(&editor, &app));
+    });
+}
+
+#[test]
+fn notebook_vim_read_only_does_not_edit() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "hello world", &mut app);
+        editor.update(&mut app, |view, ctx| {
+            view.set_interaction_state(InteractionState::Selectable, ctx);
+        });
+
+        let before = markdown(&editor, &app);
+        vim_type(&editor, "x", &mut app);
+        vim_type(&editor, "dd", &mut app);
+        assert_eq!(markdown(&editor, &app), before);
+    });
+}
