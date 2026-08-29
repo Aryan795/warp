@@ -2389,12 +2389,19 @@ fn test_vim_toggle_case_and_yank_word() {
         initialize_code_editor_app(&mut app);
         let editor = add_code_editor("abc def", &mut app);
         vim_user_insert(&editor, "gUl", &mut app);
-        assert_eq!(buffer_text(&editor, &app).chars().next(), Some('A'));
+        assert_eq!(buffer_text(&editor, &app), "Abc def");
 
         set_cursor_position(&editor, 1, 4, &mut app);
         vim_user_insert(&editor, "yw", &mut app);
+        let yanked = VimRegisters::handle(&app).update(&mut app, |registers, ctx| {
+            registers.read_from_register('"', ctx)
+        });
+        let yanked = yanked.expect("yw writes the unnamed register");
+        assert_eq!(yanked.text, "def");
+        assert_eq!(yanked.motion_type, MotionType::Charwise);
+
         vim_user_insert(&editor, "P", &mut app);
-        assert!(buffer_text(&editor, &app).contains("def"));
+        assert_eq!(buffer_text(&editor, &app), "Abc defdef");
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
     });
 }

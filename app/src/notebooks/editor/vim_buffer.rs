@@ -680,4 +680,18 @@ impl VimBufferOps for NotebooksEditorModel {
     fn smart_indent_on_linewise_change(&self, _operand: &VimOperand) -> bool {
         false
     }
+
+    fn supports_operator(&self, operator: &VimOperator) -> bool {
+        matches!(
+            operator,
+            VimOperator::Delete
+                | VimOperator::Change
+                | VimOperator::Yank
+                | VimOperator::ToggleCase
+                | VimOperator::Uppercase
+                | VimOperator::Lowercase
+                | VimOperator::Indent
+                | VimOperator::Dedent
+        )
+    }
 }

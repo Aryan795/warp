@@ -1113,6 +1113,7 @@ pub struct RichTextEditorView {
     disable_block_insertion_menu: bool,
     vim_model: ModelHandle<VimModel>,
     last_search_direction: Direction,
+    vim_setting_enabled: bool,
 }
 
 #[derive(Default)]
@@ -1193,13 +1194,17 @@ impl RichTextEditorView {
 
         let vim_model = ctx.add_model(|_| VimModel::new());
         ctx.subscribe_to_model(&vim_model, Self::handle_vim_event);
-        if AppEditorSettings::as_ref(ctx).vim_mode_enabled() {
+        let vim_setting_enabled = AppEditorSettings::as_ref(ctx).vim_mode_enabled();
+        if vim_setting_enabled {
             vim_model.update(ctx, |vim_model, ctx| {
                 if let Ok(escape) = Keystroke::parse("escape") {
                     vim_model.keypress(&escape, ctx);
                 }
             });
         }
+        ctx.subscribe_to_model(&AppEditorSettings::handle(ctx), |me, _, _, ctx| {
+            me.sync_vim_enabled_state(ctx);
+        });
 
         Self {
             omnibar,
@@ -1232,6 +1237,7 @@ impl RichTextEditorView {
             disable_block_insertion_menu: config.disable_block_insertion_menu,
             vim_model,
             last_search_direction: Direction::Forward,
+            vim_setting_enabled,
         }
     }
 
@@ -1594,6 +1600,21 @@ impl RichTextEditorView {
 
     fn vim_escape(&mut self, ctx: &mut ViewContext<Self>) {
         self.vim_keystroke(&Keystroke::parse("escape").expect("escape parses"), ctx);
+    }
+
+    fn enter_vim_normal_mode(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.vim_mode_enabled(ctx) {
+            self.vim_escape(ctx);
+        }
+    }
+
+    fn sync_vim_enabled_state(&mut self, ctx: &mut ViewContext<Self>) {
+        let enabled = AppEditorSettings::as_ref(ctx).vim_mode_enabled();
+        if enabled && !self.vim_setting_enabled {
+            self.enter_vim_normal_mode(ctx);
+        }
+        self.vim_setting_enabled = enabled;
+        ctx.notify();
     }
 
     /// Update the editor model with user typed content.

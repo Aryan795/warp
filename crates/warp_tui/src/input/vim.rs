@@ -9,12 +9,12 @@
 //! - `navigate_paragraph` — no-op (no paragraph structure in a prompt).
 //! - `jump_to_*_bracket` — no-op.
 //! - `search`, `cycle_search`, `search_word_at_cursor` — no-op.
-//! - `visual_paste` — inserts from the local yank buffer (no register system).
+//! - `visual_paste` — no-op (use the plain `paste` method; the TUI has no register system).
 //! - `join_line`, `toggle_case`, `keyword_prg`, `ex_command` — no-op.
 //! - Scroll helpers (`center_cursor_vertically`, `scroll_half_page_*`) — no-op.
 //!
 
-use vim::handler::{apply_mode_change, apply_operator, apply_visual_operator, apply_visual_paste};
+use vim::handler::{apply_mode_change, apply_operator, apply_visual_operator};
 use vim::vim::{
     BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
     InsertPosition, LineMotion, ModeTransition, MotionType, VimHandler, VimMode, VimOperand,
@@ -189,6 +189,10 @@ impl VimHandler for TuiInputView {
         replacement_text: &str,
         ctx: &mut ViewContext<Self>,
     ) {
+        if !tui_prompt_supports_operator(operator) {
+            ctx.notify();
+            return;
+        }
         let yanked = self.model.update(ctx, |model, ctx| {
             apply_operator(
                 model,
@@ -261,6 +265,10 @@ impl VimHandler for TuiInputView {
         _register_name: char,
         ctx: &mut ViewContext<Self>,
     ) {
+        if !tui_prompt_supports_operator(operator) {
+            ctx.notify();
+            return;
+        }
         let yanked = self.model.update(ctx, |model, ctx| {
             apply_visual_operator(model, operator, motion_type, ctx)
         });
@@ -272,27 +280,14 @@ impl VimHandler for TuiInputView {
         ctx.notify();
     }
 
+    /// Prompt-specific: visual paste is a no-op for TUI; use the plain `paste` method instead.
     fn visual_paste(
         &mut self,
-        motion_type: MotionType,
+        _motion_type: MotionType,
         _read_register_name: char,
         _write_register_name: char,
         ctx: &mut ViewContext<Self>,
     ) {
-        if self.yank_buffer.is_empty() {
-            ctx.notify();
-            return;
-        }
-        let paste_text = self.yank_buffer.clone();
-        let yanked_motion = self.yank_motion_type;
-        let yanked = self.model.update(ctx, |model, ctx| {
-            apply_visual_paste(model, motion_type, &paste_text, yanked_motion, ctx)
-        });
-        if let Some(yanked) = yanked {
-            self.yank_buffer = yanked.text;
-            self.yank_motion_type = yanked.motion_type;
-        }
-        self.follow_cursor(ctx);
         ctx.notify();
     }
 
@@ -444,6 +439,13 @@ impl VimHandler for TuiInputView {
         // to do here.
         ctx.notify();
     }
+}
+
+fn tui_prompt_supports_operator(operator: &VimOperator) -> bool {
+    matches!(
+        operator,
+        VimOperator::Delete | VimOperator::Change | VimOperator::Yank
+    )
 }
 
 fn bounded_repeated_text(text: &str, count: u32) -> String {

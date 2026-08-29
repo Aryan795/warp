@@ -4360,6 +4360,10 @@ impl VimBufferOps for CodeEditorModel {
             self.vim_enforce_cursor_line_cap(ctx);
         }
     }
+
+    fn supports_operator(&self, _operator: &VimOperator) -> bool {
+        true
+    }
 }
 
 impl CoreEditorModel for CodeEditorModel {

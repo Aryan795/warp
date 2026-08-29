@@ -309,6 +309,28 @@ fn unsupported_operators_are_no_ops() {
     assert!(yanked.is_none());
     assert!(!buffer.comments_toggled);
     assert!(!buffer.deleted);
+    assert!(buffer.last_operand.is_none());
+    assert!(!buffer.stashed);
+    assert!(!buffer.moved_to_first_nonws);
+}
+
+#[test]
+fn unsupported_visual_operators_do_not_expand_or_mutate() {
+    let mut buffer = FakeBuffer::supporting(vec![VimOperator::Delete, VimOperator::Yank]);
+    buffer.selected = "abc".into();
+
+    let yanked = apply_visual_operator(
+        &mut buffer,
+        &VimOperator::ToggleComment,
+        MotionType::Charwise,
+        &mut (),
+    );
+
+    assert!(yanked.is_none());
+    assert!(buffer.visual_expanded.is_none());
+    assert!(!buffer.comments_toggled);
+    assert!(!buffer.deleted);
+    assert!(!buffer.selections_cleared);
 }
 
 #[test]

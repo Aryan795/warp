@@ -4656,3 +4656,56 @@ fn vim_handler_w_moves_word_forward() {
         );
     });
 }
+
+fn enter_normal_with_text(app: &mut warpui::App, content: &str) -> ViewHandle<TuiInputView> {
+    app.update(|ctx| {
+        let view = build_view(ctx);
+        type_str(&view, ctx, content);
+        dispatch(&view, ctx, &[TuiInputAction::HandleEscape]);
+        view
+    })
+}
+
+#[test]
+fn vim_handler_unsupported_case_and_comment_do_not_mutate() {
+    App::test((), |mut app| async move {
+        enable_vim_mode(&mut app);
+        let view = enter_normal_with_text(&mut app, "hello");
+
+        app.update(|ctx| {
+            type_str(&view, ctx, "gUl");
+        });
+        app.read(|ctx| {
+            assert_eq!(text(&view, ctx), "hello");
+        });
+
+        app.update(|ctx| {
+            type_str(&view, ctx, "gcc");
+        });
+        app.read(|ctx| {
+            assert_eq!(text(&view, ctx), "hello");
+        });
+
+        app.update(|ctx| {
+            type_str(&view, ctx, ">>");
+        });
+        app.read(|ctx| {
+            assert_eq!(text(&view, ctx), "hello");
+        });
+    });
+}
+
+#[test]
+fn vim_handler_visual_paste_is_noop() {
+    App::test((), |mut app| async move {
+        enable_vim_mode(&mut app);
+        let view = enter_normal_with_text(&mut app, "hello");
+
+        app.update(|ctx| {
+            type_str(&view, ctx, "0ylvp");
+        });
+        app.read(|ctx| {
+            assert_eq!(text(&view, ctx), "hello");
+        });
+    });
+}

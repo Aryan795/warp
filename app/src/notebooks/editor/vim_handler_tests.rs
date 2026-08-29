@@ -1,5 +1,7 @@
 use settings::Setting as _;
-use vim::vim::VimMode;
+use string_offset::CharOffset;
+use vim::vim::{MotionType, VimMode};
+use warp_editor::model::CoreEditorModel;
 use warp_util::user_input::UserInput;
 use warpui::{App, SingletonEntity, TypedActionView, UpdateModel, ViewHandle};
 
@@ -7,9 +9,9 @@ use super::tests::initialize_editor;
 use super::{EditorViewAction, RichTextEditorView};
 use crate::editor::InteractionState;
 use crate::settings::AppEditorSettings;
-use crate::vim_registers::VimRegisters;
+use crate::vim_registers::{RegisterContent, VimRegisters};
 
-fn enable_vim(editor: &ViewHandle<RichTextEditorView>, app: &mut App) {
+fn enable_vim_setting(app: &mut App) {
     app.add_singleton_model(|_| VimRegisters::new());
     app.update_model(
         &AppEditorSettings::handle(app),
@@ -17,12 +19,22 @@ fn enable_vim(editor: &ViewHandle<RichTextEditorView>, app: &mut App) {
             settings.vim_mode.set_value(true, ctx).unwrap();
         },
     );
+}
+
+fn prepare_notebook(editor: &ViewHandle<RichTextEditorView>, markdown: &str, app: &mut App) {
     editor.update(app, |view, ctx| {
         ctx.focus_self();
         view.set_interaction_state(InteractionState::Editable, ctx);
-        view.reset_with_markdown("hello world\nsecond line", ctx);
-        view.handle_action(&EditorViewAction::VimEscape, ctx);
+        view.reset_with_markdown(markdown, ctx);
+        view.model.update(ctx, |model, ctx| {
+            model.vim_jump_to_first_line(ctx);
+        });
     });
+}
+
+fn enable_vim(editor: &ViewHandle<RichTextEditorView>, app: &mut App) {
+    enable_vim_setting(app);
+    prepare_notebook(editor, "hello world\nsecond line", app);
 }
 
 fn vim_type(editor: &ViewHandle<RichTextEditorView>, text: &str, app: &mut App) {
@@ -50,6 +62,40 @@ fn vim_mode(editor: &ViewHandle<RichTextEditorView>, app: &App) -> Option<VimMod
     editor.read(app, |view, ctx| view.vim_mode(ctx))
 }
 
+fn cursor_offset(editor: &ViewHandle<RichTextEditorView>, app: &App) -> CharOffset {
+    editor.read(app, |view, ctx| {
+        view.model
+            .as_ref(ctx)
+            .buffer_selection_model()
+            .as_ref(ctx)
+            .first_selection_head()
+    })
+}
+
+fn selection_offsets(
+    editor: &ViewHandle<RichTextEditorView>,
+    app: &App,
+) -> (CharOffset, CharOffset) {
+    editor.read(app, |view, ctx| {
+        let selection = *view
+            .model
+            .as_ref(ctx)
+            .buffer_selection_model()
+            .as_ref(ctx)
+            .selection_offsets()
+            .first();
+        (selection.head, selection.tail)
+    })
+}
+
+fn unnamed_register(app: &mut App) -> Option<RegisterContent> {
+    VimRegisters::handle(app).update(app, |registers, ctx| registers.read_from_register('"', ctx))
+}
+
+fn find_bar_open(editor: &ViewHandle<RichTextEditorView>, app: &App) -> bool {
+    editor.read(app, |view, _| view.find_bar.is_open())
+}
+
 #[test]
 fn notebook_vim_starts_in_normal_mode() {
     App::test((), |mut app| async move {
@@ -60,40 +106,142 @@ fn notebook_vim_starts_in_normal_mode() {
 }
 
 #[test]
-fn notebook_vim_insert_and_escape() {
+fn notebook_vim_enable_after_construction_starts_normal() {
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
-        enable_vim(&editor, &mut app);
+        assert_eq!(vim_mode(&editor, &app), None);
 
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "hello world", &mut app);
+
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+        let before = markdown(&editor, &app);
+        vim_type(&editor, "l", &mut app);
+        assert_eq!(markdown(&editor, &app), before);
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
         vim_type(&editor, "i", &mut app);
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Insert));
+    });
+}
+
+#[test]
+fn notebook_vim_insert_and_escape_moves_left() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "hello", &mut app);
+
+        vim_type(&editor, "A", &mut app);
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Insert));
         vim_type(&editor, "x", &mut app);
+        assert_eq!(markdown(&editor, &app), "hellox");
+        let insert_cursor = cursor_offset(&editor, &app);
         vim_escape(&editor, &mut app);
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
-        let text = markdown(&editor, &app);
-        assert!(text.contains('x') || text.contains("hello"));
+        assert_eq!(markdown(&editor, &app), "hellox");
+        assert!(cursor_offset(&editor, &app) < insert_cursor);
     });
 }
 
 #[test]
-fn notebook_vim_delete_line() {
+fn notebook_vim_charwise_delete_yank_change() {
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
-        enable_vim(&editor, &mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "hello world", &mut app);
 
-        vim_type(&editor, "dd", &mut app);
-        let _text = markdown(&editor, &app);
+        vim_type(&editor, "dw", &mut app);
+        assert_eq!(markdown(&editor, &app), " world");
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+        let yanked = unnamed_register(&mut app).expect("dw yanks the deleted word");
+        assert_eq!(yanked.text, "hello");
+        assert_eq!(yanked.motion_type, MotionType::Charwise);
+
+        vim_type(&editor, "yw", &mut app);
+        vim_type(&editor, "P", &mut app);
+        assert_eq!(markdown(&editor, &app), " world world");
+
+        prepare_notebook(&editor, "hello world", &mut app);
+        vim_type(&editor, "cw", &mut app);
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Insert));
+        vim_type(&editor, "hey", &mut app);
+        vim_escape(&editor, &mut app);
+        assert_eq!(markdown(&editor, &app), "hey world");
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
     });
 }
 
 #[test]
-fn notebook_vim_hjkl_motions_stay_in_normal_mode() {
+fn notebook_vim_linewise_delete_yank_change() {
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
-        enable_vim(&editor, &mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "hello world\nsecond line\nthird", &mut app);
 
-        vim_type(&editor, "llj", &mut app);
+        vim_type(&editor, "dd", &mut app);
+        assert_eq!(markdown(&editor, &app), "second line\nthird");
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+        let yanked = unnamed_register(&mut app).expect("dd yanks the deleted line");
+        assert!(yanked.text.contains("hello world"));
+        assert_eq!(yanked.motion_type, MotionType::Linewise);
+
+        vim_type(&editor, "yy", &mut app);
+        vim_type(&editor, "p", &mut app);
+        assert_eq!(markdown(&editor, &app), "second line\nsecond line\n\nthird");
+
+        vim_type(&editor, "gg", &mut app);
+        vim_type(&editor, "cc", &mut app);
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Insert));
+        vim_type(&editor, "changed", &mut app);
+        vim_escape(&editor, &mut app);
+        assert!(markdown(&editor, &app).starts_with("changed"));
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+    });
+}
+
+#[test]
+fn notebook_vim_counts_repeat_line_delete() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "one\ntwo\nthree", &mut app);
+
+        vim_type(&editor, "2dd", &mut app);
+        assert_eq!(markdown(&editor, &app), "three");
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+    });
+}
+
+#[test]
+fn notebook_vim_visual_delete_yank_paste() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "abcdef", &mut app);
+
+        vim_type(&editor, "vllld", &mut app);
+        assert_eq!(markdown(&editor, &app), "ef");
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+
+        prepare_notebook(&editor, "abcdef", &mut app);
+        vim_type(&editor, "vllly", &mut app);
+        assert_eq!(markdown(&editor, &app), "abcdef");
+        vim_type(&editor, "p", &mut app);
+        assert_eq!(markdown(&editor, &app), "aabcdbcdef");
+    });
+}
+
+#[test]
+fn notebook_vim_undo_restores_deleted_line() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "hello world\nsecond line", &mut app);
+
+        vim_type(&editor, "dd", &mut app);
+        assert_eq!(markdown(&editor, &app), "second line");
+        vim_type(&editor, "u", &mut app);
+        assert_eq!(markdown(&editor, &app), "hello world\nsecond line");
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
     });
 }
@@ -104,8 +252,40 @@ fn notebook_vim_search_opens_find_bar() {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim(&editor, &mut app);
 
+        assert!(!find_bar_open(&editor, &app));
         vim_type(&editor, "/", &mut app);
+        assert!(find_bar_open(&editor, &app));
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+    });
+}
+
+#[test]
+fn notebook_vim_unsupported_comment_is_exact_noop() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "hello world", &mut app);
+
+        let before = markdown(&editor, &app);
+        let cursor_before = cursor_offset(&editor, &app);
+        let selection_before = selection_offsets(&editor, &app);
+
+        vim_type(&editor, "gcc", &mut app);
+        assert_eq!(markdown(&editor, &app), before);
+        assert_eq!(cursor_offset(&editor, &app), cursor_before);
+        assert_eq!(selection_offsets(&editor, &app), selection_before);
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+
+        vim_type(&editor, "vll", &mut app);
+        let after_visual = (
+            markdown(&editor, &app),
+            cursor_offset(&editor, &app),
+            selection_offsets(&editor, &app),
+        );
+        vim_type(&editor, "gc", &mut app);
+        assert_eq!(markdown(&editor, &app), after_visual.0);
+        assert_eq!(cursor_offset(&editor, &app), after_visual.1);
+        assert_eq!(selection_offsets(&editor, &app), after_visual.2);
     });
 }
 
@@ -115,9 +295,13 @@ fn notebook_vim_unsupported_text_object_is_a_noop() {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim(&editor, &mut app);
         let before = markdown(&editor, &app);
+        let cursor_before = cursor_offset(&editor, &app);
+        let selection_before = selection_offsets(&editor, &app);
 
         vim_type(&editor, "diw", &mut app);
         assert_eq!(markdown(&editor, &app), before);
+        assert_eq!(cursor_offset(&editor, &app), cursor_before);
+        assert_eq!(selection_offsets(&editor, &app), selection_before);
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
     });
 }

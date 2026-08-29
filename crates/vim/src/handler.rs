@@ -137,8 +137,11 @@ pub trait VimBufferOps {
 
     fn enforce_normal_mode_line_cap(&mut self, _ctx: &mut Self::Ctx<'_>) {}
 
+    /// Model-level operator support. False by default so a no-op mutation primitive cannot still
+    /// change selection or cursor. Views that share a model (code editor vs TUI prompt) must also
+    /// filter at the view before calling [`apply_operator`] / [`apply_visual_operator`].
     fn supports_operator(&self, _operator: &VimOperator) -> bool {
-        true
+        false
     }
 
     fn smart_indent_on_linewise_change(&self, _operand: &VimOperand) -> bool {
