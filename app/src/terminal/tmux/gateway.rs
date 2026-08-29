@@ -118,7 +118,7 @@ pub fn spawn_control_client(
     let zsh_init = bootstrap
         .init_script
         .clone()
-        .map(|script| (script, bootstrap.shell_type));
+        .map(|script| (script, bootstrap.shell_type, bootstrap.session_id));
     let event_loop = ControlClientEventLoop::new(
         model,
         channel_event_proxy,

@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use parking_lot::{FairMutex, Mutex};
+use warp_core::SessionId;
 use warpui::WindowId;
 
 use super::parser::PaneId;
@@ -46,13 +47,40 @@ struct PaneSink {
     processor: ansi::Processor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneBootstrapState {
+    Unsent,
+    Staging,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneBootstrapClaim {
+    pub pane_id: String,
+    pub shell_type: ShellType,
+    pub session_id: SessionId,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootstrapTimeoutResult {
+    Retry(PaneBootstrapClaim),
+    Failed,
+    Stale,
+}
+
 enum PaneBootstrapEntry {
-    InFlight {
+    Staging {
         generation: u64,
-        started_at: instant::Instant,
+        session_id: SessionId,
         retried: bool,
+        timer_armed: bool,
     },
     Ready {
+        generation: u64,
+    },
+    Failed {
         generation: u64,
     },
 }
@@ -67,7 +95,8 @@ struct Inner {
     pending_client_event_bytes: usize,
     pane_bootstrap: HashMap<String, PaneBootstrapEntry>,
     pending_bootstrap_panes: VecDeque<String>,
-    bootstrap_injects: HashMap<String, u32>,
+    bootstrap_stage_count: HashMap<String, u32>,
+    bootstrap_script_count: HashMap<String, u32>,
     shell_type: Option<ShellType>,
     app_bind_deadline: Option<instant::Instant>,
     presentation_ready: bool,
@@ -114,7 +143,8 @@ impl TmuxRuntime {
                 pending_client_event_bytes: 0,
                 pane_bootstrap: HashMap::new(),
                 pending_bootstrap_panes: VecDeque::new(),
-                bootstrap_injects: HashMap::new(),
+                bootstrap_stage_count: HashMap::new(),
+                bootstrap_script_count: HashMap::new(),
                 shell_type: None,
                 app_bind_deadline: None,
                 presentation_ready: false,
@@ -190,7 +220,8 @@ impl TmuxRuntime {
         inner.pending_client_event_bytes = 0;
         inner.pane_bootstrap.clear();
         inner.pending_bootstrap_panes.clear();
-        inner.bootstrap_injects.clear();
+        inner.bootstrap_stage_count.clear();
+        inner.bootstrap_script_count.clear();
         inner.app_bind_deadline = None;
         inner.presentation_ready = false;
         inner.unregistered_bytes = 0;
@@ -222,7 +253,12 @@ impl TmuxRuntime {
     }
 
     pub fn unregister_pane(&self, pane_id: &str) {
-        self.inner.lock().panes.remove(pane_id);
+        let mut inner = self.inner.lock();
+        inner.panes.remove(pane_id);
+        inner.pane_bootstrap.remove(pane_id);
+        inner.pending_bootstrap_panes.retain(|id| id != pane_id);
+        inner.bootstrap_stage_count.remove(pane_id);
+        inner.bootstrap_script_count.remove(pane_id);
     }
 
     pub fn deliver_output(&self, pane_id: &PaneId, bytes: &[u8]) -> bool {
@@ -339,137 +375,189 @@ impl TmuxRuntime {
         self.inner.lock().shell_type = Some(shell_type);
     }
 
-    pub fn set_authoritative_shell_type(&self, shell_type: ShellType) -> Vec<String> {
+    pub fn set_authoritative_shell_type(&self, shell_type: ShellType) -> Vec<PaneBootstrapClaim> {
         let mut inner = self.inner.lock();
         inner.shell_type = Some(shell_type);
         let pending = std::mem::take(&mut inner.pending_bootstrap_panes);
-        let now = instant::Instant::now();
-        let mut ready = Vec::new();
+        let mut claims = Vec::new();
         for pane_id in pending {
-            if Self::begin_pane_bootstrap_locked(&mut inner, &pane_id, now).is_some() {
-                ready.push(pane_id);
+            let session_id = warp_terminal::bootstrap::generate_session_id();
+            if let Some(claim) = Self::begin_pane_bootstrap_locked(&mut inner, &pane_id, session_id)
+            {
+                claims.push(claim);
             }
         }
-        ready
+        claims
     }
 
     pub fn shell_type(&self) -> Option<ShellType> {
         self.inner.lock().shell_type
     }
 
-    pub fn begin_pane_bootstrap(&self, pane_id: &str) -> Option<ShellType> {
-        self.begin_pane_bootstrap_at(pane_id, instant::Instant::now())
-    }
-
-    pub fn begin_pane_bootstrap_at(
+    pub fn begin_pane_bootstrap(
         &self,
         pane_id: &str,
-        now: instant::Instant,
-    ) -> Option<ShellType> {
+        session_id: SessionId,
+    ) -> Option<PaneBootstrapClaim> {
         let mut inner = self.inner.lock();
-        Self::begin_pane_bootstrap_locked(&mut inner, pane_id, now)
+        Self::begin_pane_bootstrap_locked(&mut inner, pane_id, session_id)
     }
 
     fn begin_pane_bootstrap_locked(
         inner: &mut Inner,
         pane_id: &str,
-        now: instant::Instant,
-    ) -> Option<ShellType> {
+        session_id: SessionId,
+    ) -> Option<PaneBootstrapClaim> {
         inner.pending_bootstrap_panes.retain(|id| id != pane_id);
-        let inflight = match inner.pane_bootstrap.get(pane_id) {
-            Some(PaneBootstrapEntry::Ready { .. }) => return None,
-            Some(PaneBootstrapEntry::InFlight {
-                generation,
-                started_at,
-                retried,
-            }) => Some((*generation, *started_at, *retried)),
-            None => None,
-        };
-        match inflight {
-            Some((generation, started_at, retried)) => {
-                if now < started_at + BOOTSTRAP_INFLIGHT_TIMEOUT || retried {
-                    return None;
-                }
-                let shell_type = inner.shell_type?;
-                inner.pane_bootstrap.insert(
-                    pane_id.to_owned(),
-                    PaneBootstrapEntry::InFlight {
-                        generation: generation + 1,
-                        started_at: now,
-                        retried: true,
-                    },
-                );
-                *inner
-                    .bootstrap_injects
-                    .entry(pane_id.to_owned())
-                    .or_insert(0) += 1;
-                Some(shell_type)
+        match inner.pane_bootstrap.get(pane_id) {
+            Some(PaneBootstrapEntry::Ready { .. }) | Some(PaneBootstrapEntry::Staging { .. }) => {
+                return None;
             }
-            None => {
-                let Some(shell_type) = inner.shell_type else {
-                    if !inner.pending_bootstrap_panes.iter().any(|id| id == pane_id) {
-                        inner.pending_bootstrap_panes.push_back(pane_id.to_owned());
-                    }
-                    return None;
-                };
-                inner.pane_bootstrap.insert(
-                    pane_id.to_owned(),
-                    PaneBootstrapEntry::InFlight {
-                        generation: 1,
-                        started_at: now,
-                        retried: false,
-                    },
-                );
-                *inner
-                    .bootstrap_injects
-                    .entry(pane_id.to_owned())
-                    .or_insert(0) += 1;
-                Some(shell_type)
-            }
+            Some(PaneBootstrapEntry::Failed { .. }) | None => {}
         }
+        let Some(shell_type) = inner.shell_type else {
+            if !inner.pending_bootstrap_panes.iter().any(|id| id == pane_id) {
+                inner.pending_bootstrap_panes.push_back(pane_id.to_owned());
+            }
+            return None;
+        };
+        inner.pane_bootstrap.insert(
+            pane_id.to_owned(),
+            PaneBootstrapEntry::Staging {
+                generation: 1,
+                session_id,
+                retried: false,
+                timer_armed: false,
+            },
+        );
+        *inner
+            .bootstrap_stage_count
+            .entry(pane_id.to_owned())
+            .or_insert(0) += 1;
+        Some(PaneBootstrapClaim {
+            pane_id: pane_id.to_owned(),
+            shell_type,
+            session_id,
+            generation: 1,
+        })
     }
 
-    pub fn mark_pane_bootstrap_ready(&self, pane_id: &str) -> bool {
-        self.mark_pane_bootstrap_ready_generation(pane_id, None)
-    }
-
-    pub fn mark_pane_bootstrap_ready_generation(
-        &self,
-        pane_id: &str,
-        expected: Option<u64>,
-    ) -> bool {
+    pub fn on_init_shell(&self, pane_id: &str, session_id: SessionId) -> Option<ShellType> {
         let mut inner = self.inner.lock();
-        let generation = match inner.pane_bootstrap.get(pane_id) {
-            Some(PaneBootstrapEntry::InFlight { generation, .. }) => *generation,
-            _ => return false,
+        let (generation, staged_id) = match inner.pane_bootstrap.get(pane_id) {
+            Some(PaneBootstrapEntry::Staging {
+                generation,
+                session_id: staged_id,
+                ..
+            }) => (*generation, *staged_id),
+            _ => return None,
         };
-        if expected.is_some_and(|want| want != generation) {
-            return false;
+        if staged_id != session_id {
+            return None;
         }
+        let shell_type = inner.shell_type?;
         inner
             .pane_bootstrap
             .insert(pane_id.to_owned(), PaneBootstrapEntry::Ready { generation });
-        true
+        *inner
+            .bootstrap_script_count
+            .entry(pane_id.to_owned())
+            .or_insert(0) += 1;
+        Some(shell_type)
     }
 
-    pub fn pane_bootstrap_in_flight(&self, pane_id: &str) -> bool {
-        matches!(
-            self.inner.lock().pane_bootstrap.get(pane_id),
-            Some(PaneBootstrapEntry::InFlight { .. })
-        )
+    pub fn arm_bootstrap_timeout(&self, pane_id: &str) -> Option<(u64, Duration)> {
+        let mut inner = self.inner.lock();
+        match inner.pane_bootstrap.get_mut(pane_id) {
+            Some(PaneBootstrapEntry::Staging {
+                generation,
+                timer_armed,
+                ..
+            }) if !*timer_armed => {
+                *timer_armed = true;
+                Some((*generation, BOOTSTRAP_INFLIGHT_TIMEOUT))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn handle_bootstrap_timeout(
+        &self,
+        pane_id: &str,
+        generation: u64,
+    ) -> BootstrapTimeoutResult {
+        let mut inner = self.inner.lock();
+        let (session_id, retried) = match inner.pane_bootstrap.get(pane_id) {
+            Some(PaneBootstrapEntry::Staging {
+                generation: live,
+                session_id,
+                retried,
+                ..
+            }) if *live == generation => (*session_id, *retried),
+            _ => return BootstrapTimeoutResult::Stale,
+        };
+        let Some(shell_type) = inner.shell_type else {
+            return BootstrapTimeoutResult::Stale;
+        };
+        if retried {
+            inner.pane_bootstrap.insert(
+                pane_id.to_owned(),
+                PaneBootstrapEntry::Failed { generation },
+            );
+            return BootstrapTimeoutResult::Failed;
+        }
+        let next_gen = generation + 1;
+        inner.pane_bootstrap.insert(
+            pane_id.to_owned(),
+            PaneBootstrapEntry::Staging {
+                generation: next_gen,
+                session_id,
+                retried: true,
+                timer_armed: false,
+            },
+        );
+        *inner
+            .bootstrap_stage_count
+            .entry(pane_id.to_owned())
+            .or_insert(0) += 1;
+        BootstrapTimeoutResult::Retry(PaneBootstrapClaim {
+            pane_id: pane_id.to_owned(),
+            shell_type,
+            session_id,
+            generation: next_gen,
+        })
+    }
+
+    pub fn pane_bootstrap_state(&self, pane_id: &str) -> PaneBootstrapState {
+        match self.inner.lock().pane_bootstrap.get(pane_id) {
+            Some(PaneBootstrapEntry::Staging { .. }) => PaneBootstrapState::Staging,
+            Some(PaneBootstrapEntry::Ready { .. }) => PaneBootstrapState::Ready,
+            Some(PaneBootstrapEntry::Failed { .. }) => PaneBootstrapState::Failed,
+            None => PaneBootstrapState::Unsent,
+        }
     }
 
     pub fn pane_bootstrap_ready(&self, pane_id: &str) -> bool {
-        matches!(
-            self.inner.lock().pane_bootstrap.get(pane_id),
-            Some(PaneBootstrapEntry::Ready { .. })
-        )
+        self.pane_bootstrap_state(pane_id) == PaneBootstrapState::Ready
     }
 
-    pub fn bootstrap_inject_count(&self, pane_id: &str) -> u32 {
+    pub fn pane_bootstrap_failed(&self, pane_id: &str) -> bool {
+        self.pane_bootstrap_state(pane_id) == PaneBootstrapState::Failed
+    }
+
+    pub fn bootstrap_stage_count(&self, pane_id: &str) -> u32 {
         self.inner
             .lock()
-            .bootstrap_injects
+            .bootstrap_stage_count
+            .get(pane_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn bootstrap_script_count(&self, pane_id: &str) -> u32 {
+        self.inner
+            .lock()
+            .bootstrap_script_count
             .get(pane_id)
             .copied()
             .unwrap_or(0)
@@ -477,9 +565,17 @@ impl TmuxRuntime {
 
     pub fn pane_bootstrap_generation(&self, pane_id: &str) -> Option<u64> {
         match self.inner.lock().pane_bootstrap.get(pane_id) {
-            Some(PaneBootstrapEntry::InFlight { generation, .. })
-            | Some(PaneBootstrapEntry::Ready { generation }) => Some(*generation),
+            Some(PaneBootstrapEntry::Staging { generation, .. })
+            | Some(PaneBootstrapEntry::Ready { generation })
+            | Some(PaneBootstrapEntry::Failed { generation }) => Some(*generation),
             None => None,
+        }
+    }
+
+    pub fn pane_bootstrap_session_id(&self, pane_id: &str) -> Option<SessionId> {
+        match self.inner.lock().pane_bootstrap.get(pane_id) {
+            Some(PaneBootstrapEntry::Staging { session_id, .. }) => Some(*session_id),
+            _ => None,
         }
     }
 

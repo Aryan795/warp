@@ -12913,8 +12913,9 @@ impl TerminalView {
                 pending_session_info,
             }) => {
                 let shell_type = pending_session_info.shell.shell_type();
+                let session_id = pending_session_info.session_id;
                 if self.model.lock().is_tmux_presentation() {
-                    self.write_tmux_presentation_bootstrap_script(shell_type, ctx);
+                    self.write_tmux_presentation_bootstrap_script(shell_type, session_id, ctx);
                 } else {
                     self.flush_queued_tmux_pane_bootstrap(shell_type, ctx);
                 }
@@ -15264,22 +15265,27 @@ impl TerminalView {
             let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id)) else {
                 return;
             };
-            let panes = runtime.set_authoritative_shell_type(shell_type);
-            for pane_id in panes {
-                let Some(model) = runtime.pane_model(&pane_id) else {
+            let claims = runtime.set_authoritative_shell_type(shell_type);
+            for claim in claims {
+                let Some(model) = runtime.pane_model(&claim.pane_id) else {
                     continue;
                 };
-                let session_id = warp_terminal::bootstrap::generate_session_id();
                 {
                     let mut locked = model.lock();
-                    locked.register_session_id(session_id);
-                    locked.set_login_shell_spawned(shell_type);
+                    locked.register_session_id(claim.session_id);
+                    locked.set_login_shell_spawned(claim.shell_type);
                 }
-                let bytes = crate::terminal::tmux::protocol::silent_bootstrap_bytes(shell_type);
-                let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
+                let Some(bytes) = crate::terminal::tmux::protocol::in_band_init_bytes(
+                    claim.shell_type,
+                    claim.session_id,
+                ) else {
+                    continue;
+                };
+                let pane = crate::terminal::tmux::parser::PaneId::from(claim.pane_id.as_str());
                 for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bytes) {
                     self.write_tmux_control_command(command.into_bytes(), ctx);
                 }
+                Self::schedule_tmux_pane_bootstrap_timeout(&runtime, &claim.pane_id, ctx);
             }
         }
         #[cfg(not(all(unix, feature = "local_tty", not(feature = "remote_tty"))))]
@@ -15288,9 +15294,61 @@ impl TerminalView {
         }
     }
 
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn schedule_tmux_pane_bootstrap_timeout(
+        runtime: &crate::terminal::tmux::bridge::TmuxRuntime,
+        pane_id: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some((generation, delay)) = runtime.arm_bootstrap_timeout(pane_id) else {
+            return;
+        };
+        let instance_id = runtime.id().as_u64();
+        let pane_id = pane_id.to_owned();
+        ctx.spawn(
+            async move {
+                warpui::r#async::Timer::after(delay).await;
+            },
+            move |me, _, ctx| {
+                me.on_tmux_pane_bootstrap_timeout(instance_id, pane_id, generation, ctx);
+            },
+        );
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn on_tmux_pane_bootstrap_timeout(
+        &mut self,
+        instance_id: u64,
+        pane_id: String,
+        generation: u64,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::terminal::tmux::bridge::{BootstrapTimeoutResult, TmuxInstanceId, TmuxRuntime};
+        let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(instance_id)) else {
+            return;
+        };
+        match runtime.handle_bootstrap_timeout(&pane_id, generation) {
+            BootstrapTimeoutResult::Retry(claim) => {
+                let Some(bytes) = crate::terminal::tmux::protocol::in_band_init_bytes(
+                    claim.shell_type,
+                    claim.session_id,
+                ) else {
+                    return;
+                };
+                let pane = crate::terminal::tmux::parser::PaneId::from(claim.pane_id.as_str());
+                for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bytes) {
+                    self.write_tmux_control_command(command.into_bytes(), ctx);
+                }
+                Self::schedule_tmux_pane_bootstrap_timeout(&runtime, &pane_id, ctx);
+            }
+            BootstrapTimeoutResult::Failed | BootstrapTimeoutResult::Stale => {}
+        }
+    }
+
     fn write_tmux_presentation_bootstrap_script(
         &mut self,
         shell_type: ShellType,
+        session_id: warp_core::SessionId,
         ctx: &mut ViewContext<Self>,
     ) {
         let (pane_id, is_presentation, instance_id) = {
@@ -15316,16 +15374,13 @@ impl TerminalView {
                     && let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(id))
                 {
                     runtime.note_shell_type(shell_type);
-                    if runtime.mark_pane_bootstrap_ready(&pane_id) {
-                        return;
-                    }
-                    if runtime.begin_pane_bootstrap(&pane_id).is_none() {
+                    if runtime.on_init_shell(&pane_id, session_id).is_none() {
                         return;
                     }
                 }
             }
             #[cfg(feature = "remote_tty")]
-            let _ = instance_id;
+            let _ = (instance_id, session_id);
             let framed = crate::terminal::tmux::protocol::silent_bootstrap_bytes(shell_type);
             let pane = crate::terminal::tmux::parser::PaneId::from(pane_id.as_str());
             for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &framed) {
@@ -15334,7 +15389,7 @@ impl TerminalView {
         }
         #[cfg(not(all(unix, feature = "local_tty")))]
         {
-            let _ = (pane_id, shell_type, instance_id, ctx);
+            let _ = (pane_id, shell_type, session_id, instance_id, ctx);
         }
     }
 

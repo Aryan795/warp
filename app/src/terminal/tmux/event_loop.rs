@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use parking_lot::{FairMutex, FairMutexGuard, Mutex};
+use warp_core::SessionId;
 use warp_terminal::shell::ShellType;
 
 use crate::terminal::TerminalModel;
@@ -17,7 +18,7 @@ use crate::terminal::model::ansi;
 use crate::terminal::tmux::pane_bytes::{feed_control_bytes, notify_exit, sink_writer};
 use crate::terminal::tmux::parser::PaneId;
 use crate::terminal::tmux::protocol::{
-    kill_server_command, refresh_client_command, send_keys_commands,
+    kill_server_command, refresh_client_command, send_keys_commands, zsh_init_bytes,
 };
 use crate::terminal::writeable_pty::Message;
 use crate::terminal::writeable_pty::pty_controller::{EventLoopSendError, EventLoopSender};
@@ -194,7 +195,7 @@ pub struct ControlClientEventLoop<P: EventedPty> {
     terminal: Arc<FairMutex<TerminalModel>>,
     event_listener: ChannelEventListener,
     shared: Arc<SharedControlState>,
-    zsh_init: Option<(String, ShellType)>,
+    zsh_init: Option<(String, ShellType, SessionId)>,
 }
 
 impl<P> ControlClientEventLoop<P>
@@ -207,7 +208,7 @@ where
         pty: P,
         rx: Receiver<Message>,
         shared: Arc<SharedControlState>,
-        zsh_init: Option<(String, ShellType)>,
+        zsh_init: Option<(String, ShellType, SessionId)>,
     ) -> Self {
         Self {
             poll: mio::Poll::new().expect("create mio Poll"),
@@ -458,7 +459,7 @@ where
 
     fn maybe_bind_pane(
         shared: &SharedControlState,
-        zsh_init: &mut Option<(String, ShellType)>,
+        zsh_init: &mut Option<(String, ShellType, SessionId)>,
         state: &mut LoopState,
         instance_id: Option<u64>,
     ) {
@@ -475,10 +476,10 @@ where
         let pending = std::mem::take(&mut *shared.pending_pane_writes.lock());
         let pending_control = std::mem::take(&mut *shared.pending_control.lock());
         let mut to_send = Vec::new();
-        if let Some((_init_script, shell_type)) = zsh_init.take()
-            && claim_control_pane_bootstrap(instance_id, pane_id.as_str(), shell_type)
+        if let Some((init_script, shell_type, session_id)) = zsh_init.take()
+            && claim_control_pane_bootstrap(instance_id, pane_id.as_str(), shell_type, session_id)
         {
-            to_send.push(super::protocol::silent_bootstrap_bytes(shell_type));
+            to_send.push(zsh_init_bytes(&init_script, shell_type));
         }
         to_send.extend(pending.into_iter().map(|bytes| bytes.into_owned()));
         for bytes in to_send {
@@ -529,6 +530,7 @@ fn claim_control_pane_bootstrap(
     instance_id: Option<u64>,
     pane_id: &str,
     shell_type: ShellType,
+    session_id: SessionId,
 ) -> bool {
     use crate::terminal::tmux::bridge::{TmuxInstanceId, TmuxRuntime};
     let Some(instance_id) = instance_id else {
@@ -540,7 +542,7 @@ fn claim_control_pane_bootstrap(
     if runtime.shell_type().is_none() {
         runtime.note_shell_type(shell_type);
     }
-    runtime.begin_pane_bootstrap(pane_id).is_some()
+    runtime.begin_pane_bootstrap(pane_id, session_id).is_some()
 }
 
 #[cfg(test)]

@@ -4270,19 +4270,76 @@ impl PaneGroup {
         let Some(runtime) = tmux_runtime_for_window(ctx.window_id(), model) else {
             return;
         };
-        let Some(shell_type) = runtime.begin_pane_bootstrap(tmux_pane_id) else {
+        let session_id = warp_terminal::bootstrap::generate_session_id();
+        if let Some(claim) = runtime.begin_pane_bootstrap(tmux_pane_id, session_id) {
+            {
+                let mut locked = model.lock();
+                locked.register_session_id(claim.session_id);
+                locked.set_login_shell_spawned(claim.shell_type);
+            }
+            self.send_tmux_pane_staging(&claim, instance_id, ctx);
+        }
+        self.schedule_tmux_pane_bootstrap_timeout(&runtime, tmux_pane_id, ctx);
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn send_tmux_pane_staging(
+        &self,
+        claim: &crate::terminal::tmux::bridge::PaneBootstrapClaim,
+        instance_id: Option<u64>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(bytes) =
+            crate::terminal::tmux::protocol::in_band_init_bytes(claim.shell_type, claim.session_id)
+        else {
             return;
         };
-        let session_id = warp_terminal::bootstrap::generate_session_id();
-        {
-            let mut locked = model.lock();
-            locked.register_session_id(session_id);
-            locked.set_login_shell_spawned(shell_type);
-        }
-        let bytes = crate::terminal::tmux::protocol::silent_bootstrap_bytes(shell_type);
-        let pane = crate::terminal::tmux::parser::PaneId::from(tmux_pane_id);
+        let pane = crate::terminal::tmux::parser::PaneId::from(claim.pane_id.as_str());
         for command in crate::terminal::tmux::protocol::send_keys_commands(&pane, &bytes) {
             self.write_tmux_command(command.into_bytes(), instance_id, ctx);
+        }
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn schedule_tmux_pane_bootstrap_timeout(
+        &self,
+        runtime: &crate::terminal::tmux::bridge::TmuxRuntime,
+        pane_id: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some((generation, delay)) = runtime.arm_bootstrap_timeout(pane_id) else {
+            return;
+        };
+        let instance_id = runtime.id().as_u64();
+        let pane_id = pane_id.to_owned();
+        ctx.spawn(
+            async move {
+                warpui::r#async::Timer::after(delay).await;
+            },
+            move |me, _, ctx| {
+                me.on_tmux_pane_bootstrap_timeout(instance_id, pane_id, generation, ctx);
+            },
+        );
+    }
+
+    #[cfg(all(unix, feature = "local_tty", not(feature = "remote_tty")))]
+    fn on_tmux_pane_bootstrap_timeout(
+        &self,
+        instance_id: u64,
+        pane_id: String,
+        generation: u64,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        use crate::terminal::tmux::bridge::{BootstrapTimeoutResult, TmuxInstanceId, TmuxRuntime};
+        let Some(runtime) = TmuxRuntime::for_id(TmuxInstanceId::from_u64(instance_id)) else {
+            return;
+        };
+        match runtime.handle_bootstrap_timeout(&pane_id, generation) {
+            BootstrapTimeoutResult::Retry(claim) => {
+                self.send_tmux_pane_staging(&claim, Some(instance_id), ctx);
+                self.schedule_tmux_pane_bootstrap_timeout(&runtime, &pane_id, ctx);
+            }
+            BootstrapTimeoutResult::Failed | BootstrapTimeoutResult::Stale => {}
         }
     }
 
