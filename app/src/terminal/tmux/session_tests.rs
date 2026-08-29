@@ -390,6 +390,35 @@ fn presentation_nested_alt_preserves_cell_metrics() {
 }
 
 #[test]
+fn presentation_nested_alt_hides_primary_images() {
+    use crate::terminal::model::ansi::{Handler, Mode};
+    use crate::terminal::model::test_utils::test_iterm_image;
+
+    let _iterm = FeatureFlag::ITermImages.override_enabled(true);
+    let mut model = TerminalModel::mock(None, None);
+    model.set_tmux_presentation(true);
+    model.handle_completed_iterm_image(test_iterm_image(7));
+    assert!(
+        model.alt_screen().grid_handler().has_visible_images(),
+        "primary grid must keep the iTerm image"
+    );
+    model.set_mode(Mode::SwapScreen {
+        save_cursor_and_clear_screen: false,
+    });
+    assert!(
+        !model.alt_screen().grid_handler().has_visible_images(),
+        "nested alt-screen must not show the primary image"
+    );
+    model.unset_mode(Mode::SwapScreen {
+        save_cursor_and_clear_screen: false,
+    });
+    assert!(
+        model.alt_screen().grid_handler().has_visible_images(),
+        "exiting nested alt-screen must restore the primary image"
+    );
+}
+
+#[test]
 fn presentation_grid_clear_drops_bootstrap_markers() {
     let mut model = TerminalModel::mock(None, None);
     model.set_tmux_presentation(true);

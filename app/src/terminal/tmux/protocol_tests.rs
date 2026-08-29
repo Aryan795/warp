@@ -683,13 +683,15 @@ fn silent_bootstrap_framing_hides_setup_and_clears_before_prompt() {
     let hist = text.find("HISTFILE=/dev/null").expect("history isolate");
     let marker = text.find("warp_bootstrapped").expect("bootstrap body");
     let clear = text.find("printf").expect("clear");
-    let echo_on = text.rfind("stty echo").expect("echo on");
+    let cleanup = text.rfind("__warp_silent_cleanup").expect("cleanup");
     assert!(text.contains("setopt NO_BANG_HIST"));
+    assert!(text.contains("__warp_histfile_set"));
+    assert!(text.contains("__warp_banghist"));
     assert!(!text.contains("fc -P") && !text.contains("fc -p"));
     assert!(echo_off < hist);
     assert!(hist < marker);
     assert!(marker < clear);
-    assert!(clear < echo_on);
+    assert!(clear < cleanup);
 }
 
 #[cfg(unix)]
@@ -815,6 +817,137 @@ sys.stdout.buffer.write(out)
         "bootstrap must not persist in history: {joined:?}"
     );
     let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+fn zsh_silent_probe(preamble: &[u8], probe: &[u8]) -> Option<String> {
+    let zsh = optional_shell("zsh")?;
+    let python = Command::new("python3")
+        .arg("-c")
+        .arg("import pty")
+        .status()
+        .ok()?;
+    if !python.success() {
+        return None;
+    }
+    let home = unique_temp_path("warp-tmux-zsh-probe-home");
+    std::fs::create_dir_all(&home).ok()?;
+    let framed = super::silent_history_isolated_script(ShellType::Zsh, b":\n");
+    let runner = format!(
+        r#"
+import os, pty, select, sys, time
+zsh = {zsh:?}
+preamble = bytes({preamble:?})
+probe = bytes({probe:?})
+script = sys.stdin.buffer.read()
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir({home:?})
+    os.environ["HOME"] = {home:?}
+    os.environ.pop("HISTFILE", None)
+    os.environ.pop("SAVEHIST", None)
+    os.execv(zsh, [zsh, "--no-rcs", "-i"])
+os.write(fd, preamble)
+time.sleep(0.15)
+os.write(fd, script)
+time.sleep(0.2)
+os.write(fd, probe)
+os.write(fd, b"SAVEHIST=0\necho WARP_SILENT_DONE\nexit\n")
+out = b""
+deadline = time.time() + 5
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+    if b"WARP_SILENT_DONE" in out:
+        break
+try:
+    os.waitpid(pid, 0)
+except ChildProcessError:
+    pass
+sys.stdout.buffer.write(out)
+"#,
+        zsh = zsh.display(),
+        home = home.display(),
+        preamble = preamble,
+        probe = probe,
+    );
+    let mut child = Command::new("python3")
+        .arg("-c")
+        .arg(&runner)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = std::io::Write::write_all(&mut stdin, &framed);
+    }
+    let output = child.wait_with_output().ok()?;
+    let _ = std::fs::remove_dir_all(&home);
+    let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+    Some(String::from_utf8_lossy(&combined).into_owned())
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_silent_restores_unset_hist_and_banghist_on() {
+    let Some(text) = zsh_silent_probe(
+        b"unsetopt BANG_HIST\nsetopt BANG_HIST\nunset HISTFILE\nunset SAVEHIST\n",
+        b"[[ -o banghist ]] && echo BANG_ON || echo BANG_OFF\n[[ -v HISTFILE ]] && echo HIST_SET || echo HIST_UNSET\n[[ -v SAVEHIST ]] && echo SAVE_SET || echo SAVE_UNSET\n",
+    ) else {
+        return;
+    };
+    assert!(
+        text.contains("WARP_SILENT_DONE"),
+        "script must complete: {text:?}"
+    );
+    assert!(
+        text.contains("BANG_ON"),
+        "BANG_HIST must be restored on: {text:?}"
+    );
+    assert!(
+        text.contains("HIST_UNSET"),
+        "unset HISTFILE must stay unset: {text:?}"
+    );
+    assert!(
+        text.contains("SAVE_UNSET"),
+        "unset SAVEHIST must stay unset: {text:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_silent_restores_set_hist_and_banghist_off() {
+    let Some(text) = zsh_silent_probe(
+        b"unsetopt BANG_HIST\nHISTFILE=/tmp/warp-silent-hist\nSAVEHIST=42\n",
+        b"[[ -o banghist ]] && echo BANG_ON || echo BANG_OFF\n[[ -v HISTFILE ]] && echo HIST_SET:$HISTFILE || echo HIST_UNSET\n[[ -v SAVEHIST ]] && echo SAVE_SET:$SAVEHIST || echo SAVE_UNSET\n",
+    ) else {
+        return;
+    };
+    assert!(
+        text.contains("WARP_SILENT_DONE"),
+        "script must complete: {text:?}"
+    );
+    assert!(
+        text.contains("BANG_OFF"),
+        "BANG_HIST must stay off: {text:?}"
+    );
+    assert!(
+        text.contains("HIST_SET:/tmp/warp-silent-hist"),
+        "HISTFILE must be restored: {text:?}"
+    );
+    assert!(
+        text.contains("SAVE_SET:42"),
+        "SAVEHIST must be restored: {text:?}"
+    );
 }
 
 #[test]

@@ -128,6 +128,7 @@ impl AltScreen {
             .region_mut(..)
             .each(|cell| *cell = bg.into());
         self.grid_handler.clear_secrets();
+        self.grid_handler.evict_all_images();
         primary
     }
 
