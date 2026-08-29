@@ -8,6 +8,9 @@
 //! `devcontainer up` reports success do we create a pane, using a
 //! `ShellStarter::DevContainer` that assumes the container is already
 //! running (see `crate::terminal::local_tty::dev_container`).
+
+#[cfg(feature = "local_tty")]
+mod newline;
 #[cfg(all(feature = "local_tty", not(feature = "remote_tty")))]
 use std::collections::HashMap;
 #[cfg(feature = "local_tty")]
