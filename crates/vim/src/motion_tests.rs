@@ -318,6 +318,83 @@ fn line_end_exclusive_stops_before_newline() {
     );
 }
 
+fn word_motion(direction: Direction, bound: WordBound) -> VimMotion {
+    VimMotion::Word(WordMotion::new(direction, bound, WordType::Default))
+}
+
+#[test]
+fn reverse_word_and_paragraph_from_nonzero_range_end() {
+    let text = "Xabc";
+    let valid = CharOffset::from(1)..CharOffset::from(4);
+    let end = CharOffset::from(4);
+    assert_eq!(
+        dest(
+            text,
+            valid.clone(),
+            end,
+            word_motion(Direction::Backward, WordBound::Start),
+        ),
+        CharOffset::from(1)
+    );
+    assert_eq!(
+        dest(
+            text,
+            valid.clone(),
+            end,
+            word_motion(Direction::Backward, WordBound::End),
+        ),
+        CharOffset::from(1)
+    );
+    assert_eq!(
+        dest(
+            text,
+            valid,
+            end,
+            word_motion(Direction::Forward, WordBound::Start),
+        ),
+        CharOffset::from(4)
+    );
+
+    let text = "Xab\n\ncd";
+    let valid = CharOffset::from(1)..CharOffset::from(text.chars().count());
+    assert_eq!(
+        dest(
+            text,
+            valid.clone(),
+            valid.end,
+            VimMotion::Paragraph(Direction::Backward),
+        ),
+        CharOffset::from(4)
+    );
+}
+
+#[test]
+fn word_motions_from_nonzero_range_stay_in_valid() {
+    let text = "Xabc def";
+    let valid = CharOffset::from(1)..CharOffset::from(text.chars().count());
+    let offsets = [valid.start, CharOffset::from(3), valid.end];
+    for offset in offsets {
+        for direction in [Direction::Forward, Direction::Backward] {
+            for bound in [WordBound::Start, WordBound::End] {
+                for word_type in [WordType::Default, WordType::BigWord] {
+                    let dest = motion_destination(
+                        text,
+                        valid.clone(),
+                        offset,
+                        &VimMotion::Word(WordMotion::new(direction, bound, word_type)),
+                        1,
+                        HorizontalWrap::StopAtLine,
+                    );
+                    assert!(
+                        dest >= valid.start && dest <= valid.end,
+                        "word dest {dest:?} outside {valid:?} from {offset:?} {direction:?} {bound:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn contiguous_range_not_starting_at_zero_or_one() {
     let text = "xxhello";

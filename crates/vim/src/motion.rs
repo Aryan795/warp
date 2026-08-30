@@ -336,6 +336,14 @@ fn move_crossing_lines<T: TextBuffer + ?Sized>(
     offset
 }
 
+fn clamp_to_valid(valid: &Range<CharOffset>, offset: CharOffset) -> CharOffset {
+    offset.max(valid.start).min(valid.end)
+}
+
+fn reverse_origin(offset: CharOffset, valid: &Range<CharOffset>) -> CharOffset {
+    (offset + 1).min(valid.end)
+}
+
 fn move_by_word<T: TextBuffer + ?Sized>(
     text: &T,
     valid: Range<CharOffset>,
@@ -348,10 +356,11 @@ fn move_by_word<T: TextBuffer + ?Sized>(
         bound,
         word_type,
     } = word_motion;
-    word_offsets(text, valid, offset, *direction, *bound, *word_type)
+    let dest = word_offsets(text, valid.clone(), offset, *direction, *bound, *word_type)
         .take(count as usize)
         .last()
-        .unwrap_or(offset)
+        .unwrap_or(offset);
+    clamp_to_valid(&valid, dest)
 }
 
 fn word_offsets<'a, T: TextBuffer + ?Sized>(
@@ -375,6 +384,7 @@ fn word_offsets<'a, T: TextBuffer + ?Sized>(
 struct WordHeads<'a> {
     offset: CharOffset,
     start: CharOffset,
+    end: CharOffset,
     chars: std::iter::Peekable<Box<dyn Iterator<Item = char> + 'a>>,
     cursor_context: CharacterKind,
     direction: Direction,
@@ -391,9 +401,10 @@ impl<'a> WordHeads<'a> {
         word_type: WordType,
     ) -> Self {
         let start = valid.start;
+        let end = valid.end;
         let (offset, chars) = match direction {
             Direction::Backward => {
-                let offset = offset + 1;
+                let offset = reverse_origin(offset, &valid);
                 (
                     offset,
                     Box::new(reverse_chars(text, valid, offset))
@@ -408,6 +419,7 @@ impl<'a> WordHeads<'a> {
         let mut chars = chars.peekable();
         Self {
             start,
+            end,
             offset,
             cursor_context: chars
                 .peek()
@@ -426,7 +438,11 @@ impl<'a> WordHeads<'a> {
                 self.offset =
                     CharOffset::from(self.offset.as_usize().saturating_sub(1)).max(self.start);
             }
-            Direction::Forward => self.offset += 1,
+            Direction::Forward => {
+                if self.offset < self.end {
+                    self.offset += 1;
+                }
+            }
         }
     }
 }
@@ -456,19 +472,20 @@ impl Iterator for WordHeads<'_> {
                     Direction::Backward => {
                         CharOffset::from(self.offset.as_usize().saturating_sub(1)).max(self.start)
                     }
-                    Direction::Forward => self.offset,
+                    Direction::Forward => self.offset.min(self.end),
                 });
             }
         }
 
         self.done = true;
-        Some(self.offset.max(self.start))
+        Some(self.offset.max(self.start).min(self.end))
     }
 }
 
 struct WordTails<'a> {
     offset: CharOffset,
     start: CharOffset,
+    end: CharOffset,
     chars: itertools::PeekNth<Box<dyn Iterator<Item = char> + 'a>>,
     direction: Direction,
     word_type: WordType,
@@ -484,9 +501,10 @@ impl<'a> WordTails<'a> {
         word_type: WordType,
     ) -> Self {
         let start = valid.start;
+        let end = valid.end;
         let (offset, chars) = match direction {
             Direction::Backward => {
-                let offset = offset + 1;
+                let offset = reverse_origin(offset, &valid);
                 (
                     offset,
                     itertools::peek_nth(Box::new(reverse_chars(text, valid, offset))
@@ -501,6 +519,7 @@ impl<'a> WordTails<'a> {
         };
         Self {
             start,
+            end,
             offset,
             chars,
             direction,
@@ -516,7 +535,11 @@ impl<'a> WordTails<'a> {
                 self.offset =
                     CharOffset::from(self.offset.as_usize().saturating_sub(1)).max(self.start);
             }
-            Direction::Forward => self.offset += 1,
+            Direction::Forward => {
+                if self.offset < self.end {
+                    self.offset += 1;
+                }
+            }
         }
     }
 }
@@ -552,7 +575,7 @@ impl Iterator for WordTails<'_> {
                     Direction::Backward => {
                         CharOffset::from(self.offset.as_usize().saturating_sub(1)).max(self.start)
                     }
-                    Direction::Forward => self.offset,
+                    Direction::Forward => self.offset.min(self.end),
                 });
             }
         }
@@ -562,7 +585,7 @@ impl Iterator for WordTails<'_> {
             Direction::Backward => {
                 CharOffset::from(self.offset.as_usize().saturating_sub(1)).max(self.start)
             }
-            Direction::Forward => self.offset,
+            Direction::Forward => self.offset.min(self.end),
         })
     }
 }
@@ -614,14 +637,17 @@ fn paragraph_start<T: TextBuffer + ?Sized>(
     valid: Range<CharOffset>,
     offset: CharOffset,
 ) -> Option<CharOffset> {
-    let iter = reverse_chars(text, valid, offset + 1)
+    let origin = reverse_origin(offset, &valid);
+    let iter = reverse_chars(text, valid.clone(), origin)
         .enumerate()
         .skip_while(|(_, c)| *c == '\n');
     let mut prev_was_newline = false;
     for (curr, c) in iter {
         if c == '\n' {
             if prev_was_newline {
-                return Some(offset + 1 - curr);
+                return Some(
+                    CharOffset::from(origin.as_usize().saturating_sub(curr)).max(valid.start),
+                );
             }
             prev_was_newline = true;
         } else {
