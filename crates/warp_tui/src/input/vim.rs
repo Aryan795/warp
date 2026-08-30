@@ -5,15 +5,11 @@
 //! semantics are expressed as explicit no-ops or custom overrides in the trait
 //! implementation rather than as arms in a bespoke match:
 //!
-//! - `find_char`, `navigate_paragraph`, and bracket jumps are intercepted as
-//!   no-ops (single-line prompt; no paragraph/bracket structure).
 //! - `search`, `cycle_search`, `search_word_at_cursor` — no-op.
 //! - `visual_paste` — inserts from the local yank buffer (no register system).
 //! - `join_line`, `toggle_case`, `keyword_prg`, `ex_command` — no-op.
 //! - Scroll helpers (`center_cursor_vertically`, `scroll_half_page_*`) — no-op.
 //!
-
-use std::ops::ControlFlow;
 
 use string_offset::CharOffset;
 use vim::HorizontalWrap;
@@ -57,24 +53,6 @@ impl VimHandler for TuiInputView {
     fn after_navigation(&mut self, ctx: &mut ViewContext<Self>) {
         self.follow_cursor(ctx);
         ctx.notify();
-    }
-
-    fn intercept_navigation(
-        &mut self,
-        motion: &VimMotion,
-        _count: u32,
-        ctx: &mut ViewContext<Self>,
-    ) -> ControlFlow<()> {
-        match motion {
-            VimMotion::FindChar(_)
-            | VimMotion::Paragraph(_)
-            | VimMotion::JumpToMatchingBracket
-            | VimMotion::JumpToUnmatchedBracket(_) => {
-                ctx.notify();
-                ControlFlow::Break(())
-            }
-            _ => ControlFlow::Continue(()),
-        }
     }
 
     fn horizontal_wrap(&self) -> HorizontalWrap {
