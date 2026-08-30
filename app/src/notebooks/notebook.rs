@@ -1096,6 +1096,9 @@ impl NotebookView {
         });
 
         self.set_editor_interaction_state(InteractionState::Editable, ctx);
+        self.input.update(ctx, |input, ctx| {
+            input.enter_vim_normal_mode(ctx);
+        });
 
         // Reset edit-tracking state to prevent a false initial event.
         self.send_edit_telemetry = false;

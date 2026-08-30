@@ -3,15 +3,18 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use futures_util::future::BoxFuture;
 use itertools::Itertools;
+use settings::Setting as _;
+use vim::vim::VimMode;
 use warp_core::ui::appearance::Appearance;
 use warp_editor::editor::EditorView;
+use warp_util::user_input::UserInput;
 use warpui::r#async::Timer;
 use warpui::platform::WindowStyle;
 use warpui::presenter::ChildView;
 use warpui::telemetry::EventPayload;
 use warpui::{
-    AddSingletonModel, App, AppContext, Element, Entity, SingletonEntity, TypedActionView, View,
-    ViewHandle, WindowId,
+    AddSingletonModel, App, AppContext, Element, Entity, SingletonEntity, TypedActionView,
+    UpdateModel, View, ViewHandle, WindowId,
 };
 
 use super::{EDIT_WINDOW_DURATION, NotebookEvent, NotebookView, SAVE_PERIOD};
@@ -41,9 +44,11 @@ use crate::server::ids::SyncId::ServerId;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::sync_queue::{QueueItem, SyncQueue, SyncQueueEvent};
 use crate::server::telemetry::context_provider::AppTelemetryContextProvider;
+use crate::settings::AppEditorSettings;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::terminal::keys::TerminalKeybindings;
 use crate::test_util::settings::initialize_settings_for_tests;
+use crate::vim_registers::VimRegisters;
 use crate::workflows::workflow::Workflow;
 use crate::workflows::{WorkflowSource, WorkflowType};
 use crate::workspace::ActiveSession;
@@ -80,6 +85,7 @@ fn initialize_app(app: &mut App) {
     app.add_singleton_model(|_| AuthStateProvider::new_for_test());
     app.add_singleton_model(AppTelemetryContextProvider::new_context_provider);
     app.add_singleton_model(AuthManager::new_for_test);
+    app.add_singleton_model(|_| VimRegisters::new());
     #[cfg(feature = "voice_input")]
     app.add_singleton_model(voice_input::VoiceInput::new);
 }
@@ -932,5 +938,70 @@ fn test_untitled_notebook() {
             });
             assert_eq!(notebook.title(ctx), "My Notebook");
         });
+    });
+}
+
+fn set_vim_mode(app: &mut App, enabled: bool) {
+    app.update_model(
+        &AppEditorSettings::handle(app),
+        |settings: &mut AppEditorSettings, ctx| {
+            settings.vim_mode.set_value(enabled, ctx).unwrap();
+        },
+    );
+}
+
+#[test]
+fn personal_notebook_pane_enables_vim_after_setting_on_and_toggle() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        initial_load(&mut app, []).await;
+
+        let (_window, notebook, _root) = create_notebook(&mut app);
+        notebook.update(&mut app, |notebook, ctx| {
+            notebook.open_new_notebook(
+                Some("Personal".into()),
+                Owner::mock_current_user(),
+                None,
+                ctx,
+            );
+            notebook.focus_input(ctx);
+        });
+
+        let input = notebook.read(&app, |notebook, _| notebook.input.clone());
+        assert_eq!(input.read(&app, |view, ctx| view.vim_mode(ctx)), None);
+
+        set_vim_mode(&mut app, true);
+        notebook.update(&mut app, |notebook, ctx| {
+            notebook.focus_input(ctx);
+        });
+        assert_eq!(
+            input.read(&app, |view, ctx| view.vim_mode(ctx)),
+            Some(VimMode::Normal)
+        );
+
+        let before = input.read(&app, |view, ctx| view.markdown(ctx));
+        input.update(&mut app, |view, ctx| {
+            view.handle_action(
+                &EditorViewAction::UserTyped(UserInput::new("hjkl".to_string())),
+                ctx,
+            );
+        });
+        assert_eq!(input.read(&app, |view, ctx| view.markdown(ctx)), before);
+        assert_eq!(
+            input.read(&app, |view, ctx| view.vim_mode(ctx)),
+            Some(VimMode::Normal)
+        );
+
+        set_vim_mode(&mut app, false);
+        assert_eq!(input.read(&app, |view, ctx| view.vim_mode(ctx)), None);
+
+        set_vim_mode(&mut app, true);
+        notebook.update(&mut app, |notebook, ctx| {
+            notebook.focus_input(ctx);
+        });
+        assert_eq!(
+            input.read(&app, |view, ctx| view.vim_mode(ctx)),
+            Some(VimMode::Normal)
+        );
     });
 }

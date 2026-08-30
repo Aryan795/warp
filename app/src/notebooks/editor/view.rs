@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use markdown_parser::{FormattedText, parse_html, parse_markdown};
 use num_traits::SaturatingSub;
 use pathfinder_geometry::vector::vec2f;
+use settings::Setting as _;
 use string_offset::CharOffset;
-use vim::vim::{Direction, VimMode, VimModel, VimSubscriber};
+use vim::vim::{Direction, MotionType, VimMode, VimModel, VimSubscriber};
 use warp_editor::content::anchor::Anchor;
 use warp_editor::content::text::{BufferTextStyle, CodeBlockType, TextStyles};
 use warp_editor::content::version::BufferVersion;
@@ -28,9 +29,9 @@ use warpui::clipboard::ClipboardContent;
 use warpui::elements::{
     AnchorPair, Axis, Border, ChildAnchor, Clipped, ConstrainedBox, Container, CornerRadius,
     Dismiss, Fill, Flex, Hoverable, Icon, MouseStateHandle, OffsetPositioning, OffsetType,
-    ParentAnchor, ParentElement, PositionedElementOffsetBounds, PositioningAxis, Radius,
-    ScrollStateHandle, Scrollable, ScrollableElement, ScrollbarWidth, Stack, XAxisAnchor,
-    YAxisAnchor,
+    ParentAnchor, ParentElement, ParentOffsetBounds, PositionedElementOffsetBounds,
+    PositioningAxis, Radius, ScrollStateHandle, Scrollable, ScrollableElement, ScrollbarWidth,
+    Stack, Text, XAxisAnchor, YAxisAnchor,
 };
 use warpui::event::ModifiersState;
 use warpui::fonts::{FallbackFontEvent, FallbackFontModel};
@@ -92,6 +93,16 @@ mod vim_handler_tests;
 
 const SCROLLBAR_WIDTH: ScrollbarWidth = ScrollbarWidth::Auto;
 const MAX_EDITOR_TIP_WIDTH: f32 = 300.;
+
+fn vim_mode_status_label(mode: VimMode) -> &'static str {
+    match mode {
+        VimMode::Normal => "NORMAL",
+        VimMode::Insert => "INSERT",
+        VimMode::Visual(MotionType::Linewise) => "VISUAL LINE",
+        VimMode::Visual(_) => "VISUAL",
+        VimMode::Replace => "REPLACE",
+    }
+}
 
 /// Width of the left gutter, which holds the block insertion menu.
 const GUTTER_WIDTH: f32 = ICON_DIMENSIONS + 4.;
@@ -1602,7 +1613,7 @@ impl RichTextEditorView {
         self.vim_keystroke(&Keystroke::parse("escape").expect("escape parses"), ctx);
     }
 
-    fn enter_vim_normal_mode(&mut self, ctx: &mut ViewContext<Self>) {
+    pub(crate) fn enter_vim_normal_mode(&mut self, ctx: &mut ViewContext<Self>) {
         if matches!(self.vim_mode(ctx), Some(VimMode::Insert) | None) && self.vim_mode_enabled(ctx)
         {
             self.vim_escape(ctx);
@@ -2864,6 +2875,31 @@ impl View for RichTextEditorView {
 
         if focused {
             self.find_bar.render(&mut stack);
+        }
+
+        if let Some(vim_mode) = self.vim_mode(app)
+            && *AppEditorSettings::as_ref(app).vim_status_bar.value()
+        {
+            stack.add_positioned_overlay_child(
+                Container::new(
+                    Text::new_inline(
+                        vim_mode_status_label(vim_mode),
+                        appearance.ui_font_family(),
+                        appearance.ui_font_size(),
+                    )
+                    .with_color(theme.nonactive_ui_text_color().into_solid())
+                    .finish(),
+                )
+                .with_padding_right(8.)
+                .with_padding_bottom(4.)
+                .finish(),
+                OffsetPositioning::offset_from_parent(
+                    vec2f(0., 0.),
+                    ParentOffsetBounds::Unbounded,
+                    ParentAnchor::BottomRight,
+                    ChildAnchor::BottomRight,
+                ),
+            );
         }
 
         stack.finish()
