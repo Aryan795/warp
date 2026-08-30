@@ -1,10 +1,10 @@
 use string_offset::CharOffset;
 use vec1::Vec1;
 use vim::handler::{VimBufferOps, VimCaret, VimSnapshot};
-use vim::vim::VimOperator;
+use vim::vim::{MotionType, VimOperator};
 use warpui::ModelContext;
 
-use super::{AnchorBias, EditorModel, LocalSelection, Selection};
+use super::{AnchorBias, EditorModel, LocalSelection, Selection, ToCharOffset};
 
 fn to_one_based(offset: CharOffset) -> CharOffset {
     CharOffset::from(offset.as_usize() + 1)
@@ -19,15 +19,22 @@ impl VimBufferOps for EditorModel {
 
     fn snapshot(&self, ctx: &Self::Ctx<'_>) -> VimSnapshot {
         let buffer = self.buffer(ctx);
+        let visual_tails = self.vim_visual_tails();
         let carets = self
             .selections(ctx)
             .iter()
-            .map(|selection| {
-                let offsets = selection.to_offset(buffer);
-                VimCaret {
-                    head: to_one_based(offsets.start),
-                    tail: to_one_based(offsets.end),
-                }
+            .enumerate()
+            .map(|(index, selection)| {
+                let head =
+                    to_one_based(selection.head().to_char_offset(buffer).unwrap_or_default());
+                let tail = visual_tails
+                    .get(index)
+                    .and_then(|anchor| anchor.to_char_offset(buffer).ok())
+                    .map(to_one_based)
+                    .unwrap_or_else(|| {
+                        to_one_based(selection.tail().to_char_offset(buffer).unwrap_or_default())
+                    });
+                VimCaret { head, tail }
             })
             .collect();
         VimSnapshot::from_plain_text(&self.buffer_text(ctx), carets)
@@ -67,6 +74,15 @@ impl VimBufferOps for EditorModel {
         let Ok(new_selections) = Vec1::try_from_vec(new_selections) else {
             return;
         };
+        if !self.vim_visual_tails.is_empty() {
+            let collapsed = new_selections.mapped(|mut selection| {
+                let head = selection.head().clone();
+                selection.set_selection(Selection::single_cursor(head));
+                selection
+            });
+            self.change_selections(collapsed, ctx);
+            return;
+        }
         self.change_selections(new_selections, ctx);
     }
 
@@ -111,11 +127,15 @@ impl VimBufferOps for EditorModel {
 
     fn set_visual_tails_to_heads(&mut self, ctx: &mut Self::Ctx<'_>) {
         self.vim_set_visual_tail_to_selection_heads(ctx);
-        let mut snap = self.snapshot(ctx);
-        for caret in &mut snap.carets {
-            caret.tail = caret.head;
-        }
-        self.set_selections(&snap.carets, ctx);
+    }
+
+    fn expand_visual_selection(
+        &mut self,
+        motion_type: MotionType,
+        include_newline: bool,
+        ctx: &mut Self::Ctx<'_>,
+    ) {
+        self.vim_visual_selection_range(motion_type, include_newline, ctx);
     }
 
     fn enforce_normal_mode_line_cap(&mut self, ctx: &mut Self::Ctx<'_>) {

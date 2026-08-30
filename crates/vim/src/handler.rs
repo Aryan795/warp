@@ -83,6 +83,8 @@ fn register_text_for_yank(selected_text: &str, motion_type: MotionType) -> Optio
         Some("\n".to_owned())
     } else if selected_text.is_empty() {
         None
+    } else if motion_type == MotionType::Linewise && !selected_text.ends_with('\n') {
+        Some(format!("{selected_text}\n"))
     } else {
         Some(selected_text.to_owned())
     }
@@ -203,9 +205,19 @@ impl VimSnapshot {
     }
 
     fn line_text(&self, offset: CharOffset) -> String {
-        let start = self.line_start(offset).as_usize();
-        let end = self.line_end(offset).as_usize();
-        self.chars[start.max(1)..=end.min(self.chars.len().saturating_sub(1)).max(1)]
+        if self.chars.len() <= 1 {
+            return String::new();
+        }
+        let start = self.line_start(offset).as_usize().max(1);
+        let end = self
+            .line_end(offset)
+            .as_usize()
+            .min(self.chars.len() - 1)
+            .max(start);
+        if start >= self.chars.len() {
+            return String::new();
+        }
+        self.chars[start..=end]
             .iter()
             .take_while(|c| **c != '\n')
             .collect()

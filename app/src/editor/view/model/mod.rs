@@ -5,6 +5,7 @@ mod vim_buffer;
 
 use std::cmp::{self};
 use std::collections::{HashMap, HashSet};
+use std::mem;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -15,6 +16,7 @@ pub use buffer::{
 };
 use buffer::{Buffer, Text};
 pub use display_map::{Bias, DisplayMap, DisplayPoint, MovementResult, ToDisplayPoint};
+use itertools::FoldWhile::{Continue, Done};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use num_traits::SaturatingSub;
@@ -25,7 +27,7 @@ pub use selections::{
 };
 use string_offset::{ByteOffset, CharOffset};
 use vec1::{Vec1, vec1};
-use vim::vim::Direction;
+use vim::vim::{Direction, MotionType};
 use warp_errors::report_error;
 use warpui::accessibility::{AccessibilityContent, WarpA11yRole};
 use warpui::text::TextBuffer;
@@ -1465,7 +1467,6 @@ impl EditorModel {
     }
 
     /// Move selection start point to the start of the current line.
-    #[cfg(test)]
     fn selection_line_start(&mut self, ctx: &mut ModelContext<Self>) {
         let buffer = self.buffer(ctx);
         let mut new_selections = self.selections(ctx).clone();
@@ -1536,6 +1537,65 @@ impl EditorModel {
         self.selection_line_end(ctx);
         if include_newline {
             self.include_newline_in_selection(ctx);
+        }
+    }
+
+    fn extend_selection_linewise_visual_mode(
+        &mut self,
+        include_newline: bool,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.selection_line_start(ctx);
+        self.move_cursor(
+            /* keep_selection */ true,
+            |buffer, selection| {
+                let end = selection.end().to_point(buffer).unwrap();
+                if end.column == 0 {
+                    end
+                } else {
+                    Point::new(end.row, buffer.line_len(end.row).unwrap())
+                }
+            },
+            ctx,
+        );
+        if include_newline {
+            self.include_newline_in_selection(ctx);
+        }
+    }
+
+    pub fn vim_visual_selection_range(
+        &mut self,
+        motion_type: MotionType,
+        include_newline: bool,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let buffer = self.buffer(ctx);
+        let vim_visual_tails = mem::take(&mut self.vim_visual_tails);
+        let new_selections = self
+            .selections(ctx)
+            .iter()
+            .zip(vim_visual_tails.iter())
+            .filter_map(|(selection, visual_tail)| {
+                let mut end = selection.head().to_char_offset(buffer).ok()?;
+                let mut start = visual_tail.to_char_offset(buffer).ok()?;
+                if start > end {
+                    mem::swap(&mut start, &mut end);
+                }
+                let max_offset = buffer.max_point().to_char_offset(buffer).ok()?;
+                if end < max_offset
+                    && (motion_type != MotionType::Linewise
+                        || buffer
+                            .chars_at(end)
+                            .is_ok_and(|mut it| it.next().unwrap_or_default() != '\n'))
+                {
+                    end += 1;
+                }
+                Some(start..end)
+            })
+            .collect_vec();
+        let _ = self.select_ranges_by_offset(new_selections, ctx);
+        if motion_type == MotionType::Linewise {
+            self.extend_selection_linewise_visual_mode(include_newline, ctx);
         }
     }
 
@@ -1611,6 +1671,144 @@ impl EditorModel {
             },
             ctx,
         );
+    }
+
+    /// Space/backspace wrapping skips newlines so the cursor lands on the next visible character.
+    pub fn move_cursor_ignoring_newlines(
+        &mut self,
+        char_count: u32,
+        direction: &Direction,
+        keep_selection: bool,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.move_cursor(
+            keep_selection,
+            |buffer, selection| {
+                let head = selection
+                    .head()
+                    .to_char_offset(buffer)
+                    .expect("Selection head must be valid CharOffset");
+
+                match direction {
+                    Direction::Backward => {
+                        let offset_change = buffer
+                            .chars_rev_at(head)
+                            .expect("Buffer must have characters at the current head.")
+                            .enumerate()
+                            .fold_while(0, |chars_so_far, (rev_index, c)| {
+                                if chars_so_far < char_count {
+                                    if c == '\n' {
+                                        Continue(chars_so_far)
+                                    } else {
+                                        Continue(chars_so_far + 1)
+                                    }
+                                } else {
+                                    Done(rev_index as u32)
+                                }
+                            })
+                            .into_inner();
+                        head.saturating_sub(&(offset_change as usize).into())
+                    }
+                    Direction::Forward => {
+                        let offset_change = buffer
+                            .chars_at(head)
+                            .expect("Buffer must have characters at the current selection head.")
+                            .enumerate()
+                            .fold_while(0, |chars_so_far, (index, c)| {
+                                if chars_so_far < char_count {
+                                    if c == '\n' {
+                                        Continue(chars_so_far)
+                                    } else {
+                                        Continue(chars_so_far + 1)
+                                    }
+                                } else {
+                                    Done(index as u32)
+                                }
+                            })
+                            .into_inner();
+                        let max_offset = buffer
+                            .max_point()
+                            .to_char_offset(buffer)
+                            .expect("Buffer::max_point must be valid CharOffset");
+                        cmp::min(max_offset, head + offset_change as usize)
+                    }
+                }
+            },
+            ctx,
+        );
+    }
+
+    pub fn move_up_by_offset(
+        &mut self,
+        count: u32,
+        keep_selection: bool,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let buffer = self.buffer(ctx);
+        let mut new_selections = self.selections(ctx).clone();
+        for selection in new_selections.iter_mut() {
+            let mut point = selection
+                .head()
+                .to_point(buffer)
+                .expect("Selection head must be a valid Point");
+            point.row = point.row.saturating_sub(count);
+            let goal_column = match selection.goal_end_column {
+                Some(goal_column) => cmp::max(goal_column, point.column),
+                None => point.column,
+            };
+            point.column = u32::min(
+                goal_column,
+                buffer.line_len(point.row).unwrap_or(point.column),
+            );
+            let Ok(cursor) = buffer.anchor_at(point, AnchorBias::Left) else {
+                continue;
+            };
+            if keep_selection {
+                selection.set_head(buffer, cursor);
+            } else {
+                selection.set_selection(Selection::single_cursor(cursor));
+            }
+            selection.goal_start_column = Some(goal_column);
+            selection.goal_end_column = Some(goal_column);
+        }
+        self.change_selections(new_selections, ctx);
+    }
+
+    pub fn move_down_by_offset(
+        &mut self,
+        count: u32,
+        keep_selection: bool,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let buffer = self.buffer(ctx);
+        let max_point = buffer.max_point();
+        let mut new_selections = self.selections(ctx).clone();
+        for selection in new_selections.iter_mut() {
+            let mut point = selection
+                .head()
+                .to_point(buffer)
+                .expect("Selection head must be a valid Point");
+            point.row = cmp::min(point.row + count, max_point.row);
+            let goal_column = match selection.goal_end_column {
+                Some(goal_column) => cmp::max(goal_column, point.column),
+                None => point.column,
+            };
+            point.column = cmp::min(
+                goal_column,
+                buffer.line_len(point.row).unwrap_or(point.column),
+            );
+            let Ok(cursor) = buffer.anchor_at(point, AnchorBias::Left) else {
+                continue;
+            };
+            if keep_selection {
+                selection.set_head(buffer, cursor);
+            } else {
+                selection.set_selection(Selection::single_cursor(cursor));
+            }
+            selection.goal_start_column = Some(goal_column);
+            selection.goal_end_column = Some(goal_column);
+        }
+        self.change_selections(new_selections, ctx);
     }
 
     /// Toggle case for the selected region.
@@ -2421,7 +2619,6 @@ impl EditorModel {
         })
     }
 
-    #[cfg(test)]
     /// Attempt to include a newline in the selection, if there one.
     /// By default, attempt to select the newline following the selection.
     /// If that's not possible, attempt to select the newline before the selection.

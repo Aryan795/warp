@@ -38,7 +38,9 @@ use settings::Setting as _;
 use snapshot::{EditorHeightShrinkDelay, ViewSnapshot};
 use string_offset::{ByteOffset, CharOffset};
 use vec1::{Vec1, vec1};
-use vim::handler::{self, apply_mode_change, apply_operator, apply_visual_operator, apply_visual_paste};
+use vim::handler::{
+    self, apply_mode_change, apply_operator, apply_visual_operator, apply_visual_paste,
+};
 use vim::vim::{
     BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
     InsertPosition, LineMotion, ModeTransition, MotionType, VimHandler, VimMode, VimModel,
@@ -2080,8 +2082,26 @@ impl VimHandler for EditorView {
             return;
         }
 
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::move_char(editor_model, character_count, motion, keep_selection, ctx);
+        self.change_selections(ctx, |editor_model, ctx| match motion {
+            CharacterMotion::WrappingLeft => editor_model.move_cursor_ignoring_newlines(
+                character_count,
+                &Direction::Backward,
+                keep_selection,
+                ctx,
+            ),
+            CharacterMotion::WrappingRight => editor_model.move_cursor_ignoring_newlines(
+                character_count,
+                &Direction::Forward,
+                keep_selection,
+                ctx,
+            ),
+            CharacterMotion::Up => {
+                editor_model.move_up_by_offset(character_count, keep_selection, ctx)
+            }
+            CharacterMotion::Down => {
+                editor_model.move_down_by_offset(character_count, keep_selection, ctx)
+            }
+            _ => handler::move_char(editor_model, character_count, motion, keep_selection, ctx),
         });
     }
 
@@ -2218,7 +2238,10 @@ impl VimHandler for EditorView {
             )
         };
         match operator {
-            VimOperator::Yank | VimOperator::ToggleComment | VimOperator::Indent | VimOperator::Dedent => {
+            VimOperator::Yank
+            | VimOperator::ToggleComment
+            | VimOperator::Indent
+            | VimOperator::Dedent => {
                 self.change_selections(ctx, |editor_model, ctx| {
                     yanked = apply(editor_model, ctx);
                 });
@@ -2272,7 +2295,6 @@ impl VimHandler for EditorView {
         let chars_to_toggle = u32::min(char_count, self.distance_to_line_end(ctx));
         self.toggle_character_case(chars_to_toggle, ctx);
     }
-
 
     fn search(&mut self, direction: &Direction, ctx: &mut ViewContext<Self>) {
         ctx.emit(Event::Search {
@@ -2536,7 +2558,10 @@ impl VimHandler for EditorView {
     ) {
         let mut yanked = None;
         match operator {
-            VimOperator::Yank | VimOperator::ToggleComment | VimOperator::Indent | VimOperator::Dedent => {
+            VimOperator::Yank
+            | VimOperator::ToggleComment
+            | VimOperator::Indent
+            | VimOperator::Dedent => {
                 self.change_selections(ctx, |editor_model, ctx| {
                     yanked = apply_visual_operator(editor_model, operator, motion_type, ctx);
                 });
@@ -2548,7 +2573,8 @@ impl VimHandler for EditorView {
                         PlainTextEditorViewAction::Delete,
                         EditOrigin::UserInitiated,
                         |editor_model, ctx| {
-                            yanked = apply_visual_operator(editor_model, operator, motion_type, ctx);
+                            yanked =
+                                apply_visual_operator(editor_model, operator, motion_type, ctx);
                         },
                     ),
                 );
@@ -2605,7 +2631,6 @@ impl VimHandler for EditorView {
             editor_model.vim_set_visual_tails(tails);
         });
     }
-
 
     fn backspace(&mut self, ctx: &mut ViewContext<Self>) {
         self.backspace(ctx);
