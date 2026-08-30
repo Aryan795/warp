@@ -2205,11 +2205,11 @@ pub trait VimHandler {
         true
     }
 
-    /// Apply `map` to each cursor. `buffer` is the full text; offsets are 0-based character offsets.
+    /// Apply `map` to each cursor. Offsets are 0-based character offsets into `text`.
     fn map_cursors(
         &mut self,
         ctx: &mut ViewContext<Self>,
-        map: impl FnMut(&str, CharOffset) -> CharOffset,
+        map: impl FnMut(&dyn crate::VimText, CharOffset) -> CharOffset,
     );
 
     fn vim_move_vertical(&mut self, count: u32, direction: Direction, ctx: &mut ViewContext<Self>);

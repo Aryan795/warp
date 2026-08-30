@@ -747,20 +747,19 @@ impl CodeEditorModel {
         }
     }
 
-    /// Map each cursor through `map`. `buffer` is 0-based character text; native heads are 1-based.
+    /// Apply a 0-based motion map to each native (1-based) selection head.
     pub fn map_vim_cursors(
         &mut self,
         ctx: &mut ModelContext<Self>,
-        mut map: impl FnMut(&str, CharOffset) -> CharOffset,
+        mut map: impl FnMut(&dyn vim::VimText, CharOffset) -> CharOffset,
     ) {
         let buffer = self.content().as_ref(ctx);
         let max_native = buffer.max_charoffset();
         let start_native = CharOffset::from(1);
-        let text = if max_native <= start_native {
-            String::new()
-        } else {
-            buffer.text_in_range(start_native..max_native).into_string()
-        };
+        let len = max_native
+            .as_usize()
+            .saturating_sub(start_native.as_usize());
+        let text = vim::OffsetText::new(buffer, start_native, len);
         let current_selections = self.selection_model.as_ref(ctx).selection_offsets();
         let new_selections = current_selections.mapped(|selection| {
             let zero = CharOffset::from(selection.head.as_usize().saturating_sub(1));

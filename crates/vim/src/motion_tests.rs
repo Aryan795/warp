@@ -1,10 +1,14 @@
 use string_offset::CharOffset;
 
-use super::{HorizontalWrap, motion_destination, motion_destination_with_jump};
+use super::{HorizontalWrap, OffsetText, motion_destination, motion_destination_with_jump};
 use crate::vim::{
     CharacterMotion, Direction, FirstNonWhitespaceMotion, LineMotion, VimMotion, WordBound,
     WordMotion, WordType,
 };
+
+fn as_text(s: &str) -> OffsetText<'_, str> {
+    OffsetText::new(s, CharOffset::zero(), s.chars().count())
+}
 
 #[test]
 fn line_navigation_zero_caret_dollar() {
@@ -12,7 +16,7 @@ fn line_navigation_zero_caret_dollar() {
     let start = CharOffset::zero();
     assert_eq!(
         motion_destination(
-            text,
+            &as_text(text),
             start,
             &VimMotion::Line(LineMotion::End),
             1,
@@ -23,7 +27,7 @@ fn line_navigation_zero_caret_dollar() {
     let at_end = CharOffset::from(12);
     assert_eq!(
         motion_destination(
-            text,
+            &as_text(text),
             at_end,
             &VimMotion::Line(LineMotion::FirstNonWhitespace),
             1,
@@ -33,7 +37,7 @@ fn line_navigation_zero_caret_dollar() {
     );
     assert_eq!(
         motion_destination(
-            text,
+            &as_text(text),
             at_end,
             &VimMotion::Line(LineMotion::Start),
             1,
@@ -47,7 +51,7 @@ fn line_navigation_zero_caret_dollar() {
 fn word_forward_from_start() {
     let text = "echo hello";
     let dest = motion_destination(
-        text,
+        &as_text(text),
         CharOffset::zero(),
         &VimMotion::Word(WordMotion::new(
             Direction::Forward,
@@ -64,7 +68,7 @@ fn word_forward_from_start() {
 fn wrapping_stop_at_line_does_not_cross() {
     let text = "ab\ncd";
     let dest = motion_destination(
-        text,
+        &as_text(text),
         CharOffset::from(1),
         &VimMotion::Character(CharacterMotion::WrappingRight),
         3,
@@ -77,7 +81,7 @@ fn wrapping_stop_at_line_does_not_cross() {
 fn stop_at_line_forward_reaches_exclusive_end() {
     let text = "ab";
     let dest = motion_destination(
-        text,
+        &as_text(text),
         CharOffset::from(1),
         &VimMotion::Character(CharacterMotion::Right),
         1,
@@ -90,7 +94,7 @@ fn stop_at_line_forward_reaches_exclusive_end() {
 fn first_nonwhitespace_on_whitespace_only_line_is_line_start() {
     for text in ["   ", "\t\t", " \t ", "   \nnext"] {
         let dest = motion_destination(
-            text,
+            &as_text(text),
             CharOffset::from(2),
             &VimMotion::Line(LineMotion::FirstNonWhitespace),
             1,
@@ -98,7 +102,7 @@ fn first_nonwhitespace_on_whitespace_only_line_is_line_start() {
         );
         assert_eq!(dest, CharOffset::zero(), "text={text:?}");
         let dest = motion_destination(
-            text,
+            &as_text(text),
             CharOffset::from(2),
             &VimMotion::FirstNonWhitespace(FirstNonWhitespaceMotion::DownMinusOne),
             1,
@@ -113,7 +117,7 @@ fn jump_to_first_line_can_land_on_column_zero() {
     let text = "   echo\n  two";
     assert_eq!(
         motion_destination_with_jump(
-            text,
+            &as_text(text),
             CharOffset::from(10),
             &VimMotion::JumpToFirstLine,
             1,
@@ -124,7 +128,7 @@ fn jump_to_first_line_can_land_on_column_zero() {
     );
     assert_eq!(
         motion_destination_with_jump(
-            text,
+            &as_text(text),
             CharOffset::from(10),
             &VimMotion::JumpToLine(2),
             1,
@@ -135,7 +139,7 @@ fn jump_to_first_line_can_land_on_column_zero() {
     );
     assert_eq!(
         motion_destination_with_jump(
-            text,
+            &as_text(text),
             CharOffset::zero(),
             &VimMotion::JumpToLastLine,
             1,

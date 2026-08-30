@@ -35,7 +35,7 @@ impl VimHandler for CodeEditorView {
     fn map_cursors(
         &mut self,
         ctx: &mut ViewContext<Self>,
-        map: impl FnMut(&str, CharOffset) -> CharOffset,
+        map: impl FnMut(&dyn vim::VimText, CharOffset) -> CharOffset,
     ) {
         self.model
             .update(ctx, |model, ctx| model.map_vim_cursors(ctx, map));

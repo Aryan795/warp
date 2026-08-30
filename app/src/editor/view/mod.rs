@@ -2100,14 +2100,11 @@ impl VimHandler for EditorView {
     fn map_cursors(
         &mut self,
         ctx: &mut ViewContext<Self>,
-        mut map: impl FnMut(&str, CharOffset) -> CharOffset,
+        mut map: impl FnMut(&dyn vim::VimText, CharOffset) -> CharOffset,
     ) {
         self.change_selections(ctx, |editor_model, ctx| {
             let buffer = editor_model.buffer(ctx);
-            let text: String = buffer
-                .chars_at(CharOffset::zero())
-                .map(|chars| chars.collect())
-                .unwrap_or_default();
+            let text = vim::OffsetText::new(buffer, CharOffset::zero(), buffer.len().as_usize());
             let mut new_selections = editor_model.selections(ctx).clone();
             for selection in new_selections.iter_mut() {
                 let Ok(offset) = selection.head().to_char_offset(buffer) else {

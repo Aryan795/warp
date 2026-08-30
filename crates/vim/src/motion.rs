@@ -1,7 +1,9 @@
 use std::cmp;
 
+use anyhow::anyhow;
 use string_offset::CharOffset;
 use warpui_core::text::TextBuffer;
+use warpui_core::text::point::Point;
 
 use crate::vim::{
     BracketChar, CharacterMotion, Direction, FindCharMotion, LineMotion, VimMotion, WordMotion,
@@ -22,8 +24,103 @@ pub enum HorizontalWrap {
     CrossLine,
 }
 
+/// Character-offset text used by shared vim motions. Implementations must not copy the document.
+pub trait VimText {
+    fn char_len(&self) -> usize;
+    fn chars_at(&self, offset: CharOffset) -> Box<dyn Iterator<Item = char> + '_>;
+    fn chars_rev_at(&self, offset: CharOffset) -> Box<dyn Iterator<Item = char> + '_>;
+}
+
+/// Zero-based view over a [`TextBuffer`], optionally skipping a native origin (e.g. 1-based editors).
+pub struct OffsetText<'a, B: TextBuffer + ?Sized> {
+    buffer: &'a B,
+    origin: CharOffset,
+    len: usize,
+}
+
+impl<'a, B: TextBuffer + ?Sized> OffsetText<'a, B> {
+    pub fn new(buffer: &'a B, origin: CharOffset, len: usize) -> Self {
+        Self {
+            buffer,
+            origin,
+            len,
+        }
+    }
+}
+
+impl<'a, B: TextBuffer + ?Sized> VimText for OffsetText<'a, B> {
+    fn char_len(&self) -> usize {
+        self.len
+    }
+
+    fn chars_at(&self, offset: CharOffset) -> Box<dyn Iterator<Item = char> + '_> {
+        let remaining = self.len.saturating_sub(offset.as_usize());
+        let native = CharOffset::from(self.origin.as_usize().saturating_add(offset.as_usize()));
+        match self.buffer.chars_at(native) {
+            Ok(iter) => Box::new(iter.take(remaining)),
+            Err(_) => Box::new(std::iter::empty()),
+        }
+    }
+
+    fn chars_rev_at(&self, offset: CharOffset) -> Box<dyn Iterator<Item = char> + '_> {
+        let native = CharOffset::from(self.origin.as_usize().saturating_add(offset.as_usize()));
+        match self.buffer.chars_rev_at(native) {
+            Ok(iter) => Box::new(iter.take(offset.as_usize())),
+            Err(_) => Box::new(std::iter::empty()),
+        }
+    }
+}
+
+impl VimText for str {
+    fn char_len(&self) -> usize {
+        self.chars().count()
+    }
+
+    fn chars_at(&self, offset: CharOffset) -> Box<dyn Iterator<Item = char> + '_> {
+        Box::new(self.chars().skip(offset.as_usize()))
+    }
+
+    fn chars_rev_at(&self, offset: CharOffset) -> Box<dyn Iterator<Item = char> + '_> {
+        let n = self.chars().count();
+        Box::new(self.chars().rev().skip(n.saturating_sub(offset.as_usize())))
+    }
+}
+
+struct DynBuf<'a>(&'a dyn VimText);
+
+impl TextBuffer for DynBuf<'_> {
+    type Chars<'b>
+        = Box<dyn Iterator<Item = char> + 'b>
+    where
+        Self: 'b;
+    type CharsReverse<'b>
+        = Box<dyn Iterator<Item = char> + 'b>
+    where
+        Self: 'b;
+
+    fn chars_at(&self, offset: CharOffset) -> anyhow::Result<Self::Chars<'_>> {
+        Ok(self.0.chars_at(offset))
+    }
+
+    fn chars_rev_at(&self, offset: CharOffset) -> anyhow::Result<Self::CharsReverse<'_>> {
+        Ok(self.0.chars_rev_at(offset))
+    }
+
+    fn to_point(&self, offset: CharOffset) -> anyhow::Result<Point> {
+        Ok(Point::new(0, offset.as_usize() as u32))
+    }
+
+    fn to_offset(&self, point: Point) -> anyhow::Result<CharOffset> {
+        if point.row == 0 {
+            Ok(CharOffset::from(point.column as usize))
+        } else {
+            Err(anyhow!("vim motion text is addressed by character offset"))
+        }
+    }
+}
+
 pub fn motion_destination(
-    text: &str,
+    text: &dyn VimText,
     offset: CharOffset,
     motion: &VimMotion,
     count: u32,
@@ -33,7 +130,7 @@ pub fn motion_destination(
 }
 
 pub fn motion_destination_with_jump(
-    text: &str,
+    text: &dyn VimText,
     offset: CharOffset,
     motion: &VimMotion,
     count: u32,
@@ -79,7 +176,7 @@ pub fn motion_destination_with_jump(
         VimMotion::Paragraph(direction) => move_by_paragraph(text, offset, count, *direction),
         VimMotion::JumpToFirstLine => jump(CharOffset::zero()),
         VimMotion::JumpToLastLine => {
-            if text.ends_with('\n') {
+            if ends_with_newline(text) {
                 CharOffset::from(char_len(text))
             } else {
                 jump(CharOffset::from(char_len(text)))
@@ -88,29 +185,31 @@ pub fn motion_destination_with_jump(
         VimMotion::JumpToLine(line_number) => jump(jump_to_line_start(text, *line_number)),
         VimMotion::JumpToMatchingBracket => jump_to_matching_bracket(text, offset),
         VimMotion::JumpToUnmatchedBracket(bracket) => {
-            vim_find_matching_bracket(text, bracket, offset).unwrap_or(offset)
+            vim_find_matching_bracket(&DynBuf(text), bracket, offset).unwrap_or(offset)
         }
     }
 }
 
-fn char_len(text: &str) -> usize {
-    text.chars().count()
+fn char_len(text: &dyn VimText) -> usize {
+    text.char_len()
 }
 
-fn clamp_offset(text: &str, offset: CharOffset) -> CharOffset {
+fn clamp_offset(text: &dyn VimText, offset: CharOffset) -> CharOffset {
     CharOffset::from(offset.as_usize().min(char_len(text)))
 }
 
-fn char_at(text: &str, offset: CharOffset) -> Option<char> {
-    text.chars().nth(offset.as_usize())
+fn char_at(text: &dyn VimText, offset: CharOffset) -> Option<char> {
+    text.chars_at(offset).next()
 }
 
-fn line_start(text: &str, offset: CharOffset) -> CharOffset {
+fn ends_with_newline(text: &dyn VimText) -> bool {
+    let len = char_len(text);
+    len > 0 && char_at(text, CharOffset::from(len - 1)) == Some('\n')
+}
+
+fn line_start(text: &dyn VimText, offset: CharOffset) -> CharOffset {
     let mut steps = 0;
-    let Ok(iter) = text.chars_rev_at(offset) else {
-        return offset;
-    };
-    for c in iter {
+    for c in text.chars_rev_at(offset) {
         if c == '\n' {
             break;
         }
@@ -119,12 +218,9 @@ fn line_start(text: &str, offset: CharOffset) -> CharOffset {
     CharOffset::from(offset.as_usize().saturating_sub(steps))
 }
 
-fn line_end_exclusive(text: &str, offset: CharOffset) -> CharOffset {
+fn line_end_exclusive(text: &dyn VimText, offset: CharOffset) -> CharOffset {
     let mut steps = 0;
-    let Ok(iter) = text.chars_at(offset) else {
-        return offset;
-    };
-    for c in iter {
+    for c in text.chars_at(offset) {
         if c == '\n' {
             break;
         }
@@ -133,13 +229,11 @@ fn line_end_exclusive(text: &str, offset: CharOffset) -> CharOffset {
     offset + steps
 }
 
-fn first_nonwhitespace(text: &str, offset: CharOffset) -> CharOffset {
+fn first_nonwhitespace(text: &dyn VimText, offset: CharOffset) -> CharOffset {
     let start = line_start(text, offset);
     let end = line_end_exclusive(text, offset);
-    let Ok(iter) = text.chars_at(start) else {
-        return start;
-    };
-    for (steps, c) in iter
+    for (steps, c) in text
+        .chars_at(start)
         .take(end.as_usize().saturating_sub(start.as_usize()))
         .enumerate()
     {
@@ -151,7 +245,7 @@ fn first_nonwhitespace(text: &str, offset: CharOffset) -> CharOffset {
 }
 
 fn move_horizontal(
-    text: &str,
+    text: &dyn VimText,
     offset: CharOffset,
     count: u32,
     direction: Direction,
@@ -184,7 +278,7 @@ fn move_horizontal(
 }
 
 fn move_skipping_newlines(
-    text: &str,
+    text: &dyn VimText,
     offset: CharOffset,
     count: u32,
     direction: Direction,
@@ -192,12 +286,9 @@ fn move_skipping_newlines(
     let max = CharOffset::from(char_len(text));
     match direction {
         Direction::Backward => {
-            let Ok(iter) = text.chars_rev_at(offset) else {
-                return offset;
-            };
             let mut seen = 0u32;
             let mut steps = 0usize;
-            for c in iter {
+            for c in text.chars_rev_at(offset) {
                 steps += 1;
                 if c != '\n' {
                     seen += 1;
@@ -209,12 +300,9 @@ fn move_skipping_newlines(
             CharOffset::zero()
         }
         Direction::Forward => {
-            let Ok(iter) = text.chars_at(offset) else {
-                return offset;
-            };
             let mut seen = 0u32;
             let mut steps = 0usize;
-            for c in iter {
+            for c in text.chars_at(offset) {
                 if c != '\n' {
                     seen += 1;
                 }
@@ -229,7 +317,7 @@ fn move_skipping_newlines(
 }
 
 fn move_crossing_lines(
-    text: &str,
+    text: &dyn VimText,
     mut offset: CharOffset,
     count: u32,
     direction: Direction,
@@ -275,7 +363,7 @@ fn move_crossing_lines(
 }
 
 fn move_by_word(
-    text: &str,
+    text: &dyn VimText,
     offset: CharOffset,
     count: u32,
     word_motion: &WordMotion,
@@ -285,14 +373,14 @@ fn move_by_word(
         bound,
         word_type,
     } = word_motion;
-    match vim_word_iterator_from_offset(offset, text, *direction, *bound, *word_type) {
+    match vim_word_iterator_from_offset(offset, &DynBuf(text), *direction, *bound, *word_type) {
         Ok(iter) => iter.take(count as usize).last().unwrap_or(offset),
         Err(_) => offset,
     }
 }
 
 fn move_to_found_char(
-    text: &str,
+    text: &dyn VimText,
     offset: CharOffset,
     occurrence_count: u32,
     motion: &FindCharMotion,
@@ -310,30 +398,31 @@ fn move_to_found_char(
 }
 
 fn move_by_paragraph(
-    text: &str,
+    text: &dyn VimText,
     offset: CharOffset,
     count: u32,
     direction: Direction,
 ) -> CharOffset {
     let max = CharOffset::from(char_len(text));
+    let buf = DynBuf(text);
     let mut current = offset;
     match direction {
         Direction::Forward => {
             for _ in 0..count {
-                current = find_next_paragraph_end(text, current).unwrap_or(max);
+                current = find_next_paragraph_end(&buf, current).unwrap_or(max);
             }
         }
         Direction::Backward => {
             for _ in 0..count {
                 current =
-                    find_previous_paragraph_start(text, current).unwrap_or(CharOffset::zero());
+                    find_previous_paragraph_start(&buf, current).unwrap_or(CharOffset::zero());
             }
         }
     }
     current
 }
 
-fn jump_to_line_start(text: &str, line_number: u32) -> CharOffset {
+fn jump_to_line_start(text: &dyn VimText, line_number: u32) -> CharOffset {
     let mut start = CharOffset::zero();
     let max = CharOffset::from(char_len(text));
     let target = line_number.max(1);
@@ -347,12 +436,8 @@ fn jump_to_line_start(text: &str, line_number: u32) -> CharOffset {
     start
 }
 
-fn jump_to_matching_bracket(text: &str, offset: CharOffset) -> CharOffset {
-    let end = line_end_exclusive(text, offset);
-    let Some(line) = char_slice_owned(text, offset, end) else {
-        return offset;
-    };
-    let mut iter = line.chars();
+fn jump_to_matching_bracket(text: &dyn VimText, offset: CharOffset) -> CharOffset {
+    let mut iter = text.chars_at(offset);
     let Some(c) = iter.next() else {
         return offset;
     };
@@ -366,16 +451,16 @@ fn jump_to_matching_bracket(text: &str, offset: CharOffset) -> CharOffset {
             Some((i, bracket)) => (bracket, offset + i + 1),
         },
     };
-    vim_find_matching_bracket(text, &bracket, start_offset).unwrap_or(offset)
+    vim_find_matching_bracket(&DynBuf(text), &bracket, start_offset).unwrap_or(offset)
 }
 
-fn char_slice_owned(text: &str, start: CharOffset, end: CharOffset) -> Option<String> {
+fn char_slice_owned(text: &dyn VimText, start: CharOffset, end: CharOffset) -> Option<String> {
     let s = start.as_usize();
     let e = end.as_usize();
     if e < s {
         return None;
     }
-    Some(text.chars().skip(s).take(e.saturating_sub(s)).collect())
+    Some(text.chars_at(start).take(e.saturating_sub(s)).collect())
 }
 
 #[cfg(test)]
