@@ -2277,12 +2277,6 @@ pub trait VimHandler {
     /// update already notifies do not double-notify.
     fn after_navigation(&mut self, _ctx: &mut ViewContext<Self>) {}
 
-    fn after_unsupported_motion(&mut self, _ctx: &mut ViewContext<Self>) {}
-
-    fn supports_motion(&self, _motion: &VimMotion) -> bool {
-        true
-    }
-
     fn horizontal_wrap(&self) -> HorizontalWrap {
         HorizontalWrap::SkipNewlines
     }
@@ -2302,10 +2296,6 @@ pub trait VimHandler {
 
     fn apply_navigation(&mut self, motion: &VimMotion, count: u32, ctx: &mut ViewContext<Self>) {
         if self.intercept_navigation(motion, count, ctx).is_break() {
-            return;
-        }
-        if !self.supports_motion(motion) {
-            self.after_unsupported_motion(ctx);
             return;
         }
         match motion {
