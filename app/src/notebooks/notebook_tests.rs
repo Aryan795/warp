@@ -30,7 +30,7 @@ use crate::cloud_object::{
 use crate::drive::OpenWarpDriveObjectSettings;
 use crate::editor::{DisplayPoint, EditorAction, InteractionState, SelectAction};
 use crate::network::NetworkStatus;
-use crate::notebooks::active_notebook_data::Mode;
+use crate::notebooks::active_notebook_data::{ActiveNotebookDataEvent, Mode};
 use crate::notebooks::editor::keys::NotebookKeybindings;
 use crate::notebooks::editor::notebook_command::NotebookCommand;
 use crate::notebooks::editor::view::EditorViewAction;
@@ -950,11 +950,48 @@ fn set_vim_mode(app: &mut App, enabled: bool) {
     );
 }
 
+fn vim_type_input(
+    input: &ViewHandle<crate::notebooks::editor::view::RichTextEditorView>,
+    text: &str,
+    app: &mut App,
+) {
+    input.update(app, |view, ctx| {
+        ctx.focus_self();
+        view.handle_action(
+            &EditorViewAction::VimUserTyped(UserInput::new(text.to_string())),
+            ctx,
+        );
+    });
+}
+
+fn input_markdown(
+    input: &ViewHandle<crate::notebooks::editor::view::RichTextEditorView>,
+    app: &App,
+) -> String {
+    input.read(app, |view, ctx| view.markdown(ctx))
+}
+
+fn input_vim_mode(
+    input: &ViewHandle<crate::notebooks::editor::view::RichTextEditorView>,
+    app: &App,
+) -> Option<VimMode> {
+    input.read(app, |view, ctx| view.vim_mode(ctx))
+}
+
+fn reenter_edit(notebook: &ViewHandle<NotebookView>, app: &mut App) {
+    notebook.update(app, |notebook, ctx| {
+        notebook.switch_to_view(ctx);
+        notebook.switch_to_edit(ctx);
+        notebook.focus_input(ctx);
+    });
+}
+
 #[test]
-fn personal_notebook_pane_enables_vim_after_setting_on_and_toggle() {
+fn personal_notebook_enters_clean_vim_normal_on_edit_and_reacquisition() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         initial_load(&mut app, []).await;
+        set_vim_mode(&mut app, true);
 
         let (_window, notebook, _root) = create_notebook(&mut app);
         notebook.update(&mut app, |notebook, ctx| {
@@ -968,40 +1005,74 @@ fn personal_notebook_pane_enables_vim_after_setting_on_and_toggle() {
         });
 
         let input = notebook.read(&app, |notebook, _| notebook.input.clone());
-        assert_eq!(input.read(&app, |view, ctx| view.vim_mode(ctx)), None);
-
-        set_vim_mode(&mut app, true);
-        notebook.update(&mut app, |notebook, ctx| {
-            notebook.focus_input(ctx);
-        });
-        assert_eq!(
-            input.read(&app, |view, ctx| view.vim_mode(ctx)),
-            Some(VimMode::Normal)
-        );
-
-        let before = input.read(&app, |view, ctx| view.markdown(ctx));
         input.update(&mut app, |view, ctx| {
-            view.handle_action(
-                &EditorViewAction::UserTyped(UserInput::new("hjkl".to_string())),
-                ctx,
-            );
+            view.reset_with_markdown("hello world", ctx);
+            view.model().update(ctx, |model, ctx| {
+                vim::handler::jump_to_first_line(model, false, ctx);
+            });
         });
-        assert_eq!(input.read(&app, |view, ctx| view.markdown(ctx)), before);
-        assert_eq!(
-            input.read(&app, |view, ctx| view.vim_mode(ctx)),
-            Some(VimMode::Normal)
-        );
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
 
-        set_vim_mode(&mut app, false);
-        assert_eq!(input.read(&app, |view, ctx| view.vim_mode(ctx)), None);
+        let before = input_markdown(&input, &app);
+        vim_type_input(&input, "l", &mut app);
+        assert_eq!(input_markdown(&input, &app), before);
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
 
-        set_vim_mode(&mut app, true);
+        vim_type_input(&input, "v", &mut app);
+        assert!(matches!(
+            input_vim_mode(&input, &app),
+            Some(VimMode::Visual(_))
+        ));
+        reenter_edit(&notebook, &mut app);
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
+        vim_type_input(&input, "l", &mut app);
+        assert_eq!(input_markdown(&input, &app), before);
+
+        vim_type_input(&input, "R", &mut app);
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Replace));
+        reenter_edit(&notebook, &mut app);
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
+        vim_type_input(&input, "l", &mut app);
+        assert_eq!(input_markdown(&input, &app), before);
+
+        vim_type_input(&input, "d", &mut app);
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
+        reenter_edit(&notebook, &mut app);
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
+        vim_type_input(&input, "w", &mut app);
+        assert_eq!(input_markdown(&input, &app), before);
+
+        vim_type_input(&input, "i", &mut app);
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Insert));
+        vim_type_input(&input, "x", &mut app);
+        let inserted = input_markdown(&input, &app);
+        assert_ne!(inserted, before);
         notebook.update(&mut app, |notebook, ctx| {
+            notebook.active_notebook_data.update(ctx, |_, ctx| {
+                ctx.emit(ActiveNotebookDataEvent::SwitchedToEditMode);
+            });
+        });
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Insert));
+        assert_eq!(input_markdown(&input, &app), inserted);
+
+        input.update(&mut app, |view, ctx| {
+            ctx.focus_self();
+            view.handle_action(&EditorViewAction::VimEscape, ctx);
+        });
+        vim_type_input(&input, "v", &mut app);
+        assert!(matches!(
+            input_vim_mode(&input, &app),
+            Some(VimMode::Visual(_))
+        ));
+        notebook.update(&mut app, |notebook, ctx| {
+            notebook.switch_to_view(ctx);
+            notebook.grab_edit_access(false, ctx);
+            notebook.active_notebook_data.update(ctx, |_, ctx| {
+                ctx.emit(ActiveNotebookDataEvent::SwitchedToEditMode);
+            });
             notebook.focus_input(ctx);
         });
-        assert_eq!(
-            input.read(&app, |view, ctx| view.vim_mode(ctx)),
-            Some(VimMode::Normal)
-        );
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
+        assert!(input.read(&app, |view, ctx| view.is_editable(ctx)));
     });
 }

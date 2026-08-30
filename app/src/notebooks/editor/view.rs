@@ -1614,8 +1614,7 @@ impl RichTextEditorView {
     }
 
     pub(crate) fn enter_vim_normal_mode(&mut self, ctx: &mut ViewContext<Self>) {
-        if matches!(self.vim_mode(ctx), Some(VimMode::Insert) | None) && self.vim_mode_enabled(ctx)
-        {
+        if self.vim_mode_enabled(ctx) {
             self.vim_escape(ctx);
         }
     }
