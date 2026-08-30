@@ -3,6 +3,7 @@ use string_offset::CharOffset;
 use vim::vim::{MotionType, VimMode};
 use warp_editor::content::buffer::{ToBufferCharOffset, ToBufferPoint};
 use warp_editor::model::CoreEditorModel;
+use warp_editor::render::element::RichTextAction;
 use warp_util::user_input::UserInput;
 use warpui::text::point::Point;
 use warpui::{App, SingletonEntity, TypedActionView, UpdateModel, ViewHandle};
@@ -103,6 +104,50 @@ fn notebook_vim_starts_in_normal_mode() {
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim(&editor, &mut app);
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+    });
+}
+
+#[test]
+fn notebook_user_typed_does_not_bypass_vim_in_normal_mode() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim(&editor, &mut app);
+        let before = markdown(&editor, &app);
+
+        editor.update(&mut app, |view, ctx| {
+            ctx.focus_self();
+            view.handle_action(
+                &EditorViewAction::UserTyped(UserInput::new("hjkl".to_string())),
+                ctx,
+            );
+        });
+
+        assert_eq!(markdown(&editor, &app), before);
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+    });
+}
+
+#[test]
+fn notebook_element_typed_characters_use_vim_when_enabled() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim(&editor, &mut app);
+        let before = markdown(&editor, &app);
+
+        editor.update(&mut app, |view, ctx| {
+            ctx.focus_self();
+            let handle = view.self_handle.clone();
+            let action = if view.vim_mode(ctx).is_some() {
+                EditorViewAction::vim_user_typed("h".to_string(), &handle, ctx)
+            } else {
+                EditorViewAction::user_typed("h".to_string(), &handle, ctx)
+            }
+            .expect("typed characters dispatch an editor action");
+            view.handle_action(&action, ctx);
+        });
+
+        assert_eq!(markdown(&editor, &app), before);
         assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
     });
 }

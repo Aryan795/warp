@@ -2939,12 +2939,7 @@ impl TypedActionView for RichTextEditorView {
         use EditorViewAction::*;
 
         match action {
-            UserTyped(content) => {
-                if self.can_edit(ctx) {
-                    self.user_typed(content, ctx)
-                }
-            }
-            VimUserTyped(content) => {
+            UserTyped(content) | VimUserTyped(content) => {
                 if self.can_edit(ctx) && self.vim_mode_enabled(ctx) {
                     self.vim_user_insert(content, ctx);
                 } else if self.can_edit(ctx) {
