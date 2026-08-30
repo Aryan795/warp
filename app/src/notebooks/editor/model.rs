@@ -112,6 +112,10 @@ pub struct NotebooksEditorModel {
     file_link_resolution_context: Option<FileLinkResolutionContext>,
     default_mermaid_display_mode: MarkdownDisplayMode,
     vim_goal_columns: Option<Vec<u32>>,
+    /// Heads last written by Vim. A later SelectionChanged with the same heads is
+    /// Vim's own echo, not an independent mutation.
+    vim_applied_heads: Option<Vec<CharOffset>>,
+    applying_vim_selections: bool,
 }
 
 #[derive(Clone)]
@@ -233,6 +237,8 @@ impl NotebooksEditorModel {
             file_link_resolution_context: None,
             default_mermaid_display_mode: MarkdownDisplayMode::Raw,
             vim_goal_columns: None,
+            vim_applied_heads: None,
+            applying_vim_selections: false,
         }
     }
 
@@ -439,6 +445,10 @@ impl NotebooksEditorModel {
                 buffer_version,
                 ..
             } => {
+                if !self.applying_vim_selections {
+                    self.vim_goal_columns = None;
+                    self.vim_applied_heads = None;
+                }
                 self.render_state.update(ctx, move |render_state, _| {
                     render_state.add_pending_edit(delta.clone(), *buffer_version);
                     if can_edit {
@@ -460,6 +470,19 @@ impl NotebooksEditorModel {
                 should_autoscroll,
                 buffer_version,
             } => {
+                if !self.applying_vim_selections {
+                    let heads: Vec<CharOffset> = self
+                        .selection_model
+                        .as_ref(ctx)
+                        .selection_offsets()
+                        .iter()
+                        .map(|selection| selection.head)
+                        .collect();
+                    if self.vim_applied_heads.as_ref() != Some(&heads) {
+                        self.vim_goal_columns = None;
+                        self.vim_applied_heads = None;
+                    }
+                }
                 let selection_text_styles =
                     self.selection_model.as_ref(ctx).selection_text_styles(ctx);
                 let mut selections = self

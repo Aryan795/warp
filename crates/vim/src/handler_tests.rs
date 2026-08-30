@@ -3,7 +3,7 @@ use string_offset::CharOffset;
 use crate::handler::{
     CaseTransform, VimBufferOps, VimCaret, VimSnapshot, YankedText, apply_mode_change,
     apply_operator, apply_visual_operator, apply_visual_paste, jump_to_matching_bracket, move_char,
-    operand_motion_type,
+    operand_motion_type, visual_highlight_ranges,
 };
 use crate::vim::{
     CharacterMotion, Direction, InsertPosition, ModeTransition, MotionType, TextObjectInclusion,
@@ -426,4 +426,34 @@ fn vertical_visual_motion_keeps_tail_and_goal_column() {
     move_char(&mut buffer, 1, &CharacterMotion::Down, true, &mut ());
     assert_eq!(buffer.carets[0].tail, CharOffset::from(4));
     assert_eq!(buffer.carets[0].head, CharOffset::from(12));
+}
+
+#[test]
+fn visual_highlight_includes_block_cursor_character() {
+    let mut buffer = buffer_at("abc", 1);
+    assert_eq!(
+        visual_highlight_ranges(&buffer.snapshot(&()), MotionType::Charwise),
+        vec![CharOffset::from(1)..CharOffset::from(2)]
+    );
+
+    move_char(&mut buffer, 2, &CharacterMotion::Right, true, &mut ());
+    assert_eq!(
+        visual_highlight_ranges(&buffer.snapshot(&()), MotionType::Charwise),
+        vec![CharOffset::from(1)..CharOffset::from(4)]
+    );
+}
+
+#[test]
+fn visual_highlight_linewise_covers_full_lines() {
+    let mut buffer = buffer_at("ab\ncd", 1);
+    assert_eq!(
+        visual_highlight_ranges(&buffer.snapshot(&()), MotionType::Linewise),
+        vec![CharOffset::from(1)..CharOffset::from(3)]
+    );
+
+    move_char(&mut buffer, 1, &CharacterMotion::Down, true, &mut ());
+    assert_eq!(
+        visual_highlight_ranges(&buffer.snapshot(&()), MotionType::Linewise),
+        vec![CharOffset::from(1)..CharOffset::from(6)]
+    );
 }

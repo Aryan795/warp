@@ -291,6 +291,10 @@ pub struct CodeEditorModel {
     /// Delay rendering of content updates until a certain trigger.
     delay_rendering: Option<DelayRendering>,
     vim_goal_columns: Option<Vec<u32>>,
+    /// Heads last written by Vim. A later SelectionChanged with the same heads is
+    /// Vim's own echo, not an independent mutation.
+    vim_applied_heads: Option<Vec<CharOffset>>,
+    applying_vim_selections: bool,
     hovered_symbol_range: Option<HoverableLink>,
     /// Automatically hide lines outside of the active diff with X context lines.
     hide_lines_outside_of_active_diff: Option<usize>,
@@ -453,6 +457,8 @@ impl CodeEditorModel {
             show_current_line_highlights,
             delay_rendering: None,
             vim_goal_columns: None,
+            vim_applied_heads: None,
+            applying_vim_selections: false,
             hovered_symbol_range: None,
             hide_lines_outside_of_active_diff: None,
             recalculate_hidden_lines_after_diff: None,
@@ -1555,6 +1561,10 @@ impl CodeEditorModel {
                 buffer_version,
                 selection_model_id,
             } => {
+                if !self.applying_vim_selections {
+                    self.vim_goal_columns = None;
+                    self.vim_applied_heads = None;
+                }
                 let buffer = self.content().as_ref(ctx);
                 let content = buffer.text();
                 if self.should_defer_syntax_tree_parsing() {
@@ -1662,6 +1672,19 @@ impl CodeEditorModel {
                 buffer_version,
                 ..
             } => {
+                if !self.applying_vim_selections {
+                    let heads: Vec<CharOffset> = self
+                        .selection_model
+                        .as_ref(ctx)
+                        .selection_offsets()
+                        .iter()
+                        .map(|selection| selection.head)
+                        .collect();
+                    if self.vim_applied_heads.as_ref() != Some(&heads) {
+                        self.vim_goal_columns = None;
+                        self.vim_applied_heads = None;
+                    }
+                }
                 let content = self.content.as_ref(ctx);
                 let mut selections =
                     content.to_rendered_selection_set(self.selection_model.clone(), ctx);
@@ -2636,8 +2659,18 @@ impl CodeEditorModel {
             .collect();
 
         if let Ok(new_selections) = Vec1::try_from_vec(new_selections_vec) {
+            self.applying_vim_selections = true;
             self.vim_set_selections(new_selections, AutoScrollBehavior::Selection, ctx);
             self.vim_goal_columns = Some(goal_cols);
+            self.vim_applied_heads = Some(
+                self.buffer_selection_model()
+                    .as_ref(ctx)
+                    .selection_offsets()
+                    .iter()
+                    .map(|selection| selection.head)
+                    .collect(),
+            );
+            self.applying_vim_selections = false;
         }
     }
 
@@ -3220,8 +3253,11 @@ impl VimBufferOps for CodeEditorModel {
         ) else {
             return;
         };
+        self.applying_vim_selections = true;
         self.vim_set_selections(selections, AutoScrollBehavior::Selection, ctx);
         self.vim_goal_columns = vim_goal_columns_from_carets(carets);
+        self.vim_applied_heads = Some(carets.iter().map(|caret| caret.head).collect());
+        self.applying_vim_selections = false;
     }
 
     fn replace_ranges(

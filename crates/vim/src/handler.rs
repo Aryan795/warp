@@ -1,4 +1,5 @@
 use std::cmp;
+use std::ops::Range;
 
 use string_offset::CharOffset;
 
@@ -113,6 +114,52 @@ fn selection_reaches_eof(snap: &VimSnapshot) -> bool {
     snap.carets
         .iter()
         .any(|caret| caret.head.max(caret.tail) >= eof)
+}
+
+fn expand_visual_range(
+    snap: &VimSnapshot,
+    caret: VimCaret,
+    motion_type: MotionType,
+    include_newline: bool,
+) -> (CharOffset, CharOffset) {
+    let max = snap.max_offset();
+    let insertion_end = CharOffset::from(snap.chars.len());
+    let mut start = caret.tail;
+    let mut end = caret.head;
+    if start > end {
+        std::mem::swap(&mut start, &mut end);
+    }
+    if end < insertion_end
+        && (motion_type != MotionType::Linewise || snap.char_at(end).is_some_and(|c| c != '\n'))
+    {
+        end += 1;
+    }
+    if motion_type == MotionType::Linewise {
+        start = snap.line_start(start);
+        let (_, end_col) = snap.point(end);
+        if end_col != 0 {
+            end = snap.line_end(end);
+        }
+        if include_newline && end < max {
+            end += 1;
+        }
+    }
+    (start, end)
+}
+
+/// Exclusive 1-based Visual highlight ranges: charwise includes the block cursor;
+/// linewise spans the line.
+pub fn visual_highlight_ranges(
+    snap: &VimSnapshot,
+    motion_type: MotionType,
+) -> Vec<Range<CharOffset>> {
+    snap.carets
+        .iter()
+        .map(|caret| {
+            let (start, end) = expand_visual_range(snap, *caret, motion_type, false);
+            start..end
+        })
+        .collect()
 }
 
 /// One caret in buffer coordinates (`CharOffset` 1 is the first character).
@@ -515,32 +562,11 @@ pub trait VimBufferOps {
         ctx: &mut Self::Ctx<'_>,
     ) {
         let mut snap = self.snapshot(ctx);
-        let max = snap.max_offset();
         let updates: Vec<_> = snap
             .carets
             .iter()
             .map(|caret| {
-                let mut start = caret.tail;
-                let mut end = caret.head;
-                if start > end {
-                    std::mem::swap(&mut start, &mut end);
-                }
-                if end < max
-                    && (motion_type != MotionType::Linewise
-                        || snap.char_at(end).is_some_and(|c| c != '\n'))
-                {
-                    end += 1;
-                }
-                if motion_type == MotionType::Linewise {
-                    start = snap.line_start(start);
-                    let (_, end_col) = snap.point(end);
-                    if end_col != 0 {
-                        end = snap.line_end(end);
-                    }
-                    if include_newline && end < max {
-                        end += 1;
-                    }
-                }
+                let (start, end) = expand_visual_range(&snap, *caret, motion_type, include_newline);
                 VimCaret {
                     head: start,
                     tail: end,

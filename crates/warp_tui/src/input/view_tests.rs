@@ -4772,3 +4772,105 @@ fn vim_handler_visual_paste_is_noop() {
         });
     });
 }
+
+#[test]
+fn vim_visual_charwise_highlights_block_cursor_character() {
+    App::test((), |mut app| async move {
+        enable_vim_mode(&mut app);
+        let view = enter_normal_with_text(&mut app, "abc");
+        app.update(|ctx| {
+            type_str(&view, ctx, "0v");
+        });
+        app.read(|ctx| {
+            let buffer = render_input_buffer(&view, ctx);
+            let selection_bg = TuiUiBuilder::from_app(ctx).selection_style().bg;
+            assert_eq!(Some(buffer[(0, 0)].bg), selection_bg);
+            assert_ne!(Some(buffer[(1, 0)].bg), selection_bg);
+            assert_ne!(Some(buffer[(2, 0)].bg), selection_bg);
+        });
+    });
+}
+
+#[test]
+fn vim_visual_charwise_highlights_extended_range() {
+    App::test((), |mut app| async move {
+        enable_vim_mode(&mut app);
+        let view = enter_normal_with_text(&mut app, "abc");
+        app.update(|ctx| {
+            type_str(&view, ctx, "0vll");
+        });
+        app.read(|ctx| {
+            let buffer = render_input_buffer(&view, ctx);
+            let selection_bg = TuiUiBuilder::from_app(ctx).selection_style().bg;
+            assert_eq!(Some(buffer[(0, 0)].bg), selection_bg);
+            assert_eq!(Some(buffer[(1, 0)].bg), selection_bg);
+            assert_eq!(Some(buffer[(2, 0)].bg), selection_bg);
+        });
+    });
+}
+
+#[test]
+fn vim_visual_linewise_highlights_full_line_bounds() {
+    App::test((), |mut app| async move {
+        enable_vim_mode(&mut app);
+        let view = enter_normal_with_text(&mut app, "ab\ncd");
+        app.update(|ctx| {
+            type_str(&view, ctx, "ggV");
+        });
+        app.read(|ctx| {
+            let buffer = render_input_buffer(&view, ctx);
+            let selection_bg = TuiUiBuilder::from_app(ctx).selection_style().bg;
+            assert_eq!(Some(buffer[(0, 0)].bg), selection_bg);
+            assert_eq!(Some(buffer[(1, 0)].bg), selection_bg);
+            assert_ne!(Some(buffer[(0, 1)].bg), selection_bg);
+            assert_ne!(Some(buffer[(1, 1)].bg), selection_bg);
+        });
+
+        app.update(|ctx| {
+            type_str(&view, ctx, "j");
+        });
+        app.read(|ctx| {
+            let buffer = render_input_buffer(&view, ctx);
+            let selection_bg = TuiUiBuilder::from_app(ctx).selection_style().bg;
+            assert_eq!(Some(buffer[(0, 0)].bg), selection_bg);
+            assert_eq!(Some(buffer[(1, 0)].bg), selection_bg);
+            assert_eq!(Some(buffer[(0, 1)].bg), selection_bg);
+            assert_eq!(Some(buffer[(1, 1)].bg), selection_bg);
+        });
+    });
+}
+
+#[test]
+fn vim_j_after_selection_start_at_starts_from_new_column() {
+    App::test((), |mut app| async move {
+        enable_vim_mode(&mut app);
+        let view = enter_normal_with_text(&mut app, "xxxx\nab\nxxxx\nzzzz");
+        app.update(|ctx| {
+            type_str(&view, ctx, "gglll");
+        });
+        app.update(|ctx| {
+            type_str(&view, ctx, "j");
+        });
+        app.read(|ctx| {
+            assert_eq!(tui_cursor_row_col(&view, ctx), (2, 1));
+        });
+        app.update(|ctx| {
+            dispatch(
+                &view,
+                ctx,
+                &[
+                    TuiInputAction::Editor(TuiEditorAction::SelectionStartAt {
+                        offset: CharOffset::from(9),
+                    }),
+                    TuiInputAction::Editor(TuiEditorAction::SelectionEnd),
+                ],
+            );
+        });
+        app.update(|ctx| {
+            type_str(&view, ctx, "j");
+        });
+        app.read(|ctx| {
+            assert_eq!(tui_cursor_row_col(&view, ctx), (4, 0));
+        });
+    });
+}

@@ -2476,3 +2476,19 @@ fn test_vim_j_does_not_consume_native_pixel_goal_xs() {
         assert_eq!(cursor_position(&editor, &app), (3, 3));
     });
 }
+
+#[test]
+fn test_vim_j_after_direct_cursor_mutation_starts_from_new_column() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+        let editor = add_code_editor("xxxx\nab\nxxxx\nzzzz", &mut app);
+        set_cursor_position(&editor, 1, 3, &mut app);
+        vim_user_insert(&editor, "j", &mut app);
+        assert_eq!(cursor_position(&editor, &app), (2, 1));
+        set_cursor_position(&editor, 3, 0, &mut app);
+        vim_user_insert(&editor, "j", &mut app);
+        assert_eq!(cursor_position(&editor, &app), (4, 0));
+    });
+}

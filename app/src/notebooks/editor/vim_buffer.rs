@@ -61,6 +61,7 @@ impl VimBufferOps for NotebooksEditorModel {
         ) else {
             return;
         };
+        self.applying_vim_selections = true;
         self.vim_set_selections(selections, AutoScrollBehavior::Selection, ctx);
         self.vim_goal_columns = if carets.iter().any(|caret| caret.goal_column.is_some()) {
             Some(
@@ -72,6 +73,8 @@ impl VimBufferOps for NotebooksEditorModel {
         } else {
             None
         };
+        self.vim_applied_heads = Some(carets.iter().map(|caret| caret.head).collect());
+        self.applying_vim_selections = false;
     }
 
     fn replace_ranges(

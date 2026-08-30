@@ -1,9 +1,10 @@
 use settings::Setting as _;
 use string_offset::CharOffset;
 use vim::vim::{MotionType, VimMode};
-use warp_editor::content::buffer::ToBufferPoint;
+use warp_editor::content::buffer::{ToBufferCharOffset, ToBufferPoint};
 use warp_editor::model::CoreEditorModel;
 use warp_util::user_input::UserInput;
+use warpui::text::point::Point;
 use warpui::{App, SingletonEntity, TypedActionView, UpdateModel, ViewHandle};
 
 use super::tests::initialize_editor;
@@ -375,6 +376,15 @@ fn notebook_vim_read_only_does_not_edit() {
     });
 }
 
+fn cursor_at(editor: &ViewHandle<RichTextEditorView>, row: u32, col: u32, app: &mut App) {
+    editor.update(app, |view, ctx| {
+        view.model.update(ctx, |model, ctx| {
+            let offset = Point::new(row, col).to_buffer_char_offset(model.content().as_ref(ctx));
+            model.cursor_at(offset, ctx);
+        });
+    });
+}
+
 fn cursor_row_col(editor: &ViewHandle<RichTextEditorView>, app: &App) -> (u32, u32) {
     editor.read(app, |view, ctx| {
         let model = view.model.as_ref(ctx);
@@ -421,5 +431,22 @@ fn notebook_vim_visual_vertical_keeps_tail_and_goal_column() {
         let (head, tail) = selection_offsets(&editor, &app);
         assert_eq!(tail, origin);
         assert!(head > tail);
+    });
+}
+
+#[test]
+fn notebook_vim_j_after_direct_cursor_mutation_starts_from_new_column() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "xxxx\nab\nxxxx\nzzzz", &mut app);
+
+        vim_type(&editor, "lll", &mut app);
+        assert_eq!(cursor_row_col(&editor, &app), (1, 3));
+        vim_type(&editor, "j", &mut app);
+        assert_eq!(cursor_row_col(&editor, &app), (2, 2));
+        cursor_at(&editor, 3, 0, &mut app);
+        vim_type(&editor, "j", &mut app);
+        assert_eq!(cursor_row_col(&editor, &app), (4, 0));
     });
 }

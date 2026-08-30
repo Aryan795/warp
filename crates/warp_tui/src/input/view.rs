@@ -24,6 +24,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use string_offset::{ByteOffset, CharOffset};
+use vim::handler::{VimCaret, VimSnapshot, visual_highlight_ranges};
 use vim::vim::{MotionType, VimMode, VimModel, VimSubscriber as _};
 use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::settings::AppEditorSettings;
@@ -575,21 +576,18 @@ impl TuiInputView {
             .on_action(|action, event_ctx| {
                 event_ctx.dispatch_typed_action(TuiInputAction::Editor(action))
             });
-        if let VimMode::Visual(_) = self.vim_model.as_ref(ctx).state().mode {
-            let ranges = self
-                .model
-                .as_ref(ctx)
+        if let VimMode::Visual(motion_type) = self.vim_model.as_ref(ctx).state().mode {
+            let model = self.model.as_ref(ctx);
+            let text = model.content().as_ref(ctx).text().into_string();
+            let carets = model
                 .buffer_selection_model()
                 .as_ref(ctx)
                 .selection_offsets()
                 .iter()
-                .map(|selection| {
-                    let start = selection.head.min(selection.tail);
-                    let end = selection.head.max(selection.tail);
-                    start..end
-                })
+                .map(|selection| VimCaret::new(selection.head, selection.tail))
                 .collect();
-            element = element.with_selection_ranges(ranges);
+            let snap = VimSnapshot::from_plain_text(&text, carets);
+            element = element.with_selection_ranges(visual_highlight_ranges(&snap, motion_type));
         }
         if input_ownership.is_masked() {
             element = element.masked();
