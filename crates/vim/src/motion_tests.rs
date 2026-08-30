@@ -149,3 +149,16 @@ fn jump_to_first_line_can_land_on_column_zero() {
         CharOffset::from(10)
     );
 }
+
+#[test]
+fn percent_does_not_search_past_newline_for_a_bracket() {
+    let text = "plain\n(foo)";
+    let dest = motion_destination(
+        &as_text(text),
+        CharOffset::zero(),
+        &VimMotion::JumpToMatchingBracket,
+        1,
+        HorizontalWrap::StopAtLine,
+    );
+    assert_eq!(dest, CharOffset::zero());
+}

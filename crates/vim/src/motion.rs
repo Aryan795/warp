@@ -437,7 +437,7 @@ fn jump_to_line_start(text: &dyn VimText, line_number: u32) -> CharOffset {
 }
 
 fn jump_to_matching_bracket(text: &dyn VimText, offset: CharOffset) -> CharOffset {
-    let mut iter = text.chars_at(offset);
+    let mut iter = text.chars_at(offset).take_while(|c| *c != '\n');
     let Some(c) = iter.next() else {
         return offset;
     };
