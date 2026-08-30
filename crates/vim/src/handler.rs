@@ -645,7 +645,7 @@ pub trait VimBufferOps {
                     VimCaret {
                         head: CharOffset::from(caret.head.as_usize().saturating_sub(1).max(1)),
                         tail: CharOffset::from(caret.tail.as_usize().saturating_sub(1).max(1)),
-                        goal_column: None,
+                        goal_column: caret.goal_column,
                     }
                 } else {
                     *caret
@@ -855,7 +855,8 @@ fn move_vertical_snapshot(snap: &mut VimSnapshot, count: u32, direction: Directi
                 Direction::Backward => row.saturating_sub(count).max(1),
                 Direction::Forward => cmp::min(max_row, row.saturating_add(count)),
             };
-            let new_col = cmp::min(goal, snap.line_len(target));
+            let last_col = snap.line_len(target).saturating_sub(1);
+            let new_col = cmp::min(goal, last_col);
             let head = snap.offset_at(target, new_col);
             VimCaret {
                 head,

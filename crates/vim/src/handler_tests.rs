@@ -412,9 +412,19 @@ fn wrapping_navigation_count_skips_one_newline() {
 fn vertical_motion_restores_goal_column_after_short_line() {
     let mut buffer = buffer_at("xxxx\nab\nxxxx", 4);
     move_char(&mut buffer, 1, &CharacterMotion::Down, false, &mut ());
-    assert_eq!(buffer.carets[0].head, CharOffset::from(8));
+    assert_eq!(buffer.carets[0].head, CharOffset::from(7));
+    assert_eq!(buffer.carets[0].goal_column, Some(3));
     move_char(&mut buffer, 1, &CharacterMotion::Down, false, &mut ());
     assert_eq!(buffer.carets[0].head, CharOffset::from(12));
+    assert_eq!(buffer.carets[0].goal_column, Some(3));
+}
+
+#[test]
+fn line_cap_preserves_goal_column() {
+    let mut buffer = buffer_at("xxxx\nab\nxxxx", 8);
+    buffer.carets[0].goal_column = Some(3);
+    buffer.enforce_cursor_line_cap(&mut ());
+    assert_eq!(buffer.carets[0].head, CharOffset::from(7));
     assert_eq!(buffer.carets[0].goal_column, Some(3));
 }
 

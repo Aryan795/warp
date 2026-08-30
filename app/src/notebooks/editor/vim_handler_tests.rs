@@ -499,7 +499,7 @@ fn notebook_vim_vertical_restores_goal_column_after_short_line() {
         vim_type(&editor, "lll", &mut app);
         assert_eq!(cursor_row_col(&editor, &app), (1, 3));
         vim_type(&editor, "j", &mut app);
-        assert_eq!(cursor_row_col(&editor, &app), (2, 2));
+        assert_eq!(cursor_row_col(&editor, &app), (2, 1));
         vim_type(&editor, "j", &mut app);
         assert_eq!(cursor_row_col(&editor, &app), (3, 3));
     });
@@ -538,7 +538,7 @@ fn notebook_vim_j_after_direct_cursor_mutation_starts_from_new_column() {
         vim_type(&editor, "lll", &mut app);
         assert_eq!(cursor_row_col(&editor, &app), (1, 3));
         vim_type(&editor, "j", &mut app);
-        assert_eq!(cursor_row_col(&editor, &app), (2, 2));
+        assert_eq!(cursor_row_col(&editor, &app), (2, 1));
         cursor_at(&editor, 3, 0, &mut app);
         vim_type(&editor, "j", &mut app);
         assert_eq!(cursor_row_col(&editor, &app), (4, 0));

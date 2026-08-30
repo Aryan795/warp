@@ -2494,7 +2494,17 @@ impl CodeEditorModel {
             }
         });
 
+        self.applying_vim_selections = true;
         self.vim_set_selections(new_selections, AutoScrollBehavior::None, ctx);
+        self.vim_applied_heads = Some(
+            self.buffer_selection_model()
+                .as_ref(ctx)
+                .selection_offsets()
+                .iter()
+                .map(|selection| selection.head)
+                .collect(),
+        );
+        self.applying_vim_selections = false;
     }
 
     /// Horizontal cursor movement for vim in the code editor.
