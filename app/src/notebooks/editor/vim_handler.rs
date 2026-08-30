@@ -1,10 +1,10 @@
 use vim::handler::{
-    self, apply_mode_change, apply_operator, apply_visual_operator, apply_visual_paste,
+    self, VimBufferOps, apply_mode_change, apply_operator, apply_visual_operator,
+    apply_visual_paste,
 };
 use vim::vim::{
-    BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
-    InsertPosition, LineMotion, ModeTransition, MotionType, VimHandler, VimMode, VimOperand,
-    VimOperator, VimTextObject, WordMotion,
+    CharacterMotion, Direction, InsertPosition, LineMotion, ModeTransition, MotionType, VimHandler,
+    VimMode, VimOperand, VimOperator, VimTextObject,
 };
 use warp_editor::content::buffer::EditOrigin;
 use warp_editor::model::{CoreEditorModel, RichTextEditorModel};
@@ -16,90 +16,24 @@ use crate::notebooks::editor::find_bar::FindBarAction;
 use crate::vim_registers::{RegisterContent, VimRegisters};
 
 impl VimHandler for RichTextEditorView {
+    fn map_vim_snapshot(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+        f: impl FnOnce(&mut vim::handler::VimSnapshot),
+    ) {
+        self.model.update(ctx, |model, ctx| {
+            let mut snap = model.snapshot(ctx);
+            f(&mut snap);
+            model.set_selections(&snap.carets, ctx);
+        });
+    }
+
     fn insert_char(&mut self, c: char, ctx: &mut ViewContext<Self>) {
         if self.can_edit(ctx) {
             self.model.update(ctx, |model, ctx| {
                 model.user_insert(&c.to_string(), ctx);
             });
         }
-    }
-
-    fn navigate_char(
-        &mut self,
-        count: u32,
-        character_motion: &CharacterMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_char(model, count, character_motion, keep_selection, ctx);
-        });
-    }
-
-    fn navigate_word(
-        &mut self,
-        count: u32,
-        word_motion: &WordMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_word(model, count, word_motion, keep_selection, ctx);
-        });
-    }
-
-    fn navigate_line(
-        &mut self,
-        count: u32,
-        line_motion: &LineMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_line(model, count, line_motion, keep_selection, ctx);
-        });
-    }
-
-    fn first_nonwhitespace_motion(
-        &mut self,
-        count: u32,
-        motion: &FirstNonWhitespaceMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_first_nonwhitespace(model, count, motion, keep_selection, ctx);
-        });
-    }
-
-    fn find_char(
-        &mut self,
-        occurrence_count: u32,
-        find_char_motion: &FindCharMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::find_char(
-                model,
-                occurrence_count,
-                find_char_motion,
-                keep_selection,
-                ctx,
-            );
-        });
-    }
-
-    fn navigate_paragraph(
-        &mut self,
-        count: u32,
-        direction: &Direction,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_paragraph(model, count, direction, keep_selection, ctx);
-        });
     }
 
     fn operation(
@@ -132,6 +66,9 @@ impl VimHandler for RichTextEditorView {
         ctx: &mut ViewContext<Self>,
     ) {
         self.model.update(ctx, |model, ctx| {
+            if !advance && char_count > model.snapshot(ctx).remaining_on_line() {
+                return;
+            }
             for _ in 0..char_count.max(1) {
                 model.delete(TextDirection::Forwards, TextUnit::Character, false, ctx);
                 model.insert(&c.to_string(), EditOrigin::UserInitiated, ctx);
@@ -241,46 +178,6 @@ impl VimHandler for RichTextEditorView {
     }
 
     fn visual_text_object(&mut self, _text_object: &VimTextObject, _ctx: &mut ViewContext<Self>) {}
-
-    fn jump_to_first_line(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_first_line(model, keep_selection, ctx);
-        });
-    }
-
-    fn jump_to_last_line(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_last_line(model, keep_selection, ctx);
-        });
-    }
-
-    fn jump_to_line(
-        &mut self,
-        line_number: u32,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_line(model, line_number, keep_selection, ctx);
-        });
-    }
-
-    fn jump_to_matching_bracket(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_matching_bracket(model, keep_selection, ctx);
-        });
-    }
-
-    fn jump_to_unmatched_bracket(
-        &mut self,
-        bracket: &BracketChar,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_unmatched_bracket(model, bracket, keep_selection, ctx);
-        });
-    }
 
     fn paste(
         &mut self,

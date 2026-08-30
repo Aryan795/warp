@@ -120,9 +120,18 @@ fn selection_reaches_eof(snap: &VimSnapshot) -> bool {
 pub struct VimCaret {
     pub head: CharOffset,
     pub tail: CharOffset,
+    pub goal_column: Option<u32>,
 }
 
 impl VimCaret {
+    pub fn new(head: CharOffset, tail: CharOffset) -> Self {
+        Self {
+            head,
+            tail,
+            goal_column: None,
+        }
+    }
+
     fn ordered(self) -> (CharOffset, CharOffset) {
         if self.head <= self.tail {
             (self.head, self.tail)
@@ -265,6 +274,14 @@ impl VimSnapshot {
         self.chars.iter().skip(1).collect()
     }
 
+    pub fn remaining_on_line(&self) -> u32 {
+        let Some(caret) = self.carets.first() else {
+            return 0;
+        };
+        let (row, col) = self.point(caret.head);
+        self.line_len(row).saturating_sub(col)
+    }
+
     fn selected_text(&self) -> String {
         self.carets
             .iter()
@@ -289,6 +306,7 @@ impl VimSnapshot {
             .collect();
         for (caret, head) in self.carets.iter_mut().zip(new_heads) {
             caret.head = head;
+            caret.goal_column = None;
             if !keep_selection {
                 caret.tail = caret.head;
             }
@@ -354,6 +372,7 @@ pub trait VimBufferOps {
         let caret = snap.carets.first().copied().unwrap_or(VimCaret {
             head: CharOffset::from(1),
             tail: CharOffset::from(1),
+            goal_column: None,
         });
         if above {
             let start = snap.line_start(caret.head);
@@ -362,6 +381,7 @@ pub trait VimBufferOps {
                 &[VimCaret {
                     head: start,
                     tail: start,
+                    goal_column: None,
                 }],
                 ctx,
             );
@@ -369,7 +389,7 @@ pub trait VimBufferOps {
             let end = snap.line_end(caret.head);
             self.replace_ranges(&[(end, end, "\n".to_owned())], ctx);
             let head = end + 1;
-            self.set_selections(&[VimCaret { head, tail: head }], ctx);
+            self.set_selections(&[VimCaret::new(head, head)], ctx);
         }
     }
 
@@ -447,6 +467,7 @@ pub trait VimBufferOps {
             *caret = VimCaret {
                 head: start,
                 tail: start,
+                goal_column: None,
             };
         }
         self.set_selections(&snap.carets, ctx);
@@ -523,6 +544,7 @@ pub trait VimBufferOps {
                 VimCaret {
                     head: start,
                     tail: end,
+                    goal_column: None,
                 }
             })
             .collect();
@@ -537,6 +559,7 @@ pub trait VimBufferOps {
             snap.carets = vec![VimCaret {
                 head: start,
                 tail: start,
+                goal_column: None,
             }];
             self.set_selections(&snap.carets, ctx);
         }
@@ -596,6 +619,7 @@ pub trait VimBufferOps {
                     VimCaret {
                         head: CharOffset::from(caret.head.as_usize().saturating_sub(1).max(1)),
                         tail: CharOffset::from(caret.tail.as_usize().saturating_sub(1).max(1)),
+                        goal_column: None,
                     }
                 } else {
                     *caret
@@ -693,7 +717,12 @@ pub trait VimBufferOps {
     }
 }
 
-fn move_char_snapshot(snap: &mut VimSnapshot, count: u32, motion: &CharacterMotion, keep: bool) {
+pub(crate) fn move_char_snapshot(
+    snap: &mut VimSnapshot,
+    count: u32,
+    motion: &CharacterMotion,
+    keep: bool,
+) {
     match motion {
         CharacterMotion::Right => snap.map_heads(
             |s, head| {
@@ -713,37 +742,11 @@ fn move_char_snapshot(snap: &mut VimSnapshot, count: u32, motion: &CharacterMoti
             keep,
         ),
         CharacterMotion::WrappingRight => snap.map_heads(
-            |s, head| {
-                let max = s.max_offset();
-                let mut h = head;
-                for _ in 0..count {
-                    if h >= max {
-                        break;
-                    }
-                    h += 1;
-                }
-                h
-            },
+            |s, head| wrap_offset(s, head, count, Direction::Forward, keep),
             keep,
         ),
         CharacterMotion::WrappingLeft => snap.map_heads(
-            |s, head| {
-                let (row, col) = s.point(head);
-                let line_len = s.line_len(row);
-                // `$` can sit on the newline; wrapping starts from the last character.
-                let mut h = if col >= line_len && line_len > 0 {
-                    s.offset_at(row, line_len - 1)
-                } else {
-                    head
-                };
-                for _ in 0..count {
-                    if h <= CharOffset::from(1) {
-                        break;
-                    }
-                    h = CharOffset::from(h.as_usize() - 1);
-                }
-                h
-            },
+            |s, head| wrap_offset(s, head, count, Direction::Backward, keep),
             keep,
         ),
         CharacterMotion::Up => move_vertical_snapshot(snap, count, Direction::Backward, keep),
@@ -751,20 +754,91 @@ fn move_char_snapshot(snap: &mut VimSnapshot, count: u32, motion: &CharacterMoti
     }
 }
 
+fn wrap_offset(
+    snap: &VimSnapshot,
+    head: CharOffset,
+    count: u32,
+    direction: Direction,
+    keep_selection: bool,
+) -> CharOffset {
+    let max = snap.max_offset();
+    let min = CharOffset::from(1);
+    let (row, col) = snap.point(head);
+    let line_len = snap.line_len(row);
+    let mut h = if direction == Direction::Backward && col >= line_len && line_len > 0 {
+        snap.offset_at(row, line_len - 1)
+    } else {
+        head
+    };
+    for _ in 0..count {
+        match direction {
+            Direction::Forward => {
+                if h >= max {
+                    break;
+                }
+                let next = cmp::min(max, h + 1);
+                if snap.char_at(next) == Some('\n') {
+                    if keep_selection {
+                        h = next;
+                    } else {
+                        let after = cmp::min(max, next + 1);
+                        h = if snap.char_at(after) == Some('\n') {
+                            next
+                        } else {
+                            after
+                        };
+                    }
+                } else {
+                    h = next;
+                }
+            }
+            Direction::Backward => {
+                if h <= min {
+                    break;
+                }
+                let prev = CharOffset::from(h.as_usize() - 1);
+                if snap.char_at(prev) == Some('\n') {
+                    if keep_selection {
+                        h = prev;
+                    } else {
+                        let prev2 = CharOffset::from(prev.as_usize().saturating_sub(1).max(1));
+                        h = if snap.char_at(prev2) == Some('\n') {
+                            prev
+                        } else {
+                            prev2
+                        };
+                    }
+                } else {
+                    h = prev;
+                }
+            }
+        }
+    }
+    h
+}
+
 fn move_vertical_snapshot(snap: &mut VimSnapshot, count: u32, direction: Direction, keep: bool) {
     let max_row = snap.max_row();
-    snap.map_heads(
-        |s, head| {
-            let (row, col) = s.point(head);
+    let updates: Vec<_> = snap
+        .carets
+        .iter()
+        .map(|caret| {
+            let (row, col) = snap.point(caret.head);
+            let goal = caret.goal_column.unwrap_or(col).max(col);
             let target = match direction {
                 Direction::Backward => row.saturating_sub(count).max(1),
                 Direction::Forward => cmp::min(max_row, row.saturating_add(count)),
             };
-            let new_col = cmp::min(col, s.line_len(target));
-            s.offset_at(target, new_col)
-        },
-        keep,
-    );
+            let new_col = cmp::min(goal, snap.line_len(target));
+            let head = snap.offset_at(target, new_col);
+            VimCaret {
+                head,
+                tail: if keep { caret.tail } else { head },
+                goal_column: Some(goal),
+            }
+        })
+        .collect();
+    snap.carets = updates;
 }
 
 fn apply_word_operator_quirks(snap: &mut VimSnapshot, count: u32, motion: &WordMotion) {
@@ -812,7 +886,12 @@ fn apply_word_operator_quirks(snap: &mut VimSnapshot, count: u32, motion: &WordM
     snap.carets = updates;
 }
 
-fn move_word_snapshot(snap: &mut VimSnapshot, count: u32, motion: &WordMotion, keep: bool) {
+pub(crate) fn move_word_snapshot(
+    snap: &mut VimSnapshot,
+    count: u32,
+    motion: &WordMotion,
+    keep: bool,
+) {
     let text = snap.plain_text();
     snap.map_heads(
         |_, head| {
@@ -835,7 +914,12 @@ fn move_word_snapshot(snap: &mut VimSnapshot, count: u32, motion: &WordMotion, k
     );
 }
 
-fn move_line_snapshot(snap: &mut VimSnapshot, line_count: u32, motion: &LineMotion, keep: bool) {
+pub(crate) fn move_line_snapshot(
+    snap: &mut VimSnapshot,
+    line_count: u32,
+    motion: &LineMotion,
+    keep: bool,
+) {
     match motion {
         LineMotion::Start => snap.map_heads(|s, head| s.line_start(head), keep),
         LineMotion::FirstNonWhitespace => {
@@ -848,7 +932,7 @@ fn move_line_snapshot(snap: &mut VimSnapshot, line_count: u32, motion: &LineMoti
     }
 }
 
-fn move_first_nonwhitespace_snapshot(
+pub(crate) fn move_first_nonwhitespace_snapshot(
     snap: &mut VimSnapshot,
     count: u32,
     motion: &FirstNonWhitespaceMotion,
@@ -868,7 +952,12 @@ fn move_first_nonwhitespace_snapshot(
     snap.map_heads(|s, head| s.first_nonwhitespace(head), keep);
 }
 
-fn move_paragraph_snapshot(snap: &mut VimSnapshot, count: u32, direction: &Direction, keep: bool) {
+pub(crate) fn move_paragraph_snapshot(
+    snap: &mut VimSnapshot,
+    count: u32,
+    direction: &Direction,
+    keep: bool,
+) {
     let text = snap.plain_text();
     let max = snap.max_offset();
     snap.map_heads(
@@ -896,11 +985,11 @@ fn move_paragraph_snapshot(snap: &mut VimSnapshot, count: u32, direction: &Direc
     );
 }
 
-fn jump_first_snapshot(snap: &mut VimSnapshot, keep: bool) {
+pub(crate) fn jump_first_snapshot(snap: &mut VimSnapshot, keep: bool) {
     snap.map_heads(|_, _| CharOffset::from(1), keep);
 }
 
-fn jump_last_snapshot(snap: &mut VimSnapshot, keep: bool, first_nonwhitespace: bool) {
+pub(crate) fn jump_last_snapshot(snap: &mut VimSnapshot, keep: bool, first_nonwhitespace: bool) {
     let row = snap.max_row();
     snap.map_heads(
         |s, _| {
@@ -923,7 +1012,11 @@ fn one_based(offset: CharOffset) -> CharOffset {
     CharOffset::from(offset.as_usize() + 1)
 }
 
-fn jump_matching_bracket_snapshot(snap: &mut VimSnapshot, keep: bool, include_match: bool) {
+pub(crate) fn jump_matching_bracket_snapshot(
+    snap: &mut VimSnapshot,
+    keep: bool,
+    include_match: bool,
+) {
     let text = snap.plain_text();
     let insertion_end = CharOffset::from(snap.chars.len());
     let updates: Vec<_> = snap
@@ -965,13 +1058,18 @@ fn jump_matching_bracket_snapshot(snap: &mut VimSnapshot, keep: bool, include_ma
                 } else {
                     matched
                 },
+                goal_column: caret.goal_column,
             }
         })
         .collect();
     snap.carets = updates;
 }
 
-fn jump_unmatched_bracket_snapshot(snap: &mut VimSnapshot, bracket: &BracketChar, keep: bool) {
+pub(crate) fn jump_unmatched_bracket_snapshot(
+    snap: &mut VimSnapshot,
+    bracket: &BracketChar,
+    keep: bool,
+) {
     let text = snap.plain_text();
     snap.map_heads(
         |_, head| {
@@ -983,7 +1081,7 @@ fn jump_unmatched_bracket_snapshot(snap: &mut VimSnapshot, bracket: &BracketChar
     );
 }
 
-fn find_char_snapshot(
+pub(crate) fn find_char_snapshot(
     snap: &mut VimSnapshot,
     occurrence_count: u32,
     motion: &FindCharMotion,
@@ -1004,7 +1102,7 @@ fn find_char_snapshot(
     );
 }
 
-fn select_text_object_snapshot(
+pub(crate) fn select_text_object_snapshot(
     snap: &mut VimSnapshot,
     object: &VimTextObject,
     operator: Option<&VimOperator>,
@@ -1055,7 +1153,11 @@ fn select_text_object_snapshot(
                     head = snap.line_start(head);
                 }
             }
-            VimCaret { head, tail }
+            VimCaret {
+                head,
+                tail,
+                goal_column: caret.goal_column,
+            }
         })
         .collect();
     snap.carets = updates;
@@ -1165,6 +1267,11 @@ pub fn jump_to_last_line<B: VimBufferOps>(
     });
 }
 
+pub(crate) fn jump_to_line_snapshot(snap: &mut VimSnapshot, line_number: u32, keep: bool) {
+    let row = line_number.max(1).min(snap.max_row());
+    snap.map_heads(|s, _| s.offset_at(row, 0), keep);
+}
+
 pub fn jump_to_line<B: VimBufferOps>(
     buffer: &mut B,
     line_number: u32,
@@ -1172,8 +1279,7 @@ pub fn jump_to_line<B: VimBufferOps>(
     ctx: &mut B::Ctx<'_>,
 ) {
     apply_snapshot_motion(buffer, ctx, |snap| {
-        let row = line_number.max(1).min(snap.max_row());
-        snap.map_heads(|s, _| s.offset_at(row, 0), keep_selection);
+        jump_to_line_snapshot(snap, line_number, keep_selection);
     });
 }
 

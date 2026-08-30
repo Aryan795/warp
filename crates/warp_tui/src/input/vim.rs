@@ -1,24 +1,9 @@
-//! [`VimHandler`] implementation for [`TuiInputView`].
-//!
-//! Wires the TUI prompt's backing [`CodeEditorModel`] into the shared vim
-//! dispatch layer (the same pattern [`CodeEditorView`] uses).  Prompt-specific
-//! semantics are expressed as explicit no-ops or custom overrides in the trait
-//! implementation rather than as arms in a bespoke match:
-//!
-//! - `find_char` — no-op (single-line prompt; `f`/`F`/`t`/`T` are skipped).
-//! - `navigate_paragraph` — no-op (no paragraph structure in a prompt).
-//! - `jump_to_*_bracket` — no-op.
-//! - `search`, `cycle_search`, `search_word_at_cursor` — no-op.
-//! - `visual_paste` — no-op (use the plain `paste` method; the TUI has no register system).
-//! - `join_line`, `toggle_case`, `keyword_prg`, `ex_command` — no-op.
-//! - Scroll helpers (`center_cursor_vertically`, `scroll_half_page_*`) — no-op.
-//!
+//! TUI prompt Vim keybindings on the shared snapshot handler.
 
-use vim::handler::{self, apply_mode_change, apply_operator, apply_visual_operator};
+use vim::handler::{self, VimBufferOps, apply_mode_change, apply_operator, apply_visual_operator};
 use vim::vim::{
-    BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
-    InsertPosition, LineMotion, ModeTransition, MotionType, VimHandler, VimMode, VimOperand,
-    VimOperator, VimTextObject, WordMotion,
+    BracketChar, CharacterMotion, Direction, FindCharMotion, InsertPosition, ModeTransition,
+    MotionType, VimHandler, VimMode, VimOperand, VimOperator, VimTextObject,
 };
 use warp::editor::LineBound;
 use warp_editor::model::{CoreEditorModel, PlainTextEditorModel};
@@ -29,7 +14,22 @@ use super::TuiInputView;
 const MAX_VIM_PASTE_BYTES: usize = 1024 * 1024;
 
 impl VimHandler for TuiInputView {
-    // ── Character insertion ───────────────────────────────────────────────────
+    fn map_vim_snapshot(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+        f: impl FnOnce(&mut vim::handler::VimSnapshot),
+    ) {
+        self.model.update(ctx, |model, ctx| {
+            let mut snap = model.snapshot(ctx);
+            f(&mut snap);
+            model.set_selections(&snap.carets, ctx);
+        });
+    }
+
+    fn after_vim_motion(&mut self, ctx: &mut ViewContext<Self>) {
+        self.follow_cursor(ctx);
+        ctx.notify();
+    }
 
     fn insert_char(&mut self, c: char, ctx: &mut ViewContext<Self>) {
         if c == '!'
@@ -50,22 +50,6 @@ impl VimHandler for TuiInputView {
         ctx.notify();
     }
 
-    // ── Navigation ────────────────────────────────────────────────────────────
-
-    fn navigate_char(
-        &mut self,
-        count: u32,
-        character_motion: &CharacterMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_char(model, count, character_motion, keep_selection, ctx);
-        });
-        self.follow_cursor(ctx);
-        ctx.notify();
-    }
-
     fn replace_text(
         &mut self,
         text: &str,
@@ -81,48 +65,6 @@ impl VimHandler for TuiInputView {
             if !text.is_empty() {
                 handler::move_char(model, 1, &CharacterMotion::Left, false, ctx);
             }
-        });
-        self.follow_cursor(ctx);
-        ctx.notify();
-    }
-
-    fn navigate_word(
-        &mut self,
-        count: u32,
-        word_motion: &WordMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_word(model, count, word_motion, keep_selection, ctx);
-        });
-        self.follow_cursor(ctx);
-        ctx.notify();
-    }
-
-    fn navigate_line(
-        &mut self,
-        line_count: u32,
-        motion: &LineMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_line(model, line_count, motion, keep_selection, ctx);
-        });
-        self.follow_cursor(ctx);
-        ctx.notify();
-    }
-
-    fn first_nonwhitespace_motion(
-        &mut self,
-        count: u32,
-        motion: &FirstNonWhitespaceMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_first_nonwhitespace(model, count, motion, keep_selection, ctx);
         });
         self.follow_cursor(ctx);
         ctx.notify();
@@ -267,36 +209,6 @@ impl VimHandler for TuiInputView {
 
     /// Prompt-specific: visual text-object selection is a no-op.
     fn visual_text_object(&mut self, _text_object: &VimTextObject, ctx: &mut ViewContext<Self>) {
-        ctx.notify();
-    }
-
-    // ── Jumps ─────────────────────────────────────────────────────────────────
-
-    fn jump_to_first_line(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_first_line(model, keep_selection, ctx);
-        });
-        self.follow_cursor(ctx);
-        ctx.notify();
-    }
-
-    fn jump_to_last_line(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_last_line(model, keep_selection, ctx);
-        });
-        self.follow_cursor(ctx);
-        ctx.notify();
-    }
-    fn jump_to_line(
-        &mut self,
-        line_number: u32,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_line(model, line_number, keep_selection, ctx);
-        });
-        self.follow_cursor(ctx);
         ctx.notify();
     }
 

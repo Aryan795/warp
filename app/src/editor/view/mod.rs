@@ -39,13 +39,11 @@ use snapshot::{EditorHeightShrinkDelay, ViewSnapshot};
 use string_offset::{ByteOffset, CharOffset};
 use vec1::{Vec1, vec1};
 use vim::handler::{
-    self, VimBufferOps, apply_mode_change, apply_operator, apply_visual_operator,
-    apply_visual_paste,
+    VimBufferOps, apply_mode_change, apply_operator, apply_visual_operator, apply_visual_paste,
 };
 use vim::vim::{
-    BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
-    InsertPosition, LineMotion, ModeTransition, MotionType, VimHandler, VimMode, VimModel,
-    VimOperand, VimOperator, VimState, VimSubscriber, VimTextObject, WordBound, WordMotion,
+    CharacterMotion, Direction, InsertPosition, LineMotion, ModeTransition, MotionType, VimHandler,
+    VimMode, VimModel, VimOperand, VimOperator, VimState, VimSubscriber, WordBound, WordMotion,
     WordType,
 };
 use vim::vim_word_iterator_from_offset;
@@ -1978,6 +1976,89 @@ impl AutosuggestionState {
 }
 
 impl VimHandler for EditorView {
+    fn map_vim_snapshot(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+        f: impl FnOnce(&mut vim::handler::VimSnapshot),
+    ) {
+        self.change_selections(ctx, |editor_model, ctx| {
+            let mut snap = editor_model.snapshot(ctx);
+            f(&mut snap);
+            editor_model.set_selections(&snap.carets, ctx);
+        });
+    }
+
+    fn intercept_char_motion(
+        &mut self,
+        count: u32,
+        character_motion: &CharacterMotion,
+        _keep_selection: bool,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        // Analogous to how right-arrow accepts an autosuggestion, do this for `l`.
+        if *character_motion == CharacterMotion::Right
+            && self.single_cursor_at_autosuggestion_beginning(ctx)
+        {
+            self.insert_full_autosuggestion(ctx);
+            return true;
+        }
+
+        // The up-arrow history menu is unable to handle counts >1. Only emit "Up" and "Down"
+        // events the parent view if the count is 1.
+        // TODO: Update [`NavigationKey::Up`] and [`NavigationKey::Down`] to accept count.
+        if *character_motion == CharacterMotion::Up
+            && count == 1
+            && self.vim_should_propagate_upward_navigation(ctx)
+        {
+            ctx.emit(Event::Navigate(NavigationKey::Up));
+            return true;
+        }
+
+        if *character_motion == CharacterMotion::Down
+            && count == 1
+            && self.vim_should_propagate_downward_navigation(ctx)
+        {
+            ctx.emit(Event::Navigate(NavigationKey::Down));
+            return true;
+        }
+
+        false
+    }
+
+    fn intercept_word_motion(
+        &mut self,
+        count: u32,
+        word_motion: &WordMotion,
+        _keep_selection: bool,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if word_motion.direction == Direction::Forward
+            && self.single_cursor_at_autosuggestion_beginning(ctx)
+        {
+            self.vim_cursor_forward_word(word_motion.bound, word_motion.word_type, count, ctx);
+            return true;
+        }
+        false
+    }
+
+    fn intercept_line_motion(
+        &mut self,
+        _count: u32,
+        line_motion: &LineMotion,
+        _keep_selection: bool,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if *line_motion == LineMotion::End && self.single_cursor_at_autosuggestion_beginning(ctx) {
+            self.insert_full_autosuggestion(ctx);
+            return true;
+        }
+        false
+    }
+
+    fn last_line_lands_on_first_nonwhitespace(&self) -> bool {
+        false
+    }
+
     fn insert_char(&mut self, c: char, ctx: &mut ViewContext<Self>) {
         self.user_insert(&c.to_string(), ctx);
     }
@@ -2048,132 +2129,6 @@ impl VimHandler for EditorView {
                     );
                 }),
         );
-    }
-
-    fn navigate_char(
-        &mut self,
-        character_count: u32,
-        motion: &CharacterMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        // Analogous to how right-arrow accepts an autosuggestion, do this for `l`.
-        if *motion == CharacterMotion::Right && self.single_cursor_at_autosuggestion_beginning(ctx)
-        {
-            self.insert_full_autosuggestion(ctx);
-            return;
-        }
-
-        // The up-arrow history menu is unable to handle counts >1. Only emit "Up" and "Down"
-        // events the parent view if the count is 1.
-        // TODO: Update [`NavigationKey::Up`] and [`NavigationKey::Down`] to accept count.
-        if *motion == CharacterMotion::Up
-            && character_count == 1
-            && self.vim_should_propagate_upward_navigation(ctx)
-        {
-            ctx.emit(Event::Navigate(NavigationKey::Up));
-            return;
-        }
-
-        if *motion == CharacterMotion::Down
-            && character_count == 1
-            && self.vim_should_propagate_downward_navigation(ctx)
-        {
-            ctx.emit(Event::Navigate(NavigationKey::Down));
-            return;
-        }
-
-        self.change_selections(ctx, |editor_model, ctx| match motion {
-            CharacterMotion::WrappingLeft => editor_model.move_cursor_ignoring_newlines(
-                character_count,
-                &Direction::Backward,
-                keep_selection,
-                ctx,
-            ),
-            CharacterMotion::WrappingRight => editor_model.move_cursor_ignoring_newlines(
-                character_count,
-                &Direction::Forward,
-                keep_selection,
-                ctx,
-            ),
-            CharacterMotion::Up => {
-                editor_model.move_up_by_offset(character_count, keep_selection, ctx)
-            }
-            CharacterMotion::Down => {
-                editor_model.move_down_by_offset(character_count, keep_selection, ctx)
-            }
-            _ => handler::move_char(editor_model, character_count, motion, keep_selection, ctx),
-        });
-    }
-
-    fn navigate_word(
-        &mut self,
-        word_count: u32,
-        motion: &WordMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        if motion.direction == Direction::Forward
-            && self.single_cursor_at_autosuggestion_beginning(ctx)
-        {
-            self.vim_cursor_forward_word(motion.bound, motion.word_type, word_count, ctx);
-            return;
-        }
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::move_word(editor_model, word_count, motion, keep_selection, ctx);
-        });
-    }
-
-    fn navigate_line(
-        &mut self,
-        line_count: u32,
-        motion: &LineMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        if *motion == LineMotion::End && self.single_cursor_at_autosuggestion_beginning(ctx) {
-            self.insert_full_autosuggestion(ctx);
-            return;
-        }
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::move_line(editor_model, line_count, motion, keep_selection, ctx);
-        });
-    }
-
-    fn first_nonwhitespace_motion(
-        &mut self,
-        count: u32,
-        motion: &FirstNonWhitespaceMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::move_first_nonwhitespace(editor_model, count, motion, keep_selection, ctx);
-        });
-    }
-
-    fn find_char(
-        &mut self,
-        occurrence_count: u32,
-        motion: &FindCharMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::find_char(editor_model, occurrence_count, motion, keep_selection, ctx);
-        });
-    }
-
-    fn navigate_paragraph(
-        &mut self,
-        count: u32,
-        direction: &Direction,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::move_paragraph(editor_model, count, direction, keep_selection, ctx);
-        });
     }
 
     fn replace_char(
@@ -2332,46 +2287,6 @@ impl VimHandler for EditorView {
 
     fn ex_command(&mut self, ctx: &mut ViewContext<Self>) {
         ctx.emit(Event::ExCommand);
-    }
-
-    fn jump_to_first_line(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::jump_to_first_line(editor_model, keep_selection, ctx);
-        });
-    }
-
-    fn jump_to_last_line(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::jump_to_last_line(editor_model, keep_selection, ctx);
-        });
-    }
-
-    fn jump_to_line(
-        &mut self,
-        line_number: u32,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::jump_to_line(editor_model, line_number, keep_selection, ctx);
-        });
-    }
-
-    fn jump_to_matching_bracket(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::jump_to_matching_bracket(editor_model, keep_selection, ctx);
-        });
-    }
-
-    fn jump_to_unmatched_bracket(
-        &mut self,
-        bracket: &BracketChar,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::jump_to_unmatched_bracket(editor_model, bracket, keep_selection, ctx);
-        });
     }
 
     fn paste(
@@ -2624,12 +2539,6 @@ impl VimHandler for EditorView {
             ),
         );
         Self::write_yanked_register(write_register_name, yanked, ctx);
-    }
-
-    fn visual_text_object(&mut self, text_object: &VimTextObject, ctx: &mut ViewContext<Self>) {
-        self.change_selections(ctx, |editor_model, ctx| {
-            handler::select_text_object(editor_model, text_object, ctx);
-        });
     }
 
     fn backspace(&mut self, ctx: &mut ViewContext<Self>) {

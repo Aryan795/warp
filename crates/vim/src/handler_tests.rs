@@ -27,6 +27,7 @@ impl Default for FakeBuffer {
             carets: vec![VimCaret {
                 head: CharOffset::from(1),
                 tail: CharOffset::from(4),
+                goal_column: None,
             }],
             supported_operators: None,
             comments_toggled: false,
@@ -131,6 +132,7 @@ fn delete_yanks_then_deletes_selection() {
         carets: vec![VimCaret {
             head: CharOffset::from(1),
             tail: CharOffset::from(1),
+            goal_column: None,
         }],
         ..FakeBuffer::default()
     };
@@ -153,6 +155,7 @@ fn empty_linewise_delete_yanks_newline_without_deleting_empty_selection() {
         carets: vec![VimCaret {
             head: CharOffset::from(1),
             tail: CharOffset::from(1),
+            goal_column: None,
         }],
         ..FakeBuffer::default()
     };
@@ -234,6 +237,7 @@ fn mode_change_applies_insert_exit_and_visual_tails() {
         carets: vec![VimCaret {
             head: CharOffset::from(2),
             tail: CharOffset::from(2),
+            goal_column: None,
         }],
         ..FakeBuffer::default()
     };
@@ -282,6 +286,7 @@ fn line_end_insert_appends_after_last_character() {
         carets: vec![VimCaret {
             head: CharOffset::from(1),
             tail: CharOffset::from(1),
+            goal_column: None,
         }],
         ..FakeBuffer::default()
     };
@@ -306,6 +311,7 @@ fn visual_move_char_keeps_origin_tail() {
         carets: vec![VimCaret {
             head: CharOffset::from(1),
             tail: CharOffset::from(1),
+            goal_column: None,
         }],
         ..FakeBuffer::default()
     };
@@ -321,9 +327,103 @@ fn matching_bracket_jump_lands_on_pair() {
         carets: vec![VimCaret {
             head: CharOffset::from(1),
             tail: CharOffset::from(1),
+            goal_column: None,
         }],
         ..FakeBuffer::default()
     };
     jump_to_matching_bracket(&mut buffer, false, &mut ());
     assert_eq!(buffer.carets[0].head, CharOffset::from(4));
+}
+
+fn buffer_at(text: &str, head: usize) -> FakeBuffer {
+    FakeBuffer {
+        text: text.into(),
+        carets: vec![VimCaret::new(
+            CharOffset::from(head),
+            CharOffset::from(head),
+        )],
+        ..FakeBuffer::default()
+    }
+}
+
+#[test]
+fn wrapping_navigation_skips_newlines() {
+    let mut buffer = buffer_at("ab\ncd", 2);
+    move_char(
+        &mut buffer,
+        1,
+        &CharacterMotion::WrappingRight,
+        false,
+        &mut (),
+    );
+    assert_eq!(buffer.carets[0].head, CharOffset::from(4));
+
+    move_char(
+        &mut buffer,
+        1,
+        &CharacterMotion::WrappingLeft,
+        false,
+        &mut (),
+    );
+    assert_eq!(buffer.carets[0].head, CharOffset::from(2));
+}
+
+#[test]
+fn wrapping_operator_counts_newlines() {
+    let mut buffer = buffer_at("ab\ncd", 2);
+    move_char(
+        &mut buffer,
+        1,
+        &CharacterMotion::WrappingRight,
+        true,
+        &mut (),
+    );
+    assert_eq!(buffer.carets[0].head, CharOffset::from(3));
+    assert_eq!(buffer.carets[0].tail, CharOffset::from(2));
+}
+
+#[test]
+fn wrapping_navigation_lands_on_empty_line() {
+    let mut buffer = buffer_at("ab\n\ncd", 2);
+    move_char(
+        &mut buffer,
+        1,
+        &CharacterMotion::WrappingRight,
+        false,
+        &mut (),
+    );
+    assert_eq!(buffer.carets[0].head, CharOffset::from(3));
+}
+
+#[test]
+fn wrapping_navigation_count_skips_one_newline() {
+    let mut buffer = buffer_at("ab\ncd", 1);
+    move_char(
+        &mut buffer,
+        2,
+        &CharacterMotion::WrappingRight,
+        false,
+        &mut (),
+    );
+    assert_eq!(buffer.carets[0].head, CharOffset::from(4));
+}
+
+#[test]
+fn vertical_motion_restores_goal_column_after_short_line() {
+    let mut buffer = buffer_at("xxxx\nab\nxxxx", 4);
+    move_char(&mut buffer, 1, &CharacterMotion::Down, false, &mut ());
+    assert_eq!(buffer.carets[0].head, CharOffset::from(8));
+    move_char(&mut buffer, 1, &CharacterMotion::Down, false, &mut ());
+    assert_eq!(buffer.carets[0].head, CharOffset::from(12));
+    assert_eq!(buffer.carets[0].goal_column, Some(3));
+}
+
+#[test]
+fn vertical_visual_motion_keeps_tail_and_goal_column() {
+    let mut buffer = buffer_at("xxxx\nab\nxxxx", 4);
+    move_char(&mut buffer, 1, &CharacterMotion::Down, true, &mut ());
+    assert_eq!(buffer.carets[0].tail, CharOffset::from(4));
+    move_char(&mut buffer, 1, &CharacterMotion::Down, true, &mut ());
+    assert_eq!(buffer.carets[0].tail, CharOffset::from(4));
+    assert_eq!(buffer.carets[0].head, CharOffset::from(12));
 }

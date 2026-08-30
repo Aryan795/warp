@@ -39,6 +39,7 @@ impl VimBufferOps for NotebooksEditorModel {
             .map(|selection| vim::handler::VimCaret {
                 head: selection.head,
                 tail: selection.tail,
+                goal_column: None,
             })
             .collect();
         vim::handler::VimSnapshot::from_plain_text(&text, carets)

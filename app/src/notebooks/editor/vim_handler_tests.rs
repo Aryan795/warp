@@ -144,6 +144,22 @@ fn notebook_vim_insert_and_escape_moves_left() {
 }
 
 #[test]
+fn notebook_vim_replace_char_noops_when_count_exceeds_line() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "abc\ndef", &mut app);
+
+        vim_type(&editor, "5rx", &mut app);
+        assert_eq!(markdown(&editor, &app), "abc\ndef");
+        assert_eq!(vim_mode(&editor, &app), Some(VimMode::Normal));
+
+        vim_type(&editor, "2rx", &mut app);
+        assert_eq!(markdown(&editor, &app), "xxc\ndef");
+    });
+}
+
+#[test]
 fn notebook_vim_charwise_delete_yank_change() {
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);

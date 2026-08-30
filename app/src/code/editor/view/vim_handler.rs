@@ -1,10 +1,10 @@
 use vim::handler::{
-    self, apply_mode_change, apply_operator, apply_visual_operator, apply_visual_paste,
+    self, VimBufferOps, apply_mode_change, apply_operator, apply_visual_operator,
+    apply_visual_paste,
 };
 use vim::vim::{
-    BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
-    InsertPosition, LineMotion, ModeTransition, MotionType, VimHandler, VimMode, VimOperand,
-    VimOperator, VimTextObject, WordMotion,
+    CharacterMotion, Direction, InsertPosition, ModeTransition, MotionType, VimHandler, VimMode,
+    VimOperand, VimOperator,
 };
 use warp_editor::content::buffer::{BufferEditAction, EditOrigin, VimInsertPoint};
 use warp_editor::model::{CoreEditorModel, PlainTextEditorModel};
@@ -19,90 +19,24 @@ use crate::view_components::find::FindDirection;
 use crate::vim_registers::{RegisterContent, VimRegisters};
 
 impl VimHandler for CodeEditorView {
+    fn map_vim_snapshot(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+        f: impl FnOnce(&mut vim::handler::VimSnapshot),
+    ) {
+        self.model.update(ctx, |model, ctx| {
+            let mut snap = model.snapshot(ctx);
+            f(&mut snap);
+            model.set_selections(&snap.carets, ctx);
+        });
+    }
+
     fn insert_char(&mut self, c: char, ctx: &mut ViewContext<Self>) {
         self.user_insert(&c.to_string(), ctx);
     }
 
     fn keyword_prg(&mut self, _ctx: &mut ViewContext<Self>) {
         // no-op
-    }
-
-    fn navigate_char(
-        &mut self,
-        count: u32,
-        character_motion: &CharacterMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_char(model, count, character_motion, keep_selection, ctx);
-        });
-    }
-
-    fn navigate_word(
-        &mut self,
-        count: u32,
-        word_motion: &WordMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_word(model, count, word_motion, keep_selection, ctx);
-        });
-    }
-
-    fn navigate_line(
-        &mut self,
-        line_count: u32,
-        motion: &LineMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_line(model, line_count, motion, keep_selection, ctx);
-        });
-    }
-
-    fn first_nonwhitespace_motion(
-        &mut self,
-        count: u32,
-        motion: &FirstNonWhitespaceMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_first_nonwhitespace(model, count, motion, keep_selection, ctx);
-        });
-    }
-
-    fn find_char(
-        &mut self,
-        occurrence_count: u32,
-        find_char_motion: &FindCharMotion,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::find_char(
-                model,
-                occurrence_count,
-                find_char_motion,
-                keep_selection,
-                ctx,
-            );
-        });
-    }
-
-    fn navigate_paragraph(
-        &mut self,
-        count: u32,
-        direction: &Direction,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::move_paragraph(model, count, direction, keep_selection, ctx);
-        });
     }
 
     fn operation(
@@ -267,52 +201,6 @@ impl VimHandler for CodeEditorView {
             apply_visual_paste(model, motion_type, &text, yanked_motion_type, ctx)
         });
         Self::write_yanked_register(write_register_name, yanked, ctx);
-    }
-
-    fn visual_text_object(&mut self, text_object: &VimTextObject, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            handler::select_text_object(model, text_object, ctx);
-        });
-    }
-
-    fn jump_to_first_line(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_first_line(model, keep_selection, ctx);
-        });
-    }
-
-    fn jump_to_last_line(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_last_line(model, keep_selection, ctx);
-        });
-    }
-
-    fn jump_to_line(
-        &mut self,
-        line_number: u32,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_line(model, line_number, keep_selection, ctx);
-        });
-    }
-
-    fn jump_to_matching_bracket(&mut self, keep_selection: bool, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_matching_bracket(model, keep_selection, ctx);
-        })
-    }
-
-    fn jump_to_unmatched_bracket(
-        &mut self,
-        bracket: &BracketChar,
-        keep_selection: bool,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        self.model.update(ctx, |model, ctx| {
-            handler::jump_to_unmatched_bracket(model, bracket, keep_selection, ctx);
-        })
     }
 
     fn paste(

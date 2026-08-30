@@ -34,7 +34,11 @@ impl VimBufferOps for EditorModel {
                     .unwrap_or_else(|| {
                         to_one_based(selection.tail().to_char_offset(buffer).unwrap_or_default())
                     });
-                VimCaret { head, tail }
+                VimCaret {
+                    head,
+                    tail,
+                    goal_column: selection.goal_end_column,
+                }
             })
             .collect();
         VimSnapshot::from_plain_text(&self.buffer_text(ctx), carets)
@@ -66,8 +70,8 @@ impl VimBufferOps for EditorModel {
                         reversed,
                     },
                     clamp_direction: Default::default(),
-                    goal_start_column: None,
-                    goal_end_column: None,
+                    goal_start_column: caret.goal_column,
+                    goal_end_column: caret.goal_column,
                 })
             })
             .collect();
