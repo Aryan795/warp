@@ -1,6 +1,7 @@
 use settings::Setting as _;
 use string_offset::CharOffset;
 use vim::vim::{MotionType, VimMode};
+use warp_editor::content::buffer::ToBufferPoint;
 use warp_editor::model::CoreEditorModel;
 use warp_util::user_input::UserInput;
 use warpui::{App, SingletonEntity, TypedActionView, UpdateModel, ViewHandle};
@@ -371,5 +372,54 @@ fn notebook_vim_read_only_does_not_edit() {
         vim_type(&editor, "x", &mut app);
         vim_type(&editor, "dd", &mut app);
         assert_eq!(markdown(&editor, &app), before);
+    });
+}
+
+fn cursor_row_col(editor: &ViewHandle<RichTextEditorView>, app: &App) -> (u32, u32) {
+    editor.read(app, |view, ctx| {
+        let model = view.model.as_ref(ctx);
+        let head = model
+            .buffer_selection_model()
+            .as_ref(ctx)
+            .first_selection_head();
+        let point = head.to_buffer_point(model.content().as_ref(ctx));
+        (point.row, point.column)
+    })
+}
+
+#[test]
+fn notebook_vim_vertical_restores_goal_column_after_short_line() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "xxxx\nab\nxxxx", &mut app);
+
+        vim_type(&editor, "lll", &mut app);
+        assert_eq!(cursor_row_col(&editor, &app), (1, 3));
+        vim_type(&editor, "j", &mut app);
+        assert_eq!(cursor_row_col(&editor, &app), (2, 2));
+        vim_type(&editor, "j", &mut app);
+        assert_eq!(cursor_row_col(&editor, &app), (3, 3));
+    });
+}
+
+#[test]
+fn notebook_vim_visual_vertical_keeps_tail_and_goal_column() {
+    App::test((), |mut app| async move {
+        let (_window, editor, _test_view) = initialize_editor(&mut app);
+        enable_vim_setting(&mut app);
+        prepare_notebook(&editor, "xxxx\nab\nxxxx", &mut app);
+
+        vim_type(&editor, "lll", &mut app);
+        let origin = cursor_offset(&editor, &app);
+        vim_type(&editor, "vjj", &mut app);
+        assert_eq!(
+            vim_mode(&editor, &app),
+            Some(VimMode::Visual(MotionType::Charwise))
+        );
+        assert_eq!(cursor_row_col(&editor, &app), (3, 3));
+        let (head, tail) = selection_offsets(&editor, &app);
+        assert_eq!(tail, origin);
+        assert!(head > tail);
     });
 }

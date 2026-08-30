@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pathfinder_geometry::vector::{Vector2F, vec2f};
 use unindent::Unindent;
+use vec1::vec1;
 use vim::vim::{MotionType, VimMode};
 use warp_core::features::FeatureFlag;
 use warp_core::settings::Setting;
@@ -11,6 +12,7 @@ use warp_core::ui::appearance::Appearance;
 use warp_editor::content::buffer::{InitialBufferState, ToBufferCharOffset, ToBufferPoint};
 use warp_editor::model::CoreEditorModel;
 use warp_editor::render::element::VerticalExpansionBehavior;
+use warp_editor::render::model::ColumnUnit;
 use warp_editor::render::model::viewport::SizeInfo;
 use warp_util::user_input::UserInput;
 use warpui::keymap::Keystroke;
@@ -2420,5 +2422,57 @@ fn test_vim_visual_delete_and_find_char_operator() {
         let editor = add_code_editor("abXcd", &mut app);
         vim_user_insert(&editor, "dfX", &mut app);
         assert_eq!(buffer_text(&editor, &app), "cd");
+    });
+}
+
+#[test]
+fn test_vim_vertical_restores_goal_column_after_short_line() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+        let editor = add_code_editor("xxxx\nab\nxxxx", &mut app);
+        set_cursor_position(&editor, 1, 3, &mut app);
+        vim_user_insert(&editor, "j", &mut app);
+        assert_eq!(cursor_position(&editor, &app), (2, 1));
+        vim_user_insert(&editor, "j", &mut app);
+        assert_eq!(cursor_position(&editor, &app), (3, 3));
+    });
+}
+
+#[test]
+fn test_vim_visual_vertical_keeps_tail_and_goal_column() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+        let editor = add_code_editor("xxxx\nab\nxxxx", &mut app);
+        set_cursor_position(&editor, 1, 3, &mut app);
+        vim_user_insert(&editor, "vjj", &mut app);
+        assert_eq!(
+            vim_mode(&editor, &app),
+            Some(VimMode::Visual(MotionType::Charwise))
+        );
+        assert_eq!(cursor_position(&editor, &app), (3, 3));
+    });
+}
+
+#[test]
+fn test_vim_j_does_not_consume_native_pixel_goal_xs() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+        let editor = add_code_editor("xxxx\nab\nxxxx", &mut app);
+        set_cursor_position(&editor, 1, 3, &mut app);
+        editor.update(&mut app, |view, ctx| {
+            view.model.update(ctx, |model, ctx| {
+                model.selection().update(ctx, |selection, _| {
+                    selection.goal_xs = Some(vec1![ColumnUnit::Pixels((800usize).into_pixels())]);
+                });
+            });
+        });
+        vim_user_insert(&editor, "jj", &mut app);
+        assert_eq!(cursor_position(&editor, &app), (3, 3));
     });
 }

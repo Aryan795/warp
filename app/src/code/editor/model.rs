@@ -1,12 +1,12 @@
 #![cfg_attr(target_family = "wasm", allow(dead_code, unused_imports))]
 // Adding this file level gate as some of the code around editability is not used in WASM yet.
 
+use std::cmp;
 use std::future::Future;
 use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::{cmp, mem};
 
 use ai::diff_validation::DiffDelta;
 use itertools::Itertools;
@@ -18,7 +18,7 @@ use string_offset::CharOffset;
 use syntax_tree::{ColorMap, DecorationStateEvent, SyntaxTreeState};
 use vec1::{Vec1, vec1};
 use vim::handler::VimBufferOps;
-use vim::vim::{Direction, InsertPosition, MotionType, VimOperand, VimOperator};
+use vim::vim::{Direction, InsertPosition, VimOperand, VimOperator};
 use warp_core::platform::SessionPlatform;
 use warp_core::semantic_selection::SemanticSelection;
 use warp_core::ui::theme::Fill;
@@ -39,9 +39,9 @@ use warp_editor::editor::TextDecoration;
 use warp_editor::model::{CoreEditorModel, PlainTextEditorModel};
 use warp_editor::multiline::{AnyMultilineString, LF, MultilineString};
 use warp_editor::render::model::{
-    AutoScrollMode, BlockItem, BlockSpacings, BrokenLinkStyle, CheckBoxStyle, ColumnUnit,
-    Decoration, HorizontalRuleStyle, InlineCodeStyle, LineCount, LineDecoration, ParagraphStyles,
-    RenderEvent, RenderLineLocation, RenderState, RichTextStyles, StyleUpdateAction, TableStyle,
+    AutoScrollMode, BlockItem, BlockSpacings, BrokenLinkStyle, CheckBoxStyle, Decoration,
+    HorizontalRuleStyle, InlineCodeStyle, LineCount, LineDecoration, ParagraphStyles, RenderEvent,
+    RenderLineLocation, RenderState, RichTextStyles, StyleUpdateAction, TableStyle,
     UpdateDecorationAfterLayout, WidthSetting,
 };
 use warp_editor::selection::{SelectionMode, SelectionModel, TextDirection, TextUnit};
@@ -51,7 +51,7 @@ use warpui::elements::{
     XAxisAnchor, YAxisAnchor,
 };
 use warpui::text::point::Point;
-use warpui::units::{IntoPixels, Pixels};
+use warpui::units::Pixels;
 use warpui::{AppContext, Entity, ModelAsRef, ModelContext, ModelHandle, SingletonEntity};
 
 use super::super::DiffResult;
@@ -290,12 +290,7 @@ pub struct CodeEditorModel {
     show_current_line_highlights: bool,
     /// Delay rendering of content updates until a certain trigger.
     delay_rendering: Option<DelayRendering>,
-    /// Stores the selection "tails" when entering Vim visual mode so we can derive
-    /// visual selections that may differ from the cursor positions.
-    vim_visual_tails: Vec<CharOffset>,
-    /// Selections saved across a yank so the cursor can be restored afterward.
-    #[allow(dead_code)]
-    vim_selection_stash: Option<Vec1<SelectionOffsets>>,
+    vim_goal_columns: Option<Vec<u32>>,
     hovered_symbol_range: Option<HoverableLink>,
     /// Automatically hide lines outside of the active diff with X context lines.
     hide_lines_outside_of_active_diff: Option<usize>,
@@ -457,8 +452,7 @@ impl CodeEditorModel {
             interaction_state: InteractionState::Editable,
             show_current_line_highlights,
             delay_rendering: None,
-            vim_visual_tails: vec![],
-            vim_selection_stash: None,
+            vim_goal_columns: None,
             hovered_symbol_range: None,
             hide_lines_outside_of_active_diff: None,
             recalculate_hidden_lines_after_diff: None,
@@ -755,25 +749,6 @@ impl CodeEditorModel {
                 autoscroll,
                 ctx,
             );
-        });
-    }
-
-    /// Set selections but save goal columns.
-    /// update_selection typically overwrites goal columns; this fn will save and restore them.
-    pub fn vim_set_selections_preserving_goal_xs(
-        &mut self,
-        selections: Vec1<SelectionOffsets>,
-        autoscroll: AutoScrollBehavior,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        self.selection.update(ctx, |selection, ctx| {
-            let saved_goal_xs = selection.goal_xs.clone();
-            selection.update_selection(
-                BufferSelectAction::SetSelectionOffsets { selections },
-                autoscroll,
-                ctx,
-            );
-            selection.goal_xs = saved_goal_xs;
         });
     }
 
@@ -2129,145 +2104,6 @@ impl CodeEditorModel {
         self.validate(ctx);
     }
 
-    /// Set Vim visual tails to the current selection heads (cursor positions).
-    pub fn vim_set_visual_tail_to_selection_heads(&mut self, ctx: &mut ModelContext<Self>) {
-        let selection_model = self.selection_model.as_ref(ctx);
-        let selections = selection_model.selection_offsets();
-        self.vim_visual_tails = selections.iter().map(|s| s.head).collect();
-    }
-
-    pub fn vim_visual_tails(&self) -> &Vec<CharOffset> {
-        &self.vim_visual_tails
-    }
-
-    /// Return the ranges represented by the current Vim visual tails and
-    /// selection heads without consuming the tails.
-    pub fn vim_visual_selection_ranges(
-        &self,
-        motion_type: MotionType,
-        ctx: &AppContext,
-    ) -> Vec<Range<CharOffset>> {
-        let selection_model = self.selection_model.as_ref(ctx);
-        let buffer = self.content().as_ref(ctx);
-
-        selection_model
-            .selection_offsets()
-            .iter()
-            .zip(self.vim_visual_tails.iter())
-            .map(|(selection, visual_tail)| {
-                let mut start = *visual_tail;
-                let mut end = selection.head;
-                if start > end {
-                    mem::swap(&mut start, &mut end);
-                }
-
-                let max_offset = buffer.max_charoffset();
-                if end < max_offset
-                    && (motion_type != MotionType::Linewise
-                        || buffer.char_at(end).is_some_and(|c| c != '\n'))
-                {
-                    end += 1;
-                }
-
-                if motion_type == MotionType::Linewise {
-                    let start_point = start.to_buffer_point(buffer);
-                    start = Point::new(start_point.row, 0).to_buffer_char_offset(buffer);
-
-                    let end_point = end.to_buffer_point(buffer);
-                    if end_point.column != 0 {
-                        end = Point::new(end_point.row, buffer.line_len(end_point.row))
-                            .to_buffer_char_offset(buffer);
-                    }
-                }
-
-                start..end
-            })
-            .collect()
-    }
-
-    /// Expand the current selection(s) for a visual-mode operation using stored visual tails.
-    /// Charwise visual mode includes the character under the block cursor; linewise visual mode
-    /// expands to the full line bounds.
-    ///
-    /// This is used by operators to get the actual selection range for visual operations.
-    pub fn vim_visual_selection_range(
-        &mut self,
-        motion_type: MotionType,
-        include_newline: bool,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        let selection_model = self.selection_model.as_ref(ctx);
-        let buffer = self.content().as_ref(ctx);
-        let vim_visual_tails = mem::take(&mut self.vim_visual_tails);
-
-        let new_selections = selection_model
-            .selection_offsets()
-            .iter()
-            .zip(vim_visual_tails.iter())
-            .map(|(selection, visual_tail)| {
-                let mut start = *visual_tail;
-                let mut end = selection.head;
-                if start > end {
-                    mem::swap(&mut start, &mut end);
-                }
-
-                let max_offset = buffer.max_charoffset();
-                // Include the char under the block cursor for charwise/visual.
-                // For linewise, only include +1 if it won't move onto the next line (i.e., the
-                // current char at `end` is not a newline).
-                if end < max_offset
-                    && (motion_type != MotionType::Linewise
-                        || buffer.char_at(end).map(|c| c != '\n').unwrap_or(false))
-                {
-                    end += 1;
-                }
-
-                if motion_type == MotionType::Linewise {
-                    let point = start.to_buffer_point(buffer);
-
-                    let start_point = Point::new(point.row, 0);
-                    let end_point = end.to_buffer_point(buffer);
-                    let new_end = if end_point.column == 0 {
-                        end_point
-                    } else {
-                        Point::new(end_point.row, buffer.line_len(end_point.row))
-                    };
-
-                    start = start_point.to_buffer_char_offset(buffer);
-                    end = new_end.to_buffer_char_offset(buffer);
-
-                    if include_newline {
-                        let start_newline = start.as_usize() > 0
-                            && buffer
-                                .char_at(start.saturating_sub(&1.into()))
-                                .map(|c| c == '\n')
-                                .unwrap_or(false);
-                        let end_newline = buffer.char_at(end).map(|c| c == '\n').unwrap_or(false);
-
-                        if end_newline && end < max_offset {
-                            end += 1;
-                        } else if start_newline {
-                            start = start.saturating_sub(&1.into());
-                        }
-                    }
-                }
-
-                SelectionOffsets {
-                    head: start,
-                    tail: end,
-                }
-            })
-            .collect_vec();
-
-        if let Ok(new_selections) = Vec1::try_from_vec(new_selections) {
-            self.vim_set_selections_preserving_goal_xs(
-                new_selections,
-                AutoScrollBehavior::Selection,
-                ctx,
-            );
-        }
-    }
-
     pub fn toggle_comments(&mut self, ctx: &mut ModelContext<Self>) {
         let Some(prefix) = self.syntax_tree.as_ref(ctx).comment_prefix() else {
             return;
@@ -2635,7 +2471,7 @@ impl CodeEditorModel {
             }
         });
 
-        self.vim_set_selections_preserving_goal_xs(new_selections, AutoScrollBehavior::None, ctx);
+        self.vim_set_selections(new_selections, AutoScrollBehavior::None, ctx);
     }
 
     /// Horizontal cursor movement for vim in the code editor.
@@ -2758,20 +2594,17 @@ impl CodeEditorModel {
         let selection_model = self.selection_model.as_ref(ctx);
         let current_selections = selection_model.selection_offsets();
 
-        // Determine desired column for each selection. If goal_xs exist, interpret them as columns;
-        // otherwise initialize from current buffer columns.
-        let goal_cols: Vec<u32> =
-            if let Some(existing) = self.selection().as_ref(ctx).goal_xs.as_ref() {
-                existing
-                    .iter()
-                    .map(|col| col.as_pixels().as_f32().round() as u32)
-                    .collect()
-            } else {
-                current_selections
-                    .iter()
-                    .map(|sel| sel.head.to_buffer_point(buffer).column)
-                    .collect()
-            };
+        let goal_cols: Vec<u32> = current_selections
+            .iter()
+            .enumerate()
+            .map(|(index, sel)| {
+                self.vim_goal_columns
+                    .as_ref()
+                    .and_then(|goals| goals.get(index).copied())
+                    .unwrap_or_else(|| sel.head.to_buffer_point(buffer).column)
+                    .max(sel.head.to_buffer_point(buffer).column)
+            })
+            .collect();
 
         let max_row = buffer.max_point().row;
 
@@ -2804,16 +2637,7 @@ impl CodeEditorModel {
 
         if let Ok(new_selections) = Vec1::try_from_vec(new_selections_vec) {
             self.vim_set_selections(new_selections, AutoScrollBehavior::Selection, ctx);
-
-            // Update goal_xs to the desired columns (stored as ColumnUnit::Pixels for
-            // consistency with the GUI SelectionModel pixel path)
-            let goal_pixels: Vec<_> = goal_cols
-                .into_iter()
-                .map(|c| ColumnUnit::Pixels((c as usize).into_pixels()))
-                .collect();
-            self.selection().update(ctx, |selection, _| {
-                selection.goal_xs = Vec1::try_from_vec(goal_pixels).ok();
-            });
+            self.vim_goal_columns = Some(goal_cols);
         }
     }
 
@@ -3348,6 +3172,19 @@ impl CodeEditorModel {
     }
 }
 
+fn vim_goal_columns_from_carets(carets: &[vim::handler::VimCaret]) -> Option<Vec<u32>> {
+    if carets.iter().any(|caret| caret.goal_column.is_some()) {
+        Some(
+            carets
+                .iter()
+                .map(|caret| caret.goal_column.unwrap_or(0))
+                .collect(),
+        )
+    } else {
+        None
+    }
+}
+
 impl VimBufferOps for CodeEditorModel {
     type Ctx<'a> = ModelContext<'a, Self>;
 
@@ -3359,22 +3196,13 @@ impl VimBufferOps for CodeEditorModel {
             .selection_offsets()
             .iter()
             .enumerate()
-            .map(|(index, selection)| {
-                let goal_column = self
-                    .selection()
-                    .as_ref(ctx)
-                    .goal_xs
+            .map(|(index, selection)| vim::handler::VimCaret {
+                head: selection.head,
+                tail: selection.tail,
+                goal_column: self
+                    .vim_goal_columns
                     .as_ref()
-                    .and_then(|goals| {
-                        goals
-                            .get(index)
-                            .map(|col| col.as_pixels().as_f32().round() as u32)
-                    });
-                vim::handler::VimCaret {
-                    head: selection.head,
-                    tail: selection.tail,
-                    goal_column,
-                }
+                    .and_then(|goals| goals.get(index).copied()),
             })
             .collect();
         vim::handler::VimSnapshot::from_plain_text(&text, carets)
@@ -3393,24 +3221,7 @@ impl VimBufferOps for CodeEditorModel {
             return;
         };
         self.vim_set_selections(selections, AutoScrollBehavior::Selection, ctx);
-        let any_goal = carets.iter().any(|caret| caret.goal_column.is_some());
-        self.selection().update(ctx, |selection, _| {
-            selection.goal_xs = if any_goal {
-                Vec1::try_from_vec(
-                    carets
-                        .iter()
-                        .map(|caret| {
-                            ColumnUnit::Pixels(
-                                (caret.goal_column.unwrap_or(0) as usize).into_pixels(),
-                            )
-                        })
-                        .collect(),
-                )
-                .ok()
-            } else {
-                None
-            };
-        });
+        self.vim_goal_columns = vim_goal_columns_from_carets(carets);
     }
 
     fn replace_ranges(

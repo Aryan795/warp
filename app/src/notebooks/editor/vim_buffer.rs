@@ -36,10 +36,14 @@ impl VimBufferOps for NotebooksEditorModel {
         let carets = self
             .selections(ctx)
             .iter()
-            .map(|selection| vim::handler::VimCaret {
+            .enumerate()
+            .map(|(index, selection)| vim::handler::VimCaret {
                 head: selection.head,
                 tail: selection.tail,
-                goal_column: None,
+                goal_column: self
+                    .vim_goal_columns
+                    .as_ref()
+                    .and_then(|goals| goals.get(index).copied()),
             })
             .collect();
         vim::handler::VimSnapshot::from_plain_text(&text, carets)
@@ -58,6 +62,16 @@ impl VimBufferOps for NotebooksEditorModel {
             return;
         };
         self.vim_set_selections(selections, AutoScrollBehavior::Selection, ctx);
+        self.vim_goal_columns = if carets.iter().any(|caret| caret.goal_column.is_some()) {
+            Some(
+                carets
+                    .iter()
+                    .map(|caret| caret.goal_column.unwrap_or(0))
+                    .collect(),
+            )
+        } else {
+            None
+        };
     }
 
     fn replace_ranges(

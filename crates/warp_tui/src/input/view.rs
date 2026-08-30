@@ -575,11 +575,20 @@ impl TuiInputView {
             .on_action(|action, event_ctx| {
                 event_ctx.dispatch_typed_action(TuiInputAction::Editor(action))
             });
-        if let VimMode::Visual(motion_type) = self.vim_model.as_ref(ctx).state().mode {
+        if let VimMode::Visual(_) = self.vim_model.as_ref(ctx).state().mode {
             let ranges = self
                 .model
                 .as_ref(ctx)
-                .vim_visual_selection_ranges(motion_type, ctx);
+                .buffer_selection_model()
+                .as_ref(ctx)
+                .selection_offsets()
+                .iter()
+                .map(|selection| {
+                    let start = selection.head.min(selection.tail);
+                    let end = selection.head.max(selection.tail);
+                    start..end
+                })
+                .collect();
             element = element.with_selection_ranges(ranges);
         }
         if input_ownership.is_masked() {

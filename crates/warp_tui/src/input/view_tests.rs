@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use string_offset::CharOffset;
+use vec1::vec1;
 use vim::vim::VimMode;
 use warp::appearance::Appearance;
 use warp::editor::CodeEditorModel;
@@ -24,6 +25,7 @@ use warp::tui_export::{
 };
 use warp_core::features::FeatureFlag;
 use warp_editor::model::CoreEditorModel;
+use warp_editor::render::model::ColumnUnit;
 use warpui::EntityIdMap;
 use warpui_core::elements::tui::{
     TuiBuffer, TuiBufferExt, TuiConstraint, TuiElement, TuiEvent, TuiEventContext,
@@ -4691,6 +4693,67 @@ fn vim_handler_unsupported_case_and_comment_do_not_mutate() {
         });
         app.read(|ctx| {
             assert_eq!(text(&view, ctx), "hello");
+        });
+    });
+}
+
+fn tui_cursor_row_col(view: &ViewHandle<TuiInputView>, ctx: &AppContext) -> (u32, u32) {
+    use warp_editor::content::buffer::ToBufferPoint;
+    let model = view.as_ref(ctx).model().as_ref(ctx);
+    let head = model
+        .buffer_selection_model()
+        .as_ref(ctx)
+        .first_selection_head();
+    let point = head.to_buffer_point(model.content().as_ref(ctx));
+    (point.row, point.column)
+}
+
+#[test]
+fn vim_handler_vertical_restores_goal_column_after_short_line() {
+    App::test((), |mut app| async move {
+        enable_vim_mode(&mut app);
+        let view = enter_normal_with_text(&mut app, "xxxx\nab\nxxxx");
+        app.update(|ctx| {
+            type_str(&view, ctx, "gglll");
+        });
+        app.read(|ctx| {
+            assert_eq!(tui_cursor_row_col(&view, ctx), (1, 3));
+        });
+        app.update(|ctx| {
+            type_str(&view, ctx, "j");
+        });
+        app.read(|ctx| {
+            assert_eq!(tui_cursor_row_col(&view, ctx), (2, 1));
+        });
+        app.update(|ctx| {
+            type_str(&view, ctx, "j");
+        });
+        app.read(|ctx| {
+            assert_eq!(tui_cursor_row_col(&view, ctx), (3, 3));
+        });
+    });
+}
+
+#[test]
+fn vim_j_does_not_consume_native_char_goal_xs() {
+    App::test((), |mut app| async move {
+        enable_vim_mode(&mut app);
+        let view = enter_normal_with_text(&mut app, "xxxx\nab\nxxxx");
+        app.update(|ctx| {
+            type_str(&view, ctx, "gglll");
+        });
+        app.update(|ctx| {
+            view.model().update(ctx, |model, ctx| {
+                model.selection().update(ctx, |selection, _| {
+                    selection.goal_xs = Some(vec1![ColumnUnit::Chars(80)]);
+                });
+            });
+        });
+        app.update(|ctx| {
+            type_str(&view, ctx, "jj");
+        });
+        app.read(|ctx| {
+            assert_eq!(tui_cursor_row_col(&view, ctx), (3, 3));
         });
     });
 }
