@@ -78,16 +78,41 @@ pub fn operand_motion_type(operand: &VimOperand) -> MotionType {
     }
 }
 
-fn register_text_for_yank(selected_text: &str, motion_type: MotionType) -> Option<String> {
+fn register_text_for_yank(
+    selected_text: &str,
+    motion_type: MotionType,
+    reaches_eof: bool,
+) -> Option<String> {
     if selected_text.is_empty() && motion_type == MotionType::Linewise {
         Some("\n".to_owned())
     } else if selected_text.is_empty() {
         None
-    } else if motion_type == MotionType::Linewise && !selected_text.ends_with('\n') {
-        Some(format!("{selected_text}\n"))
+    } else if motion_type == MotionType::Linewise {
+        let mut text = selected_text.to_owned();
+        if reaches_eof {
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            if text.starts_with('\n') {
+                text = text.trim_start_matches('\n').to_owned();
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+            }
+        } else if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        Some(text)
     } else {
         Some(selected_text.to_owned())
     }
+}
+
+fn selection_reaches_eof(snap: &VimSnapshot) -> bool {
+    let eof = CharOffset::from(snap.chars.len());
+    snap.carets
+        .iter()
+        .any(|caret| caret.head.max(caret.tail) >= eof)
 }
 
 /// One caret in buffer coordinates (`CharOffset` 1 is the first character).
@@ -360,6 +385,16 @@ pub trait VimBufferOps {
         false
     }
 
+    /// Vim/`G` lands on first non-whitespace. The input editor lands on column 0.
+    fn last_line_lands_on_first_nonwhitespace(&self) -> bool {
+        true
+    }
+
+    /// Vim restores the cursor after a yank. The input editor collapses charwise yanks.
+    fn yank_restores_original_cursor(&self, _motion_type: MotionType) -> bool {
+        true
+    }
+
     fn change_line_smart_indent(&mut self, ctx: &mut Self::Ctx<'_>) {
         self.delete_selection(ctx);
         self.open_line(false, ctx);
@@ -439,7 +474,11 @@ pub trait VimBufferOps {
         if !edits.is_empty() {
             self.replace_ranges(&edits, ctx);
         }
-        self.clear_selections(ctx);
+        let mut snap = self.snapshot(ctx);
+        for caret in &mut snap.carets {
+            caret.tail = caret.head;
+        }
+        self.set_selections(&snap.carets, ctx);
     }
 
     fn move_to_first_nonwhitespace(&mut self, ctx: &mut Self::Ctx<'_>) {
@@ -601,7 +640,11 @@ pub trait VimBufferOps {
                 VimMotion::Paragraph(direction) => {
                     move_paragraph_snapshot(&mut snap, operand_count, direction, true);
                 }
-                VimMotion::JumpToLastLine => jump_last_snapshot(&mut snap, true),
+                VimMotion::JumpToLastLine => jump_last_snapshot(
+                    &mut snap,
+                    true,
+                    self.last_line_lands_on_first_nonwhitespace(),
+                ),
                 VimMotion::JumpToFirstLine => jump_first_snapshot(&mut snap, true),
                 VimMotion::FindChar(m) => find_char_snapshot(&mut snap, operand_count, m, true),
                 VimMotion::JumpToLine(line_number) => {
@@ -627,6 +670,12 @@ pub trait VimBufferOps {
             VimOperand::TextObject(object) => {
                 if self.supports_text_objects() {
                     select_text_object_snapshot(&mut snap, object, Some(operator));
+                    if matches!(object.object_type, TextObjectType::Paragraph) {
+                        snap.extend_linewise(
+                            operator.includes_trailing_newline(),
+                            *operator == VimOperator::Delete,
+                        );
+                    }
                 }
             }
         }
@@ -678,8 +727,15 @@ fn move_char_snapshot(snap: &mut VimSnapshot, count: u32, motion: &CharacterMoti
             keep,
         ),
         CharacterMotion::WrappingLeft => snap.map_heads(
-            |_, head| {
-                let mut h = head;
+            |s, head| {
+                let (row, col) = s.point(head);
+                let line_len = s.line_len(row);
+                // `$` can sit on the newline; wrapping starts from the last character.
+                let mut h = if col >= line_len && line_len > 0 {
+                    s.offset_at(row, line_len - 1)
+                } else {
+                    head
+                };
                 for _ in 0..count {
                     if h <= CharOffset::from(1) {
                         break;
@@ -844,14 +900,19 @@ fn jump_first_snapshot(snap: &mut VimSnapshot, keep: bool) {
     snap.map_heads(|_, _| CharOffset::from(1), keep);
 }
 
-fn jump_last_snapshot(snap: &mut VimSnapshot, keep: bool) {
-    if snap.plain_text().ends_with('\n') {
-        let empty_last_line = CharOffset::from(snap.chars.len());
-        snap.map_heads(|_, _| empty_last_line, keep);
-    } else {
-        let row = snap.max_row();
-        snap.map_heads(|s, _| s.first_nonwhitespace(s.offset_at(row, 0)), keep);
-    }
+fn jump_last_snapshot(snap: &mut VimSnapshot, keep: bool, first_nonwhitespace: bool) {
+    let row = snap.max_row();
+    snap.map_heads(
+        |s, _| {
+            let start = s.offset_at(row, 0);
+            if first_nonwhitespace {
+                s.first_nonwhitespace(start)
+            } else {
+                start
+            }
+        },
+        keep,
+    );
 }
 
 fn zero_based(offset: CharOffset) -> CharOffset {
@@ -950,33 +1011,54 @@ fn select_text_object_snapshot(
 ) {
     let text = snap.plain_text();
     let preserve_leading_padding = matches!(operator, Some(VimOperator::Change));
-    for caret in &mut snap.carets {
-        let zero = zero_based(caret.head);
-        let range = match object.object_type {
-            TextObjectType::Word(word_type) => match object.inclusion {
-                TextObjectInclusion::Inner => vim_inner_word(text.as_str(), zero, word_type),
-                TextObjectInclusion::Around => vim_a_word(text.as_str(), zero, word_type),
-            },
-            TextObjectType::Quote(quote_type) => match object.inclusion {
-                TextObjectInclusion::Inner => vim_inner_quote(text.as_str(), zero, quote_type),
-                TextObjectInclusion::Around => vim_a_quote(text.as_str(), zero, quote_type),
-            },
-            TextObjectType::Block(bracket_type) => match object.inclusion {
-                TextObjectInclusion::Inner => {
-                    vim_inner_block(text.as_str(), zero, bracket_type, preserve_leading_padding)
+    let visual_paragraph =
+        operator.is_none() && matches!(object.object_type, TextObjectType::Paragraph);
+    let insertion_end = CharOffset::from(snap.chars.len());
+    let updates: Vec<_> = snap
+        .carets
+        .iter()
+        .map(|caret| {
+            let zero = zero_based(caret.head);
+            let range = match object.object_type {
+                TextObjectType::Word(word_type) => match object.inclusion {
+                    TextObjectInclusion::Inner => vim_inner_word(text.as_str(), zero, word_type),
+                    TextObjectInclusion::Around => vim_a_word(text.as_str(), zero, word_type),
+                },
+                TextObjectType::Quote(quote_type) => match object.inclusion {
+                    TextObjectInclusion::Inner => vim_inner_quote(text.as_str(), zero, quote_type),
+                    TextObjectInclusion::Around => vim_a_quote(text.as_str(), zero, quote_type),
+                },
+                TextObjectType::Block(bracket_type) => match object.inclusion {
+                    TextObjectInclusion::Inner => {
+                        vim_inner_block(text.as_str(), zero, bracket_type, preserve_leading_padding)
+                    }
+                    TextObjectInclusion::Around => vim_a_block(text.as_str(), zero, bracket_type),
+                },
+                TextObjectType::Paragraph => match object.inclusion {
+                    TextObjectInclusion::Inner => vim_inner_paragraph(text.as_str(), zero),
+                    TextObjectInclusion::Around => vim_a_paragraph(text.as_str(), zero),
+                },
+            };
+            let Some(range) = range else {
+                return *caret;
+            };
+            let tail = one_based(range.start);
+            let mut head = one_based(range.end);
+            if operator.is_none() {
+                if visual_paragraph && head < insertion_end {
+                    head += 1;
                 }
-                TextObjectInclusion::Around => vim_a_block(text.as_str(), zero, bracket_type),
-            },
-            TextObjectType::Paragraph => match object.inclusion {
-                TextObjectInclusion::Inner => vim_inner_paragraph(text.as_str(), zero),
-                TextObjectInclusion::Around => vim_a_paragraph(text.as_str(), zero),
-            },
-        };
-        if let Some(range) = range {
-            caret.tail = one_based(range.start);
-            caret.head = one_based(range.end);
-        }
-    }
+                if head > tail {
+                    head = CharOffset::from(head.as_usize() - 1);
+                }
+                if visual_paragraph {
+                    head = snap.line_start(head);
+                }
+            }
+            VimCaret { head, tail }
+        })
+        .collect();
+    snap.carets = updates;
 }
 
 fn apply_snapshot_motion<B: VimBufferOps>(
@@ -1077,8 +1159,9 @@ pub fn jump_to_last_line<B: VimBufferOps>(
     keep_selection: bool,
     ctx: &mut B::Ctx<'_>,
 ) {
+    let first_nonwhitespace = buffer.last_line_lands_on_first_nonwhitespace();
     apply_snapshot_motion(buffer, ctx, |snap| {
-        jump_last_snapshot(snap, keep_selection);
+        jump_last_snapshot(snap, keep_selection, first_nonwhitespace);
     });
 }
 
@@ -1143,8 +1226,9 @@ pub fn apply_operator<B: VimBufferOps>(
     match operator {
         VimOperator::Delete | VimOperator::Change => {
             buffer.select_for_operand(operator, operand_count, operand, ctx);
+            let reaches_eof = selection_reaches_eof(&buffer.snapshot(ctx));
             let selected_text = buffer.selected_text(ctx);
-            let yanked = register_text_for_yank(&selected_text, motion_type)
+            let yanked = register_text_for_yank(&selected_text, motion_type, reaches_eof)
                 .map(|text| YankedText { text, motion_type });
             if !selected_text.is_empty() {
                 if *operator == VimOperator::Change
@@ -1167,13 +1251,14 @@ pub fn apply_operator<B: VimBufferOps>(
         VimOperator::Yank => {
             let original = buffer.snapshot(ctx).carets;
             buffer.select_for_operand(operator, operand_count, operand, ctx);
+            let reaches_eof = selection_reaches_eof(&buffer.snapshot(ctx));
             let selected_text = buffer.selected_text(ctx);
-            let yanked = register_text_for_yank(&selected_text, motion_type)
+            let yanked = register_text_for_yank(&selected_text, motion_type, reaches_eof)
                 .map(|text| YankedText { text, motion_type });
-            if matches!(operand, VimOperand::TextObject(_)) {
-                buffer.collapse_to_selection_start(ctx);
-            } else {
+            if buffer.yank_restores_original_cursor(motion_type) {
                 buffer.set_selections(&original, ctx);
+            } else {
+                buffer.collapse_to_selection_start(ctx);
             }
             yanked
         }
@@ -1221,15 +1306,10 @@ pub fn apply_visual_operator<B: VimBufferOps>(
         operator,
         VimOperator::Delete | VimOperator::Change | VimOperator::Yank
     ) {
+        let reaches_eof = selection_reaches_eof(&buffer.snapshot(ctx));
         let selected_text = buffer.selected_text(ctx);
-        if selected_text.is_empty() {
-            None
-        } else {
-            Some(YankedText {
-                text: selected_text,
-                motion_type,
-            })
-        }
+        register_text_for_yank(&selected_text, motion_type, reaches_eof)
+            .map(|text| YankedText { text, motion_type })
     } else {
         None
     };

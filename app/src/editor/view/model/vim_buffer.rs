@@ -75,6 +75,15 @@ impl VimBufferOps for EditorModel {
             return;
         };
         if !self.vim_visual_tails.is_empty() {
+            let buffer = self.buffer(ctx);
+            self.vim_visual_tails = carets
+                .iter()
+                .filter_map(|caret| {
+                    buffer
+                        .anchor_at(to_zero_based(caret.tail).min(max), AnchorBias::Left)
+                        .ok()
+                })
+                .collect();
             let collapsed = new_selections.mapped(|mut selection| {
                 let head = selection.head().clone();
                 selection.set_selection(Selection::single_cursor(head));
@@ -157,5 +166,13 @@ impl VimBufferOps for EditorModel {
 
     fn supports_text_objects(&self) -> bool {
         true
+    }
+
+    fn last_line_lands_on_first_nonwhitespace(&self) -> bool {
+        false
+    }
+
+    fn yank_restores_original_cursor(&self, motion_type: MotionType) -> bool {
+        motion_type == MotionType::Linewise
     }
 }

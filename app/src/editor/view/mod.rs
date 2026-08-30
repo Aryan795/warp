@@ -39,7 +39,8 @@ use snapshot::{EditorHeightShrinkDelay, ViewSnapshot};
 use string_offset::{ByteOffset, CharOffset};
 use vec1::{Vec1, vec1};
 use vim::handler::{
-    self, apply_mode_change, apply_operator, apply_visual_operator, apply_visual_paste,
+    self, VimBufferOps, apply_mode_change, apply_operator, apply_visual_operator,
+    apply_visual_paste,
 };
 use vim::vim::{
     BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
@@ -2283,6 +2284,11 @@ impl VimHandler for EditorView {
                     },
                 ),
             );
+        } else if new.mode == VimMode::Normal && *old == VimMode::Insert {
+            self.move_left(/* stop at line start */ true, ctx);
+            self.change_selections(ctx, |editor_model, ctx| {
+                editor_model.enforce_normal_mode_line_cap(ctx);
+            });
         } else {
             self.change_selections(ctx, |editor_model, ctx| {
                 apply_mode_change(editor_model, old, new, ctx);
@@ -2623,12 +2629,6 @@ impl VimHandler for EditorView {
     fn visual_text_object(&mut self, text_object: &VimTextObject, ctx: &mut ViewContext<Self>) {
         self.change_selections(ctx, |editor_model, ctx| {
             handler::select_text_object(editor_model, text_object, ctx);
-            let tails = editor_model
-                .selections(ctx)
-                .iter()
-                .map(|selection| selection.tail().clone())
-                .collect();
-            editor_model.vim_set_visual_tails(tails);
         });
     }
 

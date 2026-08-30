@@ -2430,10 +2430,6 @@ impl EditorModel {
             .collect();
     }
 
-    pub fn vim_set_visual_tails(&mut self, new_tails: Vec<Anchor>) {
-        self.vim_visual_tails = new_tails;
-    }
-
     pub fn is_selecting(&self, app: &AppContext) -> bool {
         self.pending_selection(app).is_some()
     }
