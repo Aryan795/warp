@@ -4743,9 +4743,11 @@ fn vim_j_does_not_consume_native_char_goal_xs() {
             type_str(&view, ctx, "gglll");
         });
         app.update(|ctx| {
-            view.model().update(ctx, |model, ctx| {
-                model.selection().update(ctx, |selection, _| {
-                    selection.goal_xs = Some(vec1![ColumnUnit::Chars(80)]);
+            view.update(ctx, |view, ctx| {
+                view.model().update(ctx, |model, ctx| {
+                    model.selection().update(ctx, |selection, _| {
+                        selection.goal_xs = Some(vec1![ColumnUnit::Chars(80)]);
+                    });
                 });
             });
         });
