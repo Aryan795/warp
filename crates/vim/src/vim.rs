@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use warp_core::safe_info;
 use warpui_core::keymap::Keystroke;
 use warpui_core::{Entity, ModelContext, ModelHandle, ViewContext};
@@ -2106,31 +2108,122 @@ pub trait VimHandler {
         count: u32,
         character_motion: &CharacterMotion,
         ctx: &mut ViewContext<Self>,
-    );
+    ) {
+        if self
+            .intercept_navigation(&VimMotion::Character(*character_motion), count, ctx)
+            .is_break()
+        {
+            return;
+        }
+        match character_motion {
+            CharacterMotion::Left => {
+                self.vim_move_horizontal(count, Direction::Backward, true, ctx);
+            }
+            CharacterMotion::Right => {
+                self.vim_move_horizontal(count, Direction::Forward, true, ctx);
+            }
+            CharacterMotion::WrappingLeft => {
+                self.vim_move_horizontal(count, Direction::Backward, false, ctx);
+            }
+            CharacterMotion::WrappingRight => {
+                self.vim_move_horizontal(count, Direction::Forward, false, ctx);
+            }
+            CharacterMotion::Up => self.vim_move_vertical(count, Direction::Backward, ctx),
+            CharacterMotion::Down => self.vim_move_vertical(count, Direction::Forward, ctx),
+        }
+        self.after_navigation(ctx);
+    }
     /// Word-related motion of the cursor.
-    fn navigate_word(&mut self, count: u32, word_motion: &WordMotion, ctx: &mut ViewContext<Self>);
+    fn navigate_word(&mut self, count: u32, word_motion: &WordMotion, ctx: &mut ViewContext<Self>) {
+        if self
+            .intercept_navigation(&VimMotion::Word(word_motion.clone()), count, ctx)
+            .is_break()
+        {
+            return;
+        }
+        self.vim_move_by_word(count, word_motion, ctx);
+        self.after_navigation(ctx);
+    }
     /// Motions within the current line: 0, ^, $
-    fn navigate_line(&mut self, count: u32, line_motion: &LineMotion, ctx: &mut ViewContext<Self>);
+    fn navigate_line(&mut self, count: u32, line_motion: &LineMotion, ctx: &mut ViewContext<Self>) {
+        if self
+            .intercept_navigation(&VimMotion::Line(*line_motion), count, ctx)
+            .is_break()
+        {
+            return;
+        }
+        match line_motion {
+            LineMotion::Start => self.vim_move_to_line_start(ctx),
+            LineMotion::FirstNonWhitespace => self.vim_move_to_first_nonwhitespace(ctx),
+            LineMotion::End => {
+                self.vim_move_vertical(count.saturating_sub(1), Direction::Forward, ctx);
+                self.vim_move_to_line_end(ctx);
+            }
+        }
+        self.after_navigation(ctx);
+    }
     fn first_nonwhitespace_motion(
         &mut self,
         count: u32,
         motion: &FirstNonWhitespaceMotion,
         ctx: &mut ViewContext<Self>,
-    );
+    ) {
+        if self
+            .intercept_navigation(&VimMotion::FirstNonWhitespace(*motion), count, ctx)
+            .is_break()
+        {
+            return;
+        }
+        match motion {
+            FirstNonWhitespaceMotion::Up => {
+                self.vim_move_vertical(count, Direction::Backward, ctx);
+            }
+            FirstNonWhitespaceMotion::Down => {
+                self.vim_move_vertical(count, Direction::Forward, ctx);
+            }
+            FirstNonWhitespaceMotion::DownMinusOne => {
+                self.vim_move_vertical(count.saturating_sub(1), Direction::Forward, ctx);
+            }
+        }
+        self.vim_move_to_first_nonwhitespace(ctx);
+        self.after_navigation(ctx);
+    }
     /// Motions to a particular character on the current line.
     fn find_char(
         &mut self,
         occurrence_count: u32,
         find_char_motion: &FindCharMotion,
         ctx: &mut ViewContext<Self>,
-    );
+    ) {
+        if self
+            .intercept_navigation(
+                &VimMotion::FindChar(find_char_motion.clone()),
+                occurrence_count,
+                ctx,
+            )
+            .is_break()
+        {
+            return;
+        }
+        self.vim_move_to_found_char(occurrence_count, find_char_motion, ctx);
+        self.after_navigation(ctx);
+    }
     /// Navigate by paragraph: { and }.
     fn navigate_paragraph(
         &mut self,
         count: u32,
         direction: &Direction,
         ctx: &mut ViewContext<Self>,
-    );
+    ) {
+        if self
+            .intercept_navigation(&VimMotion::Paragraph(*direction), count, ctx)
+            .is_break()
+        {
+            return;
+        }
+        self.vim_move_by_paragraph(count, direction, ctx);
+        self.after_navigation(ctx);
+    }
     /// For all "operator commands", e.g. d, c, y. See ":help operator" in Vim, or click here:
     /// https://vimdoc.sourceforge.net/htmldoc/motion.html#operator
     fn operation(
@@ -2192,11 +2285,56 @@ pub trait VimHandler {
         ctx: &mut ViewContext<Self>,
     );
     fn visual_text_object(&mut self, text_object: &VimTextObject, ctx: &mut ViewContext<Self>);
-    fn jump_to_first_line(&mut self, ctx: &mut ViewContext<Self>);
-    fn jump_to_last_line(&mut self, ctx: &mut ViewContext<Self>);
-    fn jump_to_line(&mut self, line_number: u32, ctx: &mut ViewContext<Self>);
-    fn jump_to_matching_bracket(&mut self, ctx: &mut ViewContext<Self>);
-    fn jump_to_unmatched_bracket(&mut self, bracket: &BracketChar, ctx: &mut ViewContext<Self>);
+    fn jump_to_first_line(&mut self, ctx: &mut ViewContext<Self>) {
+        if self
+            .intercept_navigation(&VimMotion::JumpToFirstLine, 1, ctx)
+            .is_break()
+        {
+            return;
+        }
+        self.vim_move_to_first_line(ctx);
+        self.after_navigation(ctx);
+    }
+    fn jump_to_last_line(&mut self, ctx: &mut ViewContext<Self>) {
+        if self
+            .intercept_navigation(&VimMotion::JumpToLastLine, 1, ctx)
+            .is_break()
+        {
+            return;
+        }
+        self.vim_move_to_last_line(ctx);
+        self.after_navigation(ctx);
+    }
+    fn jump_to_line(&mut self, line_number: u32, ctx: &mut ViewContext<Self>) {
+        if self
+            .intercept_navigation(&VimMotion::JumpToLine(line_number), 1, ctx)
+            .is_break()
+        {
+            return;
+        }
+        self.vim_move_to_line_number(line_number, ctx);
+        self.after_navigation(ctx);
+    }
+    fn jump_to_matching_bracket(&mut self, ctx: &mut ViewContext<Self>) {
+        if self
+            .intercept_navigation(&VimMotion::JumpToMatchingBracket, 1, ctx)
+            .is_break()
+        {
+            return;
+        }
+        self.vim_move_to_matching_bracket(ctx);
+        self.after_navigation(ctx);
+    }
+    fn jump_to_unmatched_bracket(&mut self, bracket: &BracketChar, ctx: &mut ViewContext<Self>) {
+        if self
+            .intercept_navigation(&VimMotion::JumpToUnmatchedBracket(bracket.clone()), 1, ctx)
+            .is_break()
+        {
+            return;
+        }
+        self.vim_move_to_unmatched_bracket(bracket, ctx);
+        self.after_navigation(ctx);
+    }
     fn paste(
         &mut self,
         count: u32,
@@ -2231,6 +2369,63 @@ pub trait VimHandler {
     fn scroll_half_page_down(&mut self, _count: u32, _ctx: &mut ViewContext<Self>) {}
     /// Move the cursor up `count` half-pages and scroll the viewport (`<C-u>`).
     fn scroll_half_page_up(&mut self, _count: u32, _ctx: &mut ViewContext<Self>) {}
+
+    /// Short-circuit a motion before buffer movement. Used so autosuggestion accept and
+    /// history-menu propagation can replace specific motions without a universal pre-move hook.
+    fn intercept_navigation(
+        &mut self,
+        _motion: &VimMotion,
+        _count: u32,
+        _ctx: &mut ViewContext<Self>,
+    ) -> ControlFlow<()> {
+        ControlFlow::Continue(())
+    }
+
+    /// Runs after a motion that was not intercepted. Default is a no-op so editors whose model
+    /// update already notifies do not double-notify.
+    fn after_navigation(&mut self, _ctx: &mut ViewContext<Self>) {}
+
+    fn vim_move_horizontal(
+        &mut self,
+        count: u32,
+        direction: Direction,
+        stop_at_line_boundary: bool,
+        ctx: &mut ViewContext<Self>,
+    );
+    fn vim_move_vertical(&mut self, count: u32, direction: Direction, ctx: &mut ViewContext<Self>);
+    fn vim_move_by_word(
+        &mut self,
+        count: u32,
+        word_motion: &WordMotion,
+        ctx: &mut ViewContext<Self>,
+    );
+    fn vim_move_to_line_start(&mut self, ctx: &mut ViewContext<Self>);
+    fn vim_move_to_first_nonwhitespace(&mut self, ctx: &mut ViewContext<Self>);
+    fn vim_move_to_line_end(&mut self, ctx: &mut ViewContext<Self>);
+    fn vim_move_to_first_line(&mut self, ctx: &mut ViewContext<Self>);
+    fn vim_move_to_last_line(&mut self, ctx: &mut ViewContext<Self>);
+    fn vim_move_to_line_number(&mut self, line_number: u32, ctx: &mut ViewContext<Self>);
+    fn vim_move_to_found_char(
+        &mut self,
+        _occurrence_count: u32,
+        _find_char_motion: &FindCharMotion,
+        _ctx: &mut ViewContext<Self>,
+    ) {
+    }
+    fn vim_move_by_paragraph(
+        &mut self,
+        _count: u32,
+        _direction: &Direction,
+        _ctx: &mut ViewContext<Self>,
+    ) {
+    }
+    fn vim_move_to_matching_bracket(&mut self, _ctx: &mut ViewContext<Self>) {}
+    fn vim_move_to_unmatched_bracket(
+        &mut self,
+        _bracket: &BracketChar,
+        _ctx: &mut ViewContext<Self>,
+    ) {
+    }
 }
 
 #[cfg(test)]
