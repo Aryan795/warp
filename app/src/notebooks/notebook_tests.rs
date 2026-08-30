@@ -9,6 +9,7 @@ use warp_core::ui::appearance::Appearance;
 use warp_editor::editor::EditorView;
 use warp_util::user_input::UserInput;
 use warpui::r#async::Timer;
+use warpui::keymap::Keystroke;
 use warpui::platform::WindowStyle;
 use warpui::presenter::ChildView;
 use warpui::telemetry::EventPayload;
@@ -1074,5 +1075,64 @@ fn personal_notebook_enters_clean_vim_normal_on_edit_and_reacquisition() {
         });
         assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
         assert!(input.read(&app, |view, ctx| view.is_editable(ctx)));
+    });
+}
+
+#[test]
+fn personal_notebook_escape_keybinding_exits_insert_without_inserting() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        app.update(crate::notebooks::init);
+        initial_load(&mut app, []).await;
+        set_vim_mode(&mut app, true);
+
+        let (window, notebook, _root) = create_notebook(&mut app);
+        notebook.update(&mut app, |notebook, ctx| {
+            notebook.open_new_notebook(
+                Some("Personal".into()),
+                Owner::mock_current_user(),
+                None,
+                ctx,
+            );
+            notebook.focus_input(ctx);
+        });
+
+        let input = notebook.read(&app, |notebook, _| notebook.input.clone());
+        input.update(&mut app, |view, ctx| {
+            view.reset_with_markdown("hello world", ctx);
+            view.model().update(ctx, |model, ctx| {
+                vim::handler::jump_to_first_line(model, false, ctx);
+            });
+            ctx.focus_self();
+        });
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
+
+        vim_type_input(&input, "i", &mut app);
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Insert));
+        vim_type_input(&input, "x", &mut app);
+        let after_insert = input_markdown(&input, &app);
+
+        let handled = app
+            .dispatch_keystroke(
+                window,
+                &[input.id()],
+                &Keystroke::parse("escape").expect("escape parses"),
+                false,
+            )
+            .expect("escape keybinding dispatch succeeds");
+        assert!(
+            handled,
+            "escape should match VimEscape, not command selection"
+        );
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
+        assert_eq!(input_markdown(&input, &app), after_insert);
+
+        vim_type_input(&input, "h", &mut app);
+        assert_eq!(input_markdown(&input, &app), after_insert);
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
+
+        vim_type_input(&input, "/", &mut app);
+        assert!(input.read(&app, |view, _| view.is_find_bar_open()));
+        assert_eq!(input_vim_mode(&input, &app), Some(VimMode::Normal));
     });
 }

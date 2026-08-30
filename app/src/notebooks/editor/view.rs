@@ -361,7 +361,8 @@ pub fn init(app: &mut AppContext) {
         .with_context_predicate(
             id!("RichTextEditorView")
                 & !id!("HasCommandSelection")
-                & id!("CanExecuteShellCommands"),
+                & id!("CanExecuteShellCommands")
+                & !id!("Vim"),
         )
         .with_key_binding("escape"),
         EditableBinding::new(
@@ -400,7 +401,10 @@ pub fn init(app: &mut AppContext) {
     app.register_fixed_bindings([FixedBinding::new(
         "escape",
         EditorViewAction::ExitCommandSelection,
-        id!("RichTextEditorView") & !id!("CanExecuteShellCommands") & !id!("HasCommandSelection"),
+        id!("RichTextEditorView")
+            & !id!("CanExecuteShellCommands")
+            & !id!("HasCommandSelection")
+            & !id!("Vim"),
     )]);
 
     app.register_fixed_bindings([FixedBinding::new(
@@ -1593,6 +1597,11 @@ impl RichTextEditorView {
     pub fn vim_mode(&self, ctx: &AppContext) -> Option<VimMode> {
         self.vim_mode_enabled(ctx)
             .then(|| self.vim_model.as_ref(ctx).state().mode)
+    }
+
+    #[cfg(test)]
+    pub fn is_find_bar_open(&self) -> bool {
+        self.find_bar.is_open()
     }
 
     fn vim_user_insert(&mut self, text: &str, ctx: &mut ViewContext<Self>) {
@@ -3210,19 +3219,26 @@ impl TypedActionView for RichTextEditorView {
             CommandDown => self.command_down(ctx),
             RunSelectedCommands => self.run_selected_commands(ctx),
             ExitCommandSelection => {
-                self.close_overlays(ctx);
-                if !self.model.as_ref(ctx).has_command_selection(ctx) {
-                    // No command selection to exit (e.g. comment editors) —
-                    // emit EscapePressed so parent views can handle dismissal.
-                    ctx.emit(EditorViewEvent::EscapePressed);
+                if self.vim_mode_enabled(ctx) && !self.model.as_ref(ctx).has_command_selection(ctx)
+                {
+                    self.vim_escape(ctx);
+                } else {
+                    self.close_overlays(ctx);
+                    if !self.model.as_ref(ctx).has_command_selection(ctx) {
+                        ctx.emit(EditorViewEvent::EscapePressed);
+                    }
+                    self.model
+                        .update(ctx, |model, ctx| model.exit_command_selection(ctx))
                 }
-                self.model
-                    .update(ctx, |model, ctx| model.exit_command_selection(ctx))
             }
             SelectCommandAtCursor => {
-                self.close_overlays(ctx);
-                self.model
-                    .update(ctx, |model, ctx| model.select_command_at_cursor(ctx))
+                if self.vim_mode_enabled(ctx) {
+                    self.vim_escape(ctx);
+                } else {
+                    self.close_overlays(ctx);
+                    self.model
+                        .update(ctx, |model, ctx| model.select_command_at_cursor(ctx))
+                }
             }
             EditWorkflow(id) => ctx.emit(EditorViewEvent::EditWorkflow(*id)),
             RunWorkflow(workflow) => ctx.emit(EditorViewEvent::RunWorkflow(workflow.clone())),
