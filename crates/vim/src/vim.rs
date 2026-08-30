@@ -1,12 +1,11 @@
 use std::ops::ControlFlow;
 
-use string_offset::CharOffset;
 use warp_core::safe_info;
 use warpui_core::keymap::Keystroke;
 use warpui_core::{Entity, ModelContext, ModelHandle, ViewContext};
 
+use crate::HorizontalWrap;
 use crate::register::{BLACK_HOLE_REGISTER, valid_register_name};
-use crate::{HorizontalWrap, motion_destination_with_jump};
 
 /// ASCII code for backspace.
 /// In Normal and Visual modes, Vim treats backspace as a leftward character motion.
@@ -2205,12 +2204,8 @@ pub trait VimHandler {
         true
     }
 
-    /// Apply `map` to each cursor. Offsets are 0-based character offsets into `text`.
-    fn map_cursors(
-        &mut self,
-        ctx: &mut ViewContext<Self>,
-        map: impl FnMut(&dyn crate::VimText, CharOffset) -> CharOffset,
-    );
+    /// Apply `motion` to each cursor. Offsets are backend-native.
+    fn map_cursors(&mut self, motion: &VimMotion, count: u32, ctx: &mut ViewContext<Self>);
 
     fn vim_move_vertical(&mut self, count: u32, direction: Direction, ctx: &mut ViewContext<Self>);
 
@@ -2227,18 +2222,7 @@ pub trait VimHandler {
             }
             VimMotion::Line(LineMotion::End) => {
                 self.vim_move_vertical(count.saturating_sub(1), Direction::Forward, ctx);
-                let wrap = self.horizontal_wrap();
-                let jump = self.line_jump_first_nonwhitespace(motion);
-                self.map_cursors(ctx, |text, offset| {
-                    motion_destination_with_jump(
-                        text,
-                        offset,
-                        &VimMotion::Line(LineMotion::End),
-                        1,
-                        wrap,
-                        jump,
-                    )
-                });
+                self.map_cursors(&VimMotion::Line(LineMotion::End), 1, ctx);
             }
             VimMotion::FirstNonWhitespace(kind) => {
                 match kind {
@@ -2252,25 +2236,24 @@ pub trait VimHandler {
                         self.vim_move_vertical(count.saturating_sub(1), Direction::Forward, ctx);
                     }
                 }
-                let wrap = self.horizontal_wrap();
-                let jump = self.line_jump_first_nonwhitespace(motion);
-                self.map_cursors(ctx, |text, offset| {
-                    motion_destination_with_jump(
-                        text,
-                        offset,
-                        &VimMotion::Line(LineMotion::FirstNonWhitespace),
-                        1,
-                        wrap,
-                        jump,
-                    )
-                });
+                self.map_cursors(&VimMotion::Line(LineMotion::FirstNonWhitespace), 1, ctx);
             }
-            _ => {
-                let wrap = self.horizontal_wrap();
-                let jump = self.line_jump_first_nonwhitespace(motion);
-                self.map_cursors(ctx, |text, offset| {
-                    motion_destination_with_jump(text, offset, motion, count, wrap, jump)
-                });
+            VimMotion::Character(
+                CharacterMotion::Left
+                | CharacterMotion::Right
+                | CharacterMotion::WrappingLeft
+                | CharacterMotion::WrappingRight,
+            )
+            | VimMotion::Word(_)
+            | VimMotion::Line(LineMotion::Start | LineMotion::FirstNonWhitespace)
+            | VimMotion::FindChar(_)
+            | VimMotion::Paragraph(_)
+            | VimMotion::JumpToFirstLine
+            | VimMotion::JumpToLastLine
+            | VimMotion::JumpToLine(_)
+            | VimMotion::JumpToMatchingBracket
+            | VimMotion::JumpToUnmatchedBracket(_) => {
+                self.map_cursors(motion, count, ctx);
             }
         }
         self.after_navigation(ctx);

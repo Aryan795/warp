@@ -19,13 +19,14 @@ use syntax_tree::{ColorMap, DecorationStateEvent, SyntaxTreeState};
 use vec1::{Vec1, vec1};
 use vim::vim::{
     BracketChar, CharacterMotion, Direction, FindCharMotion, FirstNonWhitespaceMotion,
-    InsertPosition, LineMotion, MotionType, TextObjectInclusion, TextObjectType, VimOperator,
-    VimTextObject, WordBound, WordMotion, WordType,
+    InsertPosition, LineMotion, MotionType, TextObjectInclusion, TextObjectType, VimMotion,
+    VimOperator, VimTextObject, WordBound, WordMotion, WordType,
 };
 use vim::{
-    find_next_paragraph_end, find_previous_paragraph_start, vim_a_block, vim_a_paragraph,
-    vim_a_quote, vim_a_word, vim_find_char_on_line, vim_find_matching_bracket, vim_inner_block,
-    vim_inner_paragraph, vim_inner_quote, vim_inner_word, vim_word_iterator_from_offset,
+    HorizontalWrap, find_next_paragraph_end, find_previous_paragraph_start,
+    motion_destination_with_jump, vim_a_block, vim_a_paragraph, vim_a_quote, vim_a_word,
+    vim_find_char_on_line, vim_find_matching_bracket, vim_inner_block, vim_inner_paragraph,
+    vim_inner_quote, vim_inner_word, vim_word_iterator_from_offset,
 };
 use warp_core::platform::SessionPlatform;
 use warp_core::semantic_selection::SemanticSelection;
@@ -747,25 +748,28 @@ impl CodeEditorModel {
         }
     }
 
-    /// Apply a 0-based motion map to each native (1-based) selection head.
     pub fn map_vim_cursors(
         &mut self,
+        motion: &VimMotion,
+        count: u32,
+        wrap: HorizontalWrap,
+        jump: bool,
         ctx: &mut ModelContext<Self>,
-        mut map: impl FnMut(&dyn vim::VimText, CharOffset) -> CharOffset,
     ) {
         let buffer = self.content().as_ref(ctx);
-        let max_native = buffer.max_charoffset();
-        let start_native = CharOffset::from(1);
-        let len = max_native
-            .as_usize()
-            .saturating_sub(start_native.as_usize());
-        let text = vim::OffsetText::new(buffer, start_native, len);
+        let valid = CharOffset::from(1)..buffer.max_charoffset();
         let current_selections = self.selection_model.as_ref(ctx).selection_offsets();
         let new_selections = current_selections.mapped(|selection| {
-            let zero = CharOffset::from(selection.head.as_usize().saturating_sub(1));
-            let mapped = map(&text, zero);
-            let native = CharOffset::from(mapped.as_usize().saturating_add(1));
-            let native = native.min(max_native).max(start_native);
+            let mapped = motion_destination_with_jump(
+                buffer,
+                valid.clone(),
+                selection.head,
+                motion,
+                count,
+                wrap,
+                jump,
+            );
+            let native = mapped.min(valid.end).max(valid.start);
             SelectionOffsets {
                 head: native,
                 tail: native,

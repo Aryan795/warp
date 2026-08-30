@@ -44,8 +44,9 @@ use vim::vim::{
     VimOperator, VimState, VimSubscriber, VimTextObject, WordBound, WordType,
 };
 use vim::{
-    vim_a_block, vim_a_paragraph, vim_a_quote, vim_a_word, vim_inner_block, vim_inner_paragraph,
-    vim_inner_quote, vim_inner_word, vim_word_iterator_from_offset,
+    motion_destination_with_jump, vim_a_block, vim_a_paragraph, vim_a_quote, vim_a_word,
+    vim_inner_block, vim_inner_paragraph, vim_inner_quote, vim_inner_word,
+    vim_word_iterator_from_offset,
 };
 use warp_completer::completer::Description;
 use warp_core::semantic_selection::SemanticSelection;
@@ -2097,20 +2098,26 @@ impl VimHandler for EditorView {
         false
     }
 
-    fn map_cursors(
-        &mut self,
-        ctx: &mut ViewContext<Self>,
-        mut map: impl FnMut(&dyn vim::VimText, CharOffset) -> CharOffset,
-    ) {
+    fn map_cursors(&mut self, motion: &VimMotion, count: u32, ctx: &mut ViewContext<Self>) {
+        let wrap = self.horizontal_wrap();
+        let jump = self.line_jump_first_nonwhitespace(motion);
         self.change_selections(ctx, |editor_model, ctx| {
             let buffer = editor_model.buffer(ctx);
-            let text = vim::OffsetText::new(buffer, CharOffset::zero(), buffer.len().as_usize());
+            let valid = CharOffset::zero()..buffer.len();
             let mut new_selections = editor_model.selections(ctx).clone();
             for selection in new_selections.iter_mut() {
                 let Ok(offset) = selection.head().to_char_offset(buffer) else {
                     continue;
                 };
-                let new_offset = map(&text, offset);
+                let new_offset = motion_destination_with_jump(
+                    buffer,
+                    valid.clone(),
+                    offset,
+                    motion,
+                    count,
+                    wrap,
+                    jump,
+                );
                 let cursor = buffer
                     .anchor_at(new_offset, AnchorBias::Left)
                     .unwrap_or_else(|_| selection.head().clone());

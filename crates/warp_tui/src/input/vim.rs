@@ -11,7 +11,6 @@
 //! - Scroll helpers (`center_cursor_vertically`, `scroll_half_page_*`) — no-op.
 //!
 
-use string_offset::CharOffset;
 use vim::HorizontalWrap;
 use vim::vim::{
     Direction, InsertPosition, ModeTransition, MotionType, VimHandler, VimMode, VimMotion,
@@ -63,13 +62,12 @@ impl VimHandler for TuiInputView {
         matches!(motion, VimMotion::JumpToLastLine)
     }
 
-    fn map_cursors(
-        &mut self,
-        ctx: &mut ViewContext<Self>,
-        map: impl FnMut(&dyn vim::VimText, CharOffset) -> CharOffset,
-    ) {
-        self.model
-            .update(ctx, |model, ctx| model.map_vim_cursors(ctx, map));
+    fn map_cursors(&mut self, motion: &VimMotion, count: u32, ctx: &mut ViewContext<Self>) {
+        let wrap = self.horizontal_wrap();
+        let jump = self.line_jump_first_nonwhitespace(motion);
+        self.model.update(ctx, |model, ctx| {
+            model.map_vim_cursors(motion, count, wrap, jump, ctx);
+        });
     }
 
     fn vim_move_vertical(&mut self, count: u32, direction: Direction, ctx: &mut ViewContext<Self>) {
