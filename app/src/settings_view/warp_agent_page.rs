@@ -536,12 +536,12 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
             )
             .with_group(bindings::BindingGroup::WarpAi),
             ToggleSettingActionPair::new(
-                "response footer",
+                "agent response footer",
                 builder(SettingsAction::WarpAgent(
                     WarpAgentPageAction::ToggleShowResponseFooter,
                 )),
                 &(context.clone() & id!(flags::IS_ANY_AI_ENABLED)),
-                flags::SHOW_RESPONSE_FOOTER,
+                flags::SHOW_AGENT_RESPONSE_FOOTER,
             )
             .with_group(bindings::BindingGroup::WarpAi),
         ],

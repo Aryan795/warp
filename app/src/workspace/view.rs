@@ -23365,7 +23365,7 @@ impl Workspace {
             context.set.insert(flags::USE_AGENT_FOOTER_FLAG);
         }
         if *ai_settings.show_response_footer.value() {
-            context.set.insert(flags::SHOW_RESPONSE_FOOTER);
+            context.set.insert(flags::SHOW_AGENT_RESPONSE_FOOTER);
         }
 
         match ai_settings.thinking_display_mode {
