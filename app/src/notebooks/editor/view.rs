@@ -2940,10 +2940,12 @@ impl TypedActionView for RichTextEditorView {
 
         match action {
             UserTyped(content) | VimUserTyped(content) => {
-                if self.can_edit(ctx) && self.vim_mode_enabled(ctx) {
-                    self.vim_user_insert(content, ctx);
-                } else if self.can_edit(ctx) {
-                    self.user_typed(content, ctx);
+                if self.can_edit(ctx) && self.should_handle_user_input(ctx) {
+                    if self.vim_mode_enabled(ctx) {
+                        self.vim_user_insert(content, ctx);
+                    } else {
+                        self.user_typed(content, ctx);
+                    }
                 }
             }
             VimEnter => self.vim_keystroke(&Keystroke::parse("enter").expect("enter parses"), ctx),
