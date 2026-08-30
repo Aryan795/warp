@@ -2758,7 +2758,6 @@ fn escape_pops_nested_cloud_agent_view_with_long_running_command() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let _agent_view = FeatureFlag::AgentView.override_enabled(true);
-        let _cloud_mode = FeatureFlag::CloudMode.override_enabled(true);
 
         let parent_terminal = add_window_with_terminal(&mut app, None);
         let cloud_terminal = add_window_with_cloud_mode_terminal(&mut app);
@@ -2826,7 +2825,6 @@ fn escape_does_not_exit_root_cloud_agent_view_with_long_running_command() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let _agent_view = FeatureFlag::AgentView.override_enabled(true);
-        let _cloud_mode = FeatureFlag::CloudMode.override_enabled(true);
 
         let terminal = add_window_with_cloud_mode_terminal(&mut app);
 
@@ -2885,7 +2883,6 @@ fn root_cloud_mode_pane_sets_root_cloud_mode_context_key() {
         initialize_app_for_terminal_view(&mut app);
         app.add_singleton_model(ImportedConfigModel::new);
         FeatureFlag::AgentView.set_enabled(true);
-        FeatureFlag::CloudMode.set_enabled(true);
 
         let terminal = add_window_with_cloud_mode_terminal(&mut app);
         let nested_terminal = add_window_with_cloud_mode_terminal(&mut app);
@@ -2948,7 +2945,6 @@ fn set_input_mode_agent_does_not_enter_local_agent_from_root_cloud_mode_pane() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         FeatureFlag::AgentView.set_enabled(true);
-        FeatureFlag::CloudMode.set_enabled(true);
 
         let terminal = add_window_with_cloud_mode_terminal(&mut app);
 
@@ -2977,7 +2973,6 @@ fn cloud_mode_v1_agent_prefixed_query_spawns_cloud_agent() {
         initialize_app_for_terminal_view(&mut app);
         let _agent_mode = FeatureFlag::AgentMode.override_enabled(true);
         let _agent_view = FeatureFlag::AgentView.override_enabled(true);
-        let _cloud_mode = FeatureFlag::CloudMode.override_enabled(true);
         let _cloud_mode_input_v2 = FeatureFlag::CloudModeInputV2.override_enabled(false);
 
         let terminal = add_window_with_cloud_mode_terminal(&mut app);
@@ -3021,7 +3016,6 @@ fn cloud_mode_v2_agent_prefixed_query_spawns_cloud_agent() {
         initialize_app_for_terminal_view(&mut app);
         let _agent_mode = FeatureFlag::AgentMode.override_enabled(true);
         let _agent_view = FeatureFlag::AgentView.override_enabled(true);
-        let _cloud_mode = FeatureFlag::CloudMode.override_enabled(true);
         let _cloud_mode_input_v2 = FeatureFlag::CloudModeInputV2.override_enabled(true);
 
         let terminal = add_window_with_cloud_mode_terminal(&mut app);
@@ -3090,7 +3084,6 @@ fn fresh_cloud_mode_setup_enters_agent_view_when_view_pending() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let _agent_view = FeatureFlag::AgentView.override_enabled(true);
-        let _cloud_mode = FeatureFlag::CloudMode.override_enabled(true);
 
         let terminal = add_window_with_cloud_mode_terminal(&mut app);
 
@@ -3328,7 +3321,6 @@ fn cloud_mode_followup_input_uses_explicit_submit_event_even_when_view_pending()
         initialize_app_for_terminal_view(&mut app);
         let _agent_view = FeatureFlag::AgentView.override_enabled(true);
         let _agent_mode = FeatureFlag::AgentMode.override_enabled(true);
-        let _cloud_mode = FeatureFlag::CloudMode.override_enabled(true);
         let _handoff = FeatureFlag::HandoffCloudCloud.override_enabled(true);
         let _setup_v2 = FeatureFlag::CloudModeSetupV2.override_enabled(true);
 
@@ -3418,7 +3410,6 @@ fn cloud_mode_dispatched_agent_inserts_queued_user_query() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let _agent_view = FeatureFlag::AgentView.override_enabled(true);
-        let _cloud_mode = FeatureFlag::CloudMode.override_enabled(true);
         let _handoff = FeatureFlag::HandoffCloudCloud.override_enabled(true);
         let _setup_v2 = FeatureFlag::CloudModeSetupV2.override_enabled(true);
 
@@ -3462,7 +3453,6 @@ fn cloud_mode_failed_keeps_queued_query_above_tombstone_and_hides_input() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let _agent_view = FeatureFlag::AgentView.override_enabled(true);
-        let _cloud_mode = FeatureFlag::CloudMode.override_enabled(true);
         let _handoff = FeatureFlag::HandoffCloudCloud.override_enabled(true);
         let _setup_v2 = FeatureFlag::CloudModeSetupV2.override_enabled(true);
 
@@ -3785,7 +3775,6 @@ fn cloud_mode_followup_dispatched_inserts_queued_user_query() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let _agent_view = FeatureFlag::AgentView.override_enabled(true);
-        let _cloud_mode = FeatureFlag::CloudMode.override_enabled(true);
         let _handoff = FeatureFlag::HandoffCloudCloud.override_enabled(true);
         let _setup_v2 = FeatureFlag::CloudModeSetupV2.override_enabled(true);
 
@@ -3812,7 +3801,6 @@ fn cloud_mode_setup_v2_suppresses_sharer_input_updates_while_followup_setup_comm
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
         let _agent_view = FeatureFlag::AgentView.override_enabled(true);
-        let _cloud_mode = FeatureFlag::CloudMode.override_enabled(true);
         let _handoff = FeatureFlag::HandoffCloudCloud.override_enabled(true);
         let _setup_v2 = FeatureFlag::CloudModeSetupV2.override_enabled(true);
         let setup_command_ops = input_operations_for_buffer_content(&mut app, "setup command text");
