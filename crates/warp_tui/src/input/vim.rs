@@ -5,17 +5,19 @@
 //! semantics are expressed as explicit no-ops or custom overrides in the trait
 //! implementation rather than as arms in a bespoke match:
 //!
-//! - `find_char`, `navigate_paragraph`, and bracket jumps inherit the trait
-//!   no-op primitives (single-line prompt; no paragraph/bracket structure).
+//! - `find_char`, `navigate_paragraph`, and bracket jumps are disabled via
+//!   `supports_motion` (single-line prompt; no paragraph/bracket structure).
 //! - `search`, `cycle_search`, `search_word_at_cursor` — no-op.
 //! - `visual_paste` — inserts from the local yank buffer (no register system).
 //! - `join_line`, `toggle_case`, `keyword_prg`, `ex_command` — no-op.
 //! - Scroll helpers (`center_cursor_vertically`, `scroll_half_page_*`) — no-op.
 //!
 
+use string_offset::CharOffset;
+use vim::HorizontalWrap;
 use vim::vim::{
     Direction, InsertPosition, ModeTransition, MotionType, VimHandler, VimMode, VimMotion,
-    VimOperand, VimOperator, VimTextObject, WordMotion,
+    VimOperand, VimOperator, VimTextObject,
 };
 use warp::editor::{CodeEditorModel, LineBound};
 use warp_editor::content::buffer::AutoScrollBehavior;
@@ -55,16 +57,31 @@ impl VimHandler for TuiInputView {
         ctx.notify();
     }
 
-    fn vim_move_horizontal(
+    fn after_unsupported_motion(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.notify();
+    }
+
+    fn supports_motion(&self, motion: &VimMotion) -> bool {
+        !matches!(
+            motion,
+            VimMotion::FindChar(_)
+                | VimMotion::Paragraph(_)
+                | VimMotion::JumpToMatchingBracket
+                | VimMotion::JumpToUnmatchedBracket(_)
+        )
+    }
+
+    fn horizontal_wrap(&self) -> HorizontalWrap {
+        HorizontalWrap::StopAtLine
+    }
+
+    fn map_cursors(
         &mut self,
-        count: u32,
-        direction: Direction,
-        _stop_at_line_boundary: bool,
         ctx: &mut ViewContext<Self>,
+        map: impl FnMut(&str, CharOffset) -> CharOffset,
     ) {
-        self.model.update(ctx, |model, ctx| {
-            model.vim_move_horizontal_by_offset(count, &direction, false, true, ctx);
-        });
+        self.model
+            .update(ctx, |model, ctx| model.map_vim_cursors(ctx, map));
     }
 
     fn vim_move_vertical(&mut self, count: u32, direction: Direction, ctx: &mut ViewContext<Self>) {
@@ -95,40 +112,6 @@ impl VimHandler for TuiInputView {
         });
         self.follow_cursor(ctx);
         ctx.notify();
-    }
-
-    fn vim_move_by_word(
-        &mut self,
-        count: u32,
-        word_motion: &WordMotion,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let WordMotion {
-            direction,
-            bound,
-            word_type,
-        } = word_motion;
-        self.model.update(ctx, |model, ctx| {
-            model.vim_navigate_word(*direction, *bound, *word_type, count, ctx);
-        });
-    }
-
-    fn vim_move_to_line_start(&mut self, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            model.vim_move_to_line_bound(LineBound::Start, false, ctx);
-        });
-    }
-
-    fn vim_move_to_first_nonwhitespace(&mut self, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            model.vim_move_to_first_nonwhitespace(false, ctx);
-        });
-    }
-
-    fn vim_move_to_line_end(&mut self, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            model.vim_move_to_line_bound(LineBound::End, false, ctx);
-        });
     }
 
     // ── Operators ─────────────────────────────────────────────────────────────
@@ -299,27 +282,6 @@ impl VimHandler for TuiInputView {
     /// Prompt-specific: visual text-object selection is a no-op.
     fn visual_text_object(&mut self, _text_object: &VimTextObject, ctx: &mut ViewContext<Self>) {
         ctx.notify();
-    }
-
-    // ── Jumps ─────────────────────────────────────────────────────────────────
-
-    fn vim_move_to_first_line(&mut self, ctx: &mut ViewContext<Self>) {
-        self.model
-            .update(ctx, |model, ctx| model.jump_to_line_column(0, Some(0), ctx));
-    }
-
-    fn vim_move_to_last_line(&mut self, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            model.vim_move_to_last_line(ctx);
-        });
-    }
-
-    fn vim_move_to_line_number(&mut self, line_number: u32, ctx: &mut ViewContext<Self>) {
-        self.model.update(ctx, |model, ctx| {
-            let last_line = model.content().as_ref(ctx).max_point().row as usize;
-            let line = line_number.max(1) as usize;
-            model.jump_to_line_column(line.min(last_line), Some(0), ctx);
-        });
     }
 
     // ── Paste ─────────────────────────────────────────────────────────────────

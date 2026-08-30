@@ -747,6 +747,34 @@ impl CodeEditorModel {
         }
     }
 
+    /// Map each cursor through `map`. `buffer` is 0-based character text; native heads are 1-based.
+    pub fn map_vim_cursors(
+        &mut self,
+        ctx: &mut ModelContext<Self>,
+        mut map: impl FnMut(&str, CharOffset) -> CharOffset,
+    ) {
+        let buffer = self.content().as_ref(ctx);
+        let max_native = buffer.max_charoffset();
+        let start_native = CharOffset::from(1);
+        let text = if max_native <= start_native {
+            String::new()
+        } else {
+            buffer.text_in_range(start_native..max_native).into_string()
+        };
+        let current_selections = self.selection_model.as_ref(ctx).selection_offsets();
+        let new_selections = current_selections.mapped(|selection| {
+            let zero = CharOffset::from(selection.head.as_usize().saturating_sub(1));
+            let mapped = map(&text, zero);
+            let native = CharOffset::from(mapped.as_usize().saturating_add(1));
+            let native = native.min(max_native).max(start_native);
+            SelectionOffsets {
+                head: native,
+                tail: native,
+            }
+        });
+        self.vim_set_selections(new_selections, AutoScrollBehavior::Selection, ctx);
+    }
+
     /// Helper fn to set selections easily for vim features
     pub fn vim_set_selections(
         &mut self,
