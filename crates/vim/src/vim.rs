@@ -2287,7 +2287,7 @@ pub trait VimHandler {
         HorizontalWrap::SkipNewlines
     }
 
-    fn line_jump_first_nonwhitespace(&self) -> bool {
+    fn line_jump_first_nonwhitespace(&self, _motion: &VimMotion) -> bool {
         true
     }
 
@@ -2318,7 +2318,7 @@ pub trait VimHandler {
             VimMotion::Line(LineMotion::End) => {
                 self.vim_move_vertical(count.saturating_sub(1), Direction::Forward, ctx);
                 let wrap = self.horizontal_wrap();
-                let jump = self.line_jump_first_nonwhitespace();
+                let jump = self.line_jump_first_nonwhitespace(motion);
                 self.map_cursors(ctx, |text, offset| {
                     motion_destination_with_jump(
                         text,
@@ -2343,7 +2343,7 @@ pub trait VimHandler {
                     }
                 }
                 let wrap = self.horizontal_wrap();
-                let jump = self.line_jump_first_nonwhitespace();
+                let jump = self.line_jump_first_nonwhitespace(motion);
                 self.map_cursors(ctx, |text, offset| {
                     motion_destination_with_jump(
                         text,
@@ -2357,7 +2357,7 @@ pub trait VimHandler {
             }
             _ => {
                 let wrap = self.horizontal_wrap();
-                let jump = self.line_jump_first_nonwhitespace();
+                let jump = self.line_jump_first_nonwhitespace(motion);
                 self.map_cursors(ctx, |text, offset| {
                     motion_destination_with_jump(text, offset, motion, count, wrap, jump)
                 });

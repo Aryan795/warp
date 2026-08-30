@@ -2093,7 +2093,7 @@ impl VimHandler for EditorView {
         }
     }
 
-    fn line_jump_first_nonwhitespace(&self) -> bool {
+    fn line_jump_first_nonwhitespace(&self, _motion: &VimMotion) -> bool {
         false
     }
 
@@ -2110,13 +2110,13 @@ impl VimHandler for EditorView {
                 .unwrap_or_default();
             let mut new_selections = editor_model.selections(ctx).clone();
             for selection in new_selections.iter_mut() {
-                let Ok(offset) = selection.end().to_char_offset(buffer) else {
+                let Ok(offset) = selection.head().to_char_offset(buffer) else {
                     continue;
                 };
                 let new_offset = map(&text, offset);
                 let cursor = buffer
                     .anchor_at(new_offset, AnchorBias::Left)
-                    .unwrap_or_else(|_| selection.end().clone());
+                    .unwrap_or_else(|_| selection.head().clone());
                 selection.set_selection(Selection::single_cursor(cursor));
                 selection.goal_start_column = None;
                 selection.goal_end_column = None;

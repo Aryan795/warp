@@ -133,26 +133,21 @@ fn line_end_exclusive(text: &str, offset: CharOffset) -> CharOffset {
     offset + steps
 }
 
-fn line_last_char(text: &str, offset: CharOffset) -> CharOffset {
-    let start = line_start(text, offset);
-    let end = line_end_exclusive(text, offset);
-    if end > start { end - 1 } else { start }
-}
-
 fn first_nonwhitespace(text: &str, offset: CharOffset) -> CharOffset {
     let start = line_start(text, offset);
     let end = line_end_exclusive(text, offset);
     let Ok(iter) = text.chars_at(start) else {
         return start;
     };
-    let mut steps = 0;
-    for c in iter.take(end.as_usize().saturating_sub(start.as_usize())) {
-        if !c.is_whitespace() || c == '\n' {
-            break;
+    for (steps, c) in iter
+        .take(end.as_usize().saturating_sub(start.as_usize()))
+        .enumerate()
+    {
+        if !c.is_whitespace() {
+            return start + steps;
         }
-        steps += 1;
     }
-    start + steps
+    start
 }
 
 fn move_horizontal(
@@ -165,7 +160,7 @@ fn move_horizontal(
     match wrap {
         HorizontalWrap::StopAtLine => {
             let start = line_start(text, offset);
-            let last = line_last_char(text, offset);
+            let end = line_end_exclusive(text, offset);
             match direction {
                 Direction::Backward => {
                     let dist = u32::min(
@@ -177,9 +172,9 @@ fn move_horizontal(
                 Direction::Forward => {
                     let dist = u32::min(
                         count,
-                        last.as_usize().saturating_sub(offset.as_usize()) as u32,
+                        end.as_usize().saturating_sub(offset.as_usize()) as u32,
                     );
-                    cmp::min(last, offset + dist as usize)
+                    cmp::min(end, offset + dist as usize)
                 }
             }
         }

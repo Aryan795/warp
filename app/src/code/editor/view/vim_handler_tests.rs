@@ -470,6 +470,34 @@ fn test_vim_line_navigation() {
 }
 
 #[test]
+fn test_vim_first_nonwhitespace_on_whitespace_only_line() {
+    let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
+
+    App::test((), |mut app| async move {
+        initialize_code_editor_app(&mut app);
+        let editor = add_code_editor("", &mut app);
+        editor.update(&mut app, |view, ctx| {
+            view.reset(InitialBufferState::plain_text("   \n  hello\n    "), ctx);
+            view.handle_action(&CodeEditorViewAction::CursorAtBufferStart, ctx);
+        });
+        layout_editor_view(&mut app, &editor).await;
+
+        vim_user_insert(&editor, "^", &mut app);
+        assert_eq!(cursor_position(&editor, &app), (1, 0));
+
+        vim_user_insert(&editor, "$", &mut app);
+        vim_user_insert(&editor, "_", &mut app);
+        assert_eq!(cursor_position(&editor, &app), (1, 0));
+
+        vim_user_insert(&editor, "+", &mut app);
+        assert_eq!(cursor_position(&editor, &app), (2, 2));
+
+        vim_user_insert(&editor, "-", &mut app);
+        assert_eq!(cursor_position(&editor, &app), (1, 0));
+    });
+}
+
+#[test]
 fn test_vim_underscore_plus_minus_motions() {
     let _feature_flag_guard = FeatureFlag::VimCodeEditor.override_enabled(true);
 

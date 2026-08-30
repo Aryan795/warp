@@ -4056,6 +4056,96 @@ fn test_vim_line_navigation() {
 }
 
 #[test]
+fn test_vim_first_nonwhitespace_on_whitespace_only_line() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let editor = add_editor_vim_normal_mode("", &mut app);
+
+        editor.update(&mut app, |view, ctx| {
+            view.set_buffer_text("   \n  hello\n    ", ctx);
+            view.move_to_buffer_start(ctx);
+            view.vim_user_insert("^", ctx);
+        });
+        editor.read(&app, |view, ctx| {
+            assert_eq!(
+                view.selected_ranges(ctx),
+                vec![DisplayPoint::new(0, 0)..DisplayPoint::new(0, 0)]
+            );
+        });
+
+        editor.update(&mut app, |view, ctx| {
+            view.vim_user_insert("$", ctx);
+            view.vim_user_insert("_", ctx);
+        });
+        editor.read(&app, |view, ctx| {
+            assert_eq!(
+                view.selected_ranges(ctx),
+                vec![DisplayPoint::new(0, 0)..DisplayPoint::new(0, 0)]
+            );
+        });
+
+        editor.update(&mut app, |view, ctx| {
+            view.vim_user_insert("+", ctx);
+        });
+        editor.read(&app, |view, ctx| {
+            assert_eq!(
+                view.selected_ranges(ctx),
+                vec![DisplayPoint::new(1, 2)..DisplayPoint::new(1, 2)]
+            );
+        });
+
+        editor.update(&mut app, |view, ctx| {
+            view.vim_user_insert("-", ctx);
+        });
+        editor.read(&app, |view, ctx| {
+            assert_eq!(
+                view.selected_ranges(ctx),
+                vec![DisplayPoint::new(0, 0)..DisplayPoint::new(0, 0)]
+            );
+        });
+    });
+}
+
+#[test]
+fn test_vim_navigation_from_reversed_selection_uses_head() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let editor = add_editor_vim_normal_mode("abcdef", &mut app);
+
+        editor.update(&mut app, |view, ctx| {
+            view.change_selections(ctx, |editor_model, ctx| {
+                let buffer = editor_model.buffer(ctx);
+                let start = buffer.anchor_before(Point::new(0, 1)).unwrap();
+                let end = buffer.anchor_before(Point::new(0, 5)).unwrap();
+                editor_model.change_selections(
+                    vec1![LocalSelection {
+                        selection: Selection {
+                            start,
+                            end,
+                            reversed: true,
+                        },
+                        clamp_direction: Default::default(),
+                        goal_start_column: None,
+                        goal_end_column: None,
+                    }],
+                    ctx,
+                );
+            });
+            view.vim_user_insert("l", ctx);
+        });
+
+        editor.read(&app, |view, ctx| {
+            assert_eq!(
+                view.selected_ranges(ctx),
+                vec![DisplayPoint::new(0, 2)..DisplayPoint::new(0, 2)]
+            );
+        });
+    });
+}
+
+#[test]
 fn test_vim_cursor_line_cap_on_forward_motion() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);

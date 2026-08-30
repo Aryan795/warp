@@ -75,6 +75,10 @@ impl VimHandler for TuiInputView {
         HorizontalWrap::StopAtLine
     }
 
+    fn line_jump_first_nonwhitespace(&self, motion: &VimMotion) -> bool {
+        matches!(motion, VimMotion::JumpToLastLine)
+    }
+
     fn map_cursors(
         &mut self,
         ctx: &mut ViewContext<Self>,
