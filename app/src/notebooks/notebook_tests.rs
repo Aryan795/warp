@@ -30,6 +30,7 @@ use crate::cloud_object::{
 };
 use crate::drive::OpenWarpDriveObjectSettings;
 use crate::editor::{DisplayPoint, EditorAction, InteractionState, SelectAction};
+use crate::features::FeatureFlag;
 use crate::network::NetworkStatus;
 use crate::notebooks::active_notebook_data::{ActiveNotebookDataEvent, Mode};
 use crate::notebooks::editor::keys::NotebookKeybindings;
@@ -942,6 +943,10 @@ fn test_untitled_notebook() {
     });
 }
 
+fn enable_vim_notebook_flag() -> impl Drop {
+    FeatureFlag::VimNotebook.override_enabled(true)
+}
+
 fn set_vim_mode(app: &mut App, enabled: bool) {
     app.update_model(
         &AppEditorSettings::handle(app),
@@ -989,6 +994,7 @@ fn reenter_edit(notebook: &ViewHandle<NotebookView>, app: &mut App) {
 
 #[test]
 fn personal_notebook_enters_clean_vim_normal_on_edit_and_reacquisition() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         initial_load(&mut app, []).await;
@@ -1080,6 +1086,7 @@ fn personal_notebook_enters_clean_vim_normal_on_edit_and_reacquisition() {
 
 #[test]
 fn personal_notebook_escape_keybinding_exits_insert_without_inserting() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         app.update(crate::notebooks::init);

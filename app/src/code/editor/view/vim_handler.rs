@@ -1,5 +1,5 @@
 use vim::handler::{
-    self, VimBufferOps, apply_mode_change, apply_operator, apply_visual_operator,
+    self, VimBufferOps, YankedText, apply_mode_change, apply_operator, apply_visual_operator,
     apply_visual_paste,
 };
 use vim::vim::{
@@ -446,7 +446,7 @@ impl VimHandler for CodeEditorView {
 impl CodeEditorView {
     fn write_yanked_register(
         register_name: char,
-        yanked: Option<vim::handler::YankedText>,
+        yanked: Option<YankedText>,
         ctx: &mut ViewContext<Self>,
     ) {
         let Some(yanked) = yanked else {

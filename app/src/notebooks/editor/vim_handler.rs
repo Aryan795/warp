@@ -1,6 +1,6 @@
 use vim::handler::{
-    self, VimBufferOps, apply_mode_change, apply_operator, apply_visual_operator,
-    apply_visual_paste,
+    self, CaseTransform, VimBufferOps, YankedText, apply_mode_change, apply_operator,
+    apply_visual_operator, apply_visual_paste,
 };
 use vim::vim::{
     CharacterMotion, Direction, InsertPosition, LineMotion, ModeTransition, MotionType, VimHandler,
@@ -103,11 +103,7 @@ impl VimHandler for RichTextEditorView {
     fn toggle_case(&mut self, char_count: u32, ctx: &mut ViewContext<Self>) {
         self.model.update(ctx, |model, ctx| {
             handler::move_char(model, char_count.max(1), &CharacterMotion::Right, true, ctx);
-            vim::handler::VimBufferOps::transform_case(
-                model,
-                vim::handler::CaseTransform::Toggle,
-                ctx,
-            );
+            model.transform_case(CaseTransform::Toggle, ctx);
         });
     }
 
@@ -283,7 +279,7 @@ impl VimHandler for RichTextEditorView {
 impl RichTextEditorView {
     fn write_yanked_register(
         register_name: char,
-        yanked: Option<vim::handler::YankedText>,
+        yanked: Option<YankedText>,
         ctx: &mut ViewContext<Self>,
     ) {
         let Some(yanked) = yanked else {

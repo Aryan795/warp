@@ -1209,7 +1209,8 @@ impl RichTextEditorView {
 
         let vim_model = ctx.add_model(|_| VimModel::new());
         ctx.subscribe_to_model(&vim_model, Self::handle_vim_event);
-        let vim_setting_enabled = AppEditorSettings::as_ref(ctx).vim_mode_enabled();
+        let vim_setting_enabled = FeatureFlag::VimNotebook.is_enabled()
+            && AppEditorSettings::as_ref(ctx).vim_mode_enabled();
         if vim_setting_enabled {
             vim_model.update(ctx, |vim_model, ctx| {
                 if let Ok(escape) = Keystroke::parse("escape") {
@@ -1591,7 +1592,7 @@ impl RichTextEditorView {
     }
 
     pub fn vim_mode_enabled(&self, ctx: &AppContext) -> bool {
-        AppEditorSettings::as_ref(ctx).vim_mode_enabled()
+        FeatureFlag::VimNotebook.is_enabled() && AppEditorSettings::as_ref(ctx).vim_mode_enabled()
     }
 
     pub fn vim_mode(&self, ctx: &AppContext) -> Option<VimMode> {
@@ -1629,7 +1630,7 @@ impl RichTextEditorView {
     }
 
     fn sync_vim_enabled_state(&mut self, ctx: &mut ViewContext<Self>) {
-        let enabled = AppEditorSettings::as_ref(ctx).vim_mode_enabled();
+        let enabled = self.vim_mode_enabled(ctx);
         if enabled && !self.vim_setting_enabled {
             self.enter_vim_normal_mode(ctx);
         }

@@ -10,8 +10,13 @@ use warpui::{App, SingletonEntity, TypedActionView, UpdateModel, ViewHandle};
 use super::tests::initialize_editor;
 use super::{EditorViewAction, RichTextEditorView};
 use crate::editor::InteractionState;
+use crate::features::FeatureFlag;
 use crate::settings::AppEditorSettings;
 use crate::vim_registers::{RegisterContent, VimRegisters};
+
+fn enable_vim_notebook_flag() -> impl Drop {
+    FeatureFlag::VimNotebook.override_enabled(true)
+}
 
 fn enable_vim_setting(app: &mut App) {
     app.add_singleton_model(|_| VimRegisters::new());
@@ -122,6 +127,7 @@ fn open_link_editor_overlay(editor: &ViewHandle<RichTextEditorView>, app: &mut A
 
 #[test]
 fn notebook_vim_starts_in_normal_mode() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim(&editor, &mut app);
@@ -131,6 +137,7 @@ fn notebook_vim_starts_in_normal_mode() {
 
 #[test]
 fn notebook_user_typed_does_not_bypass_vim_in_normal_mode() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim(&editor, &mut app);
@@ -151,6 +158,7 @@ fn notebook_user_typed_does_not_bypass_vim_in_normal_mode() {
 
 #[test]
 fn notebook_user_typed_is_noop_when_overlay_owns_input() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim(&editor, &mut app);
@@ -179,6 +187,7 @@ fn notebook_user_typed_is_noop_when_overlay_owns_input() {
 
 #[test]
 fn notebook_vim_enable_after_construction_starts_normal() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         assert_eq!(vim_mode(&editor, &app), None);
@@ -198,6 +207,7 @@ fn notebook_vim_enable_after_construction_starts_normal() {
 
 #[test]
 fn notebook_vim_insert_and_escape_moves_left() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
@@ -217,6 +227,7 @@ fn notebook_vim_insert_and_escape_moves_left() {
 
 #[test]
 fn notebook_vim_replace_char_noops_when_count_exceeds_line() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
@@ -233,6 +244,7 @@ fn notebook_vim_replace_char_noops_when_count_exceeds_line() {
 
 #[test]
 fn notebook_vim_charwise_delete_yank_change() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
@@ -261,6 +273,7 @@ fn notebook_vim_charwise_delete_yank_change() {
 
 #[test]
 fn notebook_vim_linewise_delete_yank_change() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
@@ -289,6 +302,7 @@ fn notebook_vim_linewise_delete_yank_change() {
 
 #[test]
 fn notebook_vim_counts_repeat_line_delete() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
@@ -302,6 +316,7 @@ fn notebook_vim_counts_repeat_line_delete() {
 
 #[test]
 fn notebook_vim_visual_delete_yank_paste() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
@@ -321,6 +336,7 @@ fn notebook_vim_visual_delete_yank_paste() {
 
 #[test]
 fn notebook_vim_undo_restores_deleted_line() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
@@ -336,6 +352,7 @@ fn notebook_vim_undo_restores_deleted_line() {
 
 #[test]
 fn notebook_vim_search_opens_find_bar() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim(&editor, &mut app);
@@ -349,6 +366,7 @@ fn notebook_vim_search_opens_find_bar() {
 
 #[test]
 fn notebook_vim_unsupported_comment_is_exact_noop() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
@@ -379,6 +397,7 @@ fn notebook_vim_unsupported_comment_is_exact_noop() {
 
 #[test]
 fn notebook_vim_unsupported_text_object_is_a_noop() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim(&editor, &mut app);
@@ -405,6 +424,7 @@ fn set_vim_mode_value(app: &mut App, enabled: bool) {
 
 #[test]
 fn notebook_vim_toggle_off_on_stays_normal_without_inserting() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim(&editor, &mut app);
@@ -431,6 +451,7 @@ fn notebook_vim_toggle_off_on_stays_normal_without_inserting() {
 
 #[test]
 fn notebook_vim_read_only_does_not_edit() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
@@ -469,6 +490,7 @@ fn cursor_row_col(editor: &ViewHandle<RichTextEditorView>, app: &App) -> (u32, u
 
 #[test]
 fn notebook_vim_vertical_restores_goal_column_after_short_line() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
@@ -485,6 +507,7 @@ fn notebook_vim_vertical_restores_goal_column_after_short_line() {
 
 #[test]
 fn notebook_vim_visual_vertical_keeps_tail_and_goal_column() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
@@ -506,6 +529,7 @@ fn notebook_vim_visual_vertical_keeps_tail_and_goal_column() {
 
 #[test]
 fn notebook_vim_j_after_direct_cursor_mutation_starts_from_new_column() {
+    let _vim_notebook = enable_vim_notebook_flag();
     App::test((), |mut app| async move {
         let (_window, editor, _test_view) = initialize_editor(&mut app);
         enable_vim_setting(&mut app);
