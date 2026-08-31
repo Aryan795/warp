@@ -213,6 +213,8 @@ fn create_finished_event_from_conversation(conversation: &AIConversation) -> Res
                 should_refresh_model_config: false,
                 #[allow(deprecated)]
                 request_cost: None,
+                // Replayed shared-session events don't carry a per-request
+                // charge breakdown.
                 request_charges: None,
             },
         )),

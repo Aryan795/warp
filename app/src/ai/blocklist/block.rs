@@ -94,13 +94,13 @@ use crate::ai::agent::redaction::redact_secrets;
 use crate::ai::agent::telemetry::ForTelemetry as _;
 use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResultType, AIAgentActionType, AIAgentAttachment,
-    AIAgentCitation, AIAgentContext, AIAgentInput, AIAgentOutput, AIAgentOutputMessage,
-    AIAgentOutputMessageType, AIAgentTextSection, AIIdentifiers, CancellationReason,
-    CreateDocumentsRequest, CreateDocumentsResult, DocumentToCreate, EditDocumentsResult,
-    MessageId, PassiveSuggestionTrigger, ProgrammingLanguage, RenderableAIError,
-    RequestCommandOutputResult, RequestFileEditsResult, SearchCodebaseResult, ServerOutputId,
-    SubagentCall, SubagentType, SuggestPromptRequest, SuggestPromptResult, SuggestedLoggingId,
-    SummarizationType, TodoOperation,
+    AIAgentCitation, AIAgentContext, AIAgentExchangeId, AIAgentInput, AIAgentOutput,
+    AIAgentOutputMessage, AIAgentOutputMessageType, AIAgentTextSection, AIIdentifiers,
+    CancellationReason, CreateDocumentsRequest, CreateDocumentsResult, DocumentToCreate,
+    EditDocumentsResult, MessageId, PassiveSuggestionTrigger, ProgrammingLanguage,
+    RenderableAIError, RequestCommandOutputResult, RequestFileEditsResult, SearchCodebaseResult,
+    ServerOutputId, SubagentCall, SubagentType, SuggestPromptRequest, SuggestPromptResult,
+    SuggestedLoggingId, SummarizationType, TodoOperation,
 };
 use crate::ai::agent_conversations_model::{AgentConversationsModel, AgentConversationsModelEvent};
 use crate::ai::ambient_agents::AmbientAgentTaskId;
@@ -454,6 +454,9 @@ pub(super) struct AIBlockStateHandles {
 
     /// Mouse state handle for the usage button
     usage_button_handle: MouseStateHandle,
+
+    /// Mouse state handle for the turn usage panel trigger button
+    turn_panel_button_handle: MouseStateHandle,
 
     /// Mouse state handles per citation.
     /// A given citation should only appear once per block.
@@ -1077,6 +1080,12 @@ pub struct AIBlock {
     /// Whether the usage summary footer is expanded.
     is_usage_footer_expanded: bool,
 
+    /// Whether the turn-scoped "Turn" panel is expanded (Surface 3 of the
+    /// pricing-transparency usage surfaces). Independent of
+    /// `is_usage_footer_expanded` -- the two panels are separate surfaces
+    /// with no cross-navigation between them.
+    is_turn_panel_expanded: bool,
+
     /// Controller for reading/modifying `AgentView` state for this terminal pane (e.g. if there is
     /// an active agent view or not, which affects whether or not this block should be hidden).
     ///
@@ -1564,6 +1573,7 @@ impl AIBlock {
             has_recording_related_actions: false,
             last_right_clicked_command: None,
             is_usage_footer_expanded: false,
+            is_turn_panel_expanded: false,
             agent_view_controller,
             ambient_agent_view_model,
             aws_bedrock_credentials_error_view: None,
@@ -6166,6 +6176,17 @@ pub enum AIBlockEvent {
         is_expanded: bool,
     },
 
+    /// Emitted when we want to show or hide the turn-scoped "Turn" panel
+    /// (Surface 3 of the pricing-transparency usage surfaces).
+    TurnPanelToggled {
+        conversation_id: AIConversationId,
+        /// The exchange this block renders, used to look up that specific
+        /// turn's archived usage snapshot rather than whatever the
+        /// conversation's current turn happens to be.
+        exchange_id: AIAgentExchangeId,
+        is_expanded: bool,
+    },
+
     /// Emitted when the AI block requires user confirmation to execute.
     ActionBlockedOnUserConfirmation,
 
@@ -6402,6 +6423,8 @@ pub enum AIBlockAction {
     OpenFeedbackDocs,
     /// Toggle the usage summary footer expansion state
     ToggleIsUsageFooterExpanded,
+    /// Toggle the turn-scoped "Turn" panel expansion state (Surface 3)
+    ToggleIsTurnPanelExpanded,
     CommentExpanded {
         id: CommentId,
     },
@@ -6670,6 +6693,14 @@ impl TypedActionView for AIBlock {
                 ctx.emit(AIBlockEvent::UsageFooterToggled {
                     conversation_id: self.client_ids.conversation_id,
                     is_expanded: self.is_usage_footer_expanded,
+                });
+            }
+            AIBlockAction::ToggleIsTurnPanelExpanded => {
+                self.is_turn_panel_expanded = !self.is_turn_panel_expanded;
+                ctx.emit(AIBlockEvent::TurnPanelToggled {
+                    conversation_id: self.client_ids.conversation_id,
+                    exchange_id: self.client_ids.client_exchange_id,
+                    is_expanded: self.is_turn_panel_expanded,
                 });
             }
             AIBlockAction::CommentExpanded { id } => {

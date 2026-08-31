@@ -184,6 +184,7 @@ pub(crate) struct Props<'a> {
     pub(super) has_accepted_edits: bool,
     pub(super) finish_reason: Option<&'a FinishReason>,
     pub(super) is_usage_footer_expanded: bool,
+    pub(super) is_turn_panel_expanded: bool,
     pub(super) shared_session_status: &'a SharedSessionStatus,
     pub(super) terminal_view_id: EntityId,
     pub(super) is_conversation_transcript_viewer: bool,
@@ -3634,7 +3635,20 @@ fn render_response_footer(props: Props, app: &AppContext) -> Option<Box<dyn Elem
         flex.add_child(fork_button);
     }
 
-    flex.add_child(render_usage_button(props, app));
+    // The turn-scoped usage panel (Surface 3 of the pricing-transparency work) is gated
+    // behind `PricingTransparency`. When it's enabled and there's turn-scoped data to show,
+    // its pie-chart trigger icon replaces the legacy credit-count button rather than sitting
+    // alongside it.
+    let turn_panel_trigger_visible = FeatureFlag::PricingTransparency.is_enabled()
+        && props
+            .model
+            .conversation(app)
+            .is_some_and(|conversation| conversation.tool_calls_for_last_block().is_some());
+    if turn_panel_trigger_visible {
+        flex.add_child(render_turn_panel_button(props, app));
+    } else {
+        flex.add_child(render_usage_button(props, app));
+    }
 
     // Review changes button.
     if props.has_accepted_edits && !props.shared_session_status.is_viewer() {
@@ -3839,6 +3853,92 @@ fn render_usage_button(props: Props, app: &AppContext) -> Box<dyn Element> {
         ctx.dispatch_typed_action(AIBlockAction::ToggleIsUsageFooterExpanded);
     })
     .with_cursor(Cursor::PointingHand)
+    .finish()
+}
+
+/// Renders the per-turn icon that, on click, opens/closes the docked "Turn"
+/// panel (Surface 3 of the pricing-transparency usage surfaces). Per the
+/// resolved spec decision, this uses the same hover-tooltip/click-to-open
+/// pattern as the usage button above, but is otherwise an independent
+/// trigger with no cross-navigation to the usage footer / "Conversation"
+/// popover.
+fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> {
+    let Some(conversation) = props.model.conversation(app) else {
+        return Empty::new().finish();
+    };
+
+    // Only show the trigger once turn-scoped data actually exists (i.e. at
+    // least one block has completed since a user query kicked it off).
+    if conversation.tool_calls_for_last_block().is_none() {
+        return Empty::new().finish();
+    }
+
+    let appearance = Appearance::as_ref(app);
+    let ui_builder = appearance.ui_builder().clone();
+    // Sum turn-scoped per-model cost for the tooltip, so it reads as the
+    // same total the panel's per-model rows add up to.
+    let turn_cost_in_cents: f32 = conversation
+        .per_model_usage_for_last_block()
+        .iter()
+        .map(|(_, model_usage)| model_usage.cost_in_cents())
+        .sum();
+    // The tooltip is the one place the Turn panel respects the Credits/
+    // Dollars display-unit toggle: `format_usage` shows dollars when the
+    // unit is Dollars and a cost is known, else falls back to credits.
+    // There's no per-model credits breakdown (only an aggregate turn-level
+    // credits figure), so the panel itself always shows dollars; see the
+    // panel's own "CREDITS" section for the credits-mode total. Tokens are
+    // omitted here (unlike `format_usage`'s other call sites) since the
+    // tooltip is meant to be a quick dollars/credits readout, not a full
+    // usage summary.
+    let usage_display_unit = AISettings::as_ref(app).usage_display_unit;
+    let credits_spent_for_last_block = conversation.credits_spent_for_last_block().unwrap_or(0.0);
+    let tooltip_text = format!(
+        "Turn: {}",
+        format_usage(
+            credits_spent_for_last_block,
+            None,
+            Some(turn_cost_in_cents).filter(|&cost| cost > 0.0),
+            usage_display_unit,
+        )
+    );
+
+    // Matches the sizing/hover-background/corner-radius of the sibling
+    // action-row buttons (thumbs up/down, continue, fork) below, so the
+    // pie-chart trigger reads as part of the same button group.
+    let style_override = UiComponentStyles {
+        font_color: Some(
+            appearance
+                .theme()
+                .sub_text_color(appearance.theme().background())
+                .into(),
+        ),
+        width: Some(icon_size(app) + 4.),
+        height: Some(icon_size(app) + 4.),
+        ..Default::default()
+    };
+    let style_override_with_background = UiComponentStyles {
+        background: Some(blended_colors::neutral_4(appearance.theme()).into()),
+        ..style_override
+    };
+
+    icon_button(
+        appearance,
+        Icon::TurnUsagePie,
+        // Keep the trigger visibly "active" while the panel is open, not
+        // just while hovered/clicked, so the icon stays legible as the
+        // panel's open/closed toggle.
+        props.is_turn_panel_expanded,
+        props.state_handles.turn_panel_button_handle.clone(),
+    )
+    .with_tooltip(move || ui_builder.tool_tip(tooltip_text.clone()).build().finish())
+    .with_style(style_override)
+    .with_hovered_styles(style_override_with_background)
+    .with_active_styles(style_override_with_background)
+    .build()
+    .on_click(|ctx, _, _| {
+        ctx.dispatch_typed_action(AIBlockAction::ToggleIsTurnPanelExpanded);
+    })
     .finish()
 }
 
