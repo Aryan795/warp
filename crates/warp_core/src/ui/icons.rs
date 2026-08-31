@@ -170,10 +170,8 @@ pub enum Icon {
     User,
     Users,
     CoinsStacked,
-    /// Small pie/donut-style usage indicator used for the pricing-
-    /// transparency footer usage icon (Surface 1 of the pricing-
-    /// transparency specs), matching the Figma design for the per-turn
-    /// usage panel trigger.
+    /// Small pie/donut-style usage indicator, used for the agent input
+    /// footer's conversation-usage trigger.
     PieChart,
     Phone,
     Navigation,
