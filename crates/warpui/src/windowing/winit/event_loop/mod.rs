@@ -79,18 +79,24 @@ const MOMENTUM_MAX_VELOCITY: f32 = 2000.0; // Hard cap on momentum initial veloc
 const MIN_VELOCITY_TIME_DELTA: f32 = 0.004; // Floor for time deltas to prevent spikes from batched events
 
 /// Determines whether a canvas [`WindowEvent::Focused`] transition is an artifact of DOM focus
-/// moving to/from another in-page element (e.g. the desktop text-input bridge's `<textarea>`,
-/// see `platform::wasm::desktop_text_input`) rather than a genuine change in which browser
-/// tab/window holds focus.
+/// moving to the desktop text-input bridge's `<textarea>` (see
+/// `platform::wasm::desktop_text_input`) rather than a genuine change in which browser tab/window
+/// holds focus.
 ///
 /// `document_has_focus` should reflect `document.hasFocus()` at the moment the canvas focus
 /// event fired: it stays `true` throughout an in-page focus handoff (the browsing context itself
 /// never lost top-level focus), and only goes `false` on a real external blur (tab switch,
 /// alt-tab, etc). Only a canvas blur (`is_focused == false`) can ever be a false signal this way;
-/// the canvas regaining focus is always a genuine, idempotent-at-worst `Focused(true)`.
+/// the canvas regaining focus is always a genuine, idempotent-at-worst `Focused(true)`. Requiring
+/// `bridge_has_focus` keeps unrelated DOM focus targets from being mistaken for this internal
+/// handoff.
 #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
-fn is_internal_focus_handoff(is_focused: bool, document_has_focus: bool) -> bool {
-    !is_focused && document_has_focus
+fn is_internal_focus_handoff(
+    is_focused: bool,
+    document_has_focus: bool,
+    bridge_has_focus: bool,
+) -> bool {
+    !is_focused && document_has_focus && bridge_has_focus
 }
 
 /// TryFrom implementation for converting winit's `KeyCode` to
@@ -1369,6 +1375,9 @@ impl EventLoop {
                 if is_internal_focus_handoff(
                     is_focused,
                     gloo::utils::document().has_focus().unwrap_or(false),
+                    self.desktop_text_input_manager
+                        .as_ref()
+                        .is_some_and(|manager| manager.has_focus()),
                 ) {
                     return None;
                 }
