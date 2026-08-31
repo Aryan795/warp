@@ -43,8 +43,11 @@ pub(crate) struct DesktopKeyboardPayload {
 }
 
 /// The result of converting a [`DesktopKeyboardPayload`] into UI-framework events.
+///
+/// Public (rather than `pub(crate)`, like the rest of this module) only because it is embedded in
+/// the publicly-declared `DesktopTextInputEvent::Key` variant in `super::desktop_text_input`.
 #[derive(Debug, Clone)]
-pub(crate) enum KeyConversion {
+pub enum KeyConversion {
     /// A hardware key was pressed. Dispatch `event` first; only if it goes unhandled (and the
     /// keystroke doesn't include Cmd) should `chars` be dispatched as `TypedCharacters`.
     Down { event: Event, chars: Option<String> },
@@ -53,8 +56,11 @@ pub(crate) enum KeyConversion {
 }
 
 /// The direction of a deletion inferred from a browser `input` event's `inputType`.
+///
+/// Public for the same reason as [`KeyConversion`]: it is embedded in the publicly-declared
+/// `DesktopTextInputEvent::Delete` variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeleteDirection {
+pub enum DeleteDirection {
     Backward,
     Forward,
 }
@@ -249,15 +255,21 @@ fn control_character_for(c: char) -> Option<&'static str> {
 /// Classifies a non-composing `input` event's `inputType` into an insertion or deletion.
 pub(crate) fn classify_input_type(input_type: &str) -> InputClassification {
     match input_type {
-        "insertText" | "insertCompositionText" | "insertReplacementText" | "insertFromPaste"
-        | "insertFromDrop" | "insertLineBreak" | "insertParagraph" => {
-            InputClassification::Insert
-        }
-        "deleteContentBackward" | "deleteWordBackward" | "deleteSoftLineBackward"
-        | "deleteHardLineBackward" | "deleteEntireSoftLine" => {
-            InputClassification::Delete(DeleteDirection::Backward)
-        }
-        "deleteContentForward" | "deleteWordForward" | "deleteSoftLineForward"
+        "insertText"
+        | "insertCompositionText"
+        | "insertReplacementText"
+        | "insertFromPaste"
+        | "insertFromDrop"
+        | "insertLineBreak"
+        | "insertParagraph" => InputClassification::Insert,
+        "deleteContentBackward"
+        | "deleteWordBackward"
+        | "deleteSoftLineBackward"
+        | "deleteHardLineBackward"
+        | "deleteEntireSoftLine" => InputClassification::Delete(DeleteDirection::Backward),
+        "deleteContentForward"
+        | "deleteWordForward"
+        | "deleteSoftLineForward"
         | "deleteHardLineForward" => InputClassification::Delete(DeleteDirection::Forward),
         _ => InputClassification::Unsupported,
     }
@@ -305,7 +317,11 @@ pub(crate) fn composition_selection_range(
     selection_start: usize,
     selection_end: usize,
 ) -> Range<usize> {
-    let clamp = |value: usize| value.saturating_sub(sentinel_len).min(marked_text_utf16_len);
+    let clamp = |value: usize| {
+        value
+            .saturating_sub(sentinel_len)
+            .min(marked_text_utf16_len)
+    };
     clamp(selection_start)..clamp(selection_end)
 }
 

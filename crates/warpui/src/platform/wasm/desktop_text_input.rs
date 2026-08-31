@@ -64,11 +64,9 @@ pub enum DesktopTextInputEvent {
 /// [`super::soft_keyboard::SoftKeyboardManager`] instead (see [`super::is_mobile_device`]).
 pub struct DesktopTextInputManager {
     element: HtmlTextAreaElement,
-    /// Shared with the composition event listeners so `sync`/blur handling can tell whether an
-    /// IME composition is in progress.
-    composing: Rc<Cell<bool>>,
     /// Stores event listeners to keep them alive. When this struct is dropped, the listeners will
-    /// be cleaned up.
+    /// be cleaned up. Each composition-related listener holds its own clone of a shared
+    /// `Rc<Cell<bool>>` composing flag, kept alive here transitively.
     _listeners: Vec<EventListener>,
 }
 
@@ -126,7 +124,6 @@ impl DesktopTextInputManager {
 
         Ok(Rc::new(Self {
             element,
-            composing,
             _listeners: listeners,
         }))
     }
@@ -331,15 +328,11 @@ impl DesktopTextInputManager {
 
                 let content = crate::clipboard::ClipboardContent {
                     plain_text: data.get_data("text").unwrap_or_default(),
-                    html: data
-                        .get_data("text/html")
-                        .ok()
-                        .filter(|s| !s.is_empty()),
+                    html: data.get_data("text/html").ok().filter(|s| !s.is_empty()),
                     ..Default::default()
                 };
 
-                let _ =
-                    proxy.send_event(CustomEvent::Clipboard(ClipboardEvent::Paste(content)));
+                let _ = proxy.send_event(CustomEvent::Clipboard(ClipboardEvent::Paste(content)));
             }));
         }
 
@@ -370,13 +363,12 @@ impl DesktopTextInputManager {
         let document_active = gloo::utils::document().has_focus().unwrap_or(false);
         let should_focus = document_active && cursor.is_some();
 
-        if should_focus {
-            if !self.has_focus() {
-                if let Err(err) = self.element.focus() {
-                    log::warn!("Failed to focus desktop text-input bridge: {err:?}");
-                }
-            }
-        } else if self.has_focus() {
+        if should_focus
+            && !self.has_focus()
+            && let Err(err) = self.element.focus()
+        {
+            log::warn!("Failed to focus desktop text-input bridge: {err:?}");
+        } else if !should_focus && self.has_focus() {
             let _ = self.element.blur();
         }
     }

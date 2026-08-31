@@ -2211,18 +2211,15 @@ impl EventLoop {
                 }
             }
             DesktopTextInputEvent::Key(KeyConversion::ModifierChanged { key_code, state }) => {
-                window_callbacks.dispatch_event(crate::event::Event::ModifierKeyChanged {
-                    key_code,
-                    state,
-                });
+                window_callbacks
+                    .dispatch_event(crate::event::Event::ModifierKeyChanged { key_code, state });
             }
             DesktopTextInputEvent::Insert(text) => {
                 window_callbacks.dispatch_event(TypedCharacters { chars: text });
             }
             DesktopTextInputEvent::Delete(direction) => {
-                window_callbacks.dispatch_event(desktop_text_input_reducer::key_event_for_delete(
-                    direction,
-                ));
+                window_callbacks
+                    .dispatch_event(desktop_text_input_reducer::key_event_for_delete(direction));
             }
             DesktopTextInputEvent::CompositionUpdate { text, selection } => {
                 window_callbacks.dispatch_event(SetMarkedText {

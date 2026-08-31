@@ -4,8 +4,8 @@ pub(crate) mod hidden_input;
 pub(crate) mod mobile_detection;
 pub(crate) mod soft_keyboard;
 
-use gloo::events::{EventListener, EventListenerOptions};
 pub use desktop_text_input::{DesktopTextInputEvent, DesktopTextInputManager};
+use gloo::events::{EventListener, EventListenerOptions};
 pub use hidden_input::{HiddenInput, HiddenInputEvent, InputCallback};
 pub use mobile_detection::{is_mobile_device, is_mobile_user_agent};
 pub use soft_keyboard::{SoftKeyboardInput, SoftKeyboardManager, SoftKeyboardState};

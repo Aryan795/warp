@@ -2756,10 +2756,7 @@ impl View for RichTextEditorView {
         // The caret is hidden (and so unavailable to text-input services) while a command
         // selection or the link editor owns the surface; the focused nested link editor reports
         // its own caret instead. See the matching `display_options.editable` computation above.
-        if !self.is_editable(ctx)
-            || self.has_command_selection(ctx)
-            || self.link_editor_open
-        {
+        if !self.is_editable(ctx) || self.has_command_selection(ctx) || self.link_editor_open {
             return None;
         }
         let model = self.model.as_ref(ctx);
