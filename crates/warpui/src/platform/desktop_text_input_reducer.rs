@@ -1,9 +1,15 @@
 //! Pure, host-testable event classification for the desktop text-input bridge.
 //!
-//! This module intentionally avoids any `web_sys` calls so its logic can be exercised directly by
-//! `#[test]` functions, independent of a live browser environment. The DOM-facing listeners in
-//! [`super::desktop_text_input`] extract plain data from browser events and hand it to the
-//! functions here to decide what (if anything) to dispatch to Warp.
+//! This module intentionally avoids any `web_sys` calls and lives outside the wasm-only
+//! `platform::wasm` module tree, so its unit tests run under ordinary native
+//! `cargo nextest run -p warpui`, independent of a live browser environment. The DOM-facing
+//! listeners in [`crate::platform::wasm::desktop_text_input`] extract plain data from browser
+//! events and hand it to the functions here to decide what (if anything) to dispatch to Warp.
+
+// Only `platform::wasm::desktop_text_input` (wasm-only) actually calls into this module; on every
+// other target it is otherwise-unused code kept solely so its tests run under native
+// `cargo nextest`.
+#![cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 
 use std::ops::Range;
 
@@ -45,7 +51,8 @@ pub(crate) struct DesktopKeyboardPayload {
 /// The result of converting a [`DesktopKeyboardPayload`] into UI-framework events.
 ///
 /// Public (rather than `pub(crate)`, like the rest of this module) only because it is embedded in
-/// the publicly-declared `DesktopTextInputEvent::Key` variant in `super::desktop_text_input`.
+/// the publicly-declared `DesktopTextInputEvent::Key` variant in
+/// `crate::platform::wasm::desktop_text_input`.
 #[derive(Debug, Clone)]
 pub enum KeyConversion {
     /// A hardware key was pressed. Dispatch `event` first; only if it goes unhandled (and the
@@ -205,6 +212,29 @@ fn named_key(key: &str) -> Option<&'static str> {
         "F10" => "f10",
         "F11" => "f11",
         "F12" => "f12",
+        "F13" => "f13",
+        "F14" => "f14",
+        "F15" => "f15",
+        "F16" => "f16",
+        "F17" => "f17",
+        "F18" => "f18",
+        "F19" => "f19",
+        "F20" => "f20",
+        "F21" => "f21",
+        "F22" => "f22",
+        "F23" => "f23",
+        "F24" => "f24",
+        "F25" => "f25",
+        "F26" => "f26",
+        "F27" => "f27",
+        "F28" => "f28",
+        "F29" => "f29",
+        "F30" => "f30",
+        "F31" => "f31",
+        "F32" => "f32",
+        "F33" => "f33",
+        "F34" => "f34",
+        "F35" => "f35",
         _ => return None,
     })
 }
@@ -253,15 +283,16 @@ fn control_character_for(c: char) -> Option<&'static str> {
 }
 
 /// Classifies a non-composing `input` event's `inputType` into an insertion or deletion.
+///
+/// Deletions are matched explicitly, as are non-textual operations (formatting, undo/redo) that
+/// the bridge intentionally never forwards. Everything else - including the standard `insert*`
+/// types, an empty/absent `inputType` (e.g. a tool that mutates `.value` directly and dispatches a
+/// generic `Event` instead of a real `InputEvent`), and any `inputType` this bridge doesn't
+/// specifically recognize - is treated as a potential insertion. The caller falls back to diffing
+/// the textarea's value against the sentinel when `InputEvent.data` is absent, which is the path
+/// generic direct-mutation tools rely on.
 pub(crate) fn classify_input_type(input_type: &str) -> InputClassification {
     match input_type {
-        "insertText"
-        | "insertCompositionText"
-        | "insertReplacementText"
-        | "insertFromPaste"
-        | "insertFromDrop"
-        | "insertLineBreak"
-        | "insertParagraph" => InputClassification::Insert,
         "deleteContentBackward"
         | "deleteWordBackward"
         | "deleteSoftLineBackward"
@@ -271,7 +302,27 @@ pub(crate) fn classify_input_type(input_type: &str) -> InputClassification {
         | "deleteWordForward"
         | "deleteSoftLineForward"
         | "deleteHardLineForward" => InputClassification::Delete(DeleteDirection::Forward),
-        _ => InputClassification::Unsupported,
+        "formatBold"
+        | "formatItalic"
+        | "formatUnderline"
+        | "formatStrikeThrough"
+        | "formatSuperscript"
+        | "formatSubscript"
+        | "formatJustifyFull"
+        | "formatJustifyCenter"
+        | "formatJustifyRight"
+        | "formatJustifyLeft"
+        | "formatIndent"
+        | "formatOutdent"
+        | "formatRemove"
+        | "formatSetBlockTextDirection"
+        | "formatSetInlineTextDirection"
+        | "formatBackColor"
+        | "formatFontColor"
+        | "formatFontName"
+        | "historyUndo"
+        | "historyRedo" => InputClassification::Unsupported,
+        _ => InputClassification::Insert,
     }
 }
 
@@ -323,6 +374,84 @@ pub(crate) fn composition_selection_range(
             .min(marked_text_utf16_len)
     };
     clamp(selection_start)..clamp(selection_end)
+}
+
+/// What the desktop bridge should do in response to a composition or `input` event, as decided by
+/// [`CompositionTracker`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CompositionAction {
+    /// Dispatch `SetMarkedText` with this preedit text and selection.
+    Update {
+        text: String,
+        selection: Range<usize>,
+    },
+    /// Dispatch `ClearMarkedText`, then `TypedCharacters` with this committed text.
+    Commit(String),
+    /// Dispatch `ClearMarkedText` only; nothing was committed.
+    Cancel,
+}
+
+/// Tracks IME composition state for the desktop bridge across its `composition*` and `input`
+/// listeners.
+///
+/// Browsers fire a trailing `input` event immediately after a non-empty `compositionend`, carrying
+/// the same text `compositionend` already committed. Deciding what to do with each event through
+/// this single, DOM-independent state machine (rather than duplicating the bookkeeping inline in
+/// each listener) is what lets that double-commit scenario be covered by an ordinary native unit
+/// test instead of only a live browser session.
+#[derive(Debug, Default)]
+pub(crate) struct CompositionTracker {
+    composing: bool,
+    suppress_next_input: bool,
+}
+
+impl CompositionTracker {
+    pub(crate) fn is_composing(&self) -> bool {
+        self.composing
+    }
+
+    pub(crate) fn on_composition_start(&mut self) {
+        self.composing = true;
+    }
+
+    pub(crate) fn on_composition_update(
+        &self,
+        text: String,
+        selection: Range<usize>,
+    ) -> CompositionAction {
+        CompositionAction::Update { text, selection }
+    }
+
+    /// Call when `compositionend` fires. A non-empty commit arms suppression for the trailing
+    /// `input` event that immediately follows it.
+    pub(crate) fn on_composition_end(&mut self, data: String) -> CompositionAction {
+        self.composing = false;
+        if data.is_empty() {
+            CompositionAction::Cancel
+        } else {
+            self.suppress_next_input = true;
+            CompositionAction::Commit(data)
+        }
+    }
+
+    /// Call for every `input` event, composing or not, before applying any other input handling.
+    /// Returns `true` if the caller must drop this event entirely: either it arrived mid-
+    /// composition (composition events own the text), or it is the trailing `input` event a
+    /// committing `compositionend` already accounted for.
+    pub(crate) fn should_ignore_input_event(&mut self, is_composing_event: bool) -> bool {
+        if std::mem::take(&mut self.suppress_next_input) {
+            return true;
+        }
+        self.composing || is_composing_event
+    }
+
+    /// Call on blur or when the caret-owning surface changes, so a composition in progress on the
+    /// old surface is abandoned (never committed into the new one) and stale suppression can't
+    /// leak into unrelated input on the new surface. Returns the action to dispatch, if any.
+    pub(crate) fn reset(&mut self) -> Option<CompositionAction> {
+        self.suppress_next_input = false;
+        std::mem::take(&mut self.composing).then_some(CompositionAction::Cancel)
+    }
 }
 
 #[cfg(test)]

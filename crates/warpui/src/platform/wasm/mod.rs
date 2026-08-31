@@ -1,5 +1,4 @@
 pub(crate) mod desktop_text_input;
-pub(crate) mod desktop_text_input_reducer;
 pub(crate) mod hidden_input;
 pub(crate) mod mobile_detection;
 pub(crate) mod soft_keyboard;

@@ -14,15 +14,18 @@
 //!
 //! Event ownership, to avoid double insertion:
 //! - Hardware keys are forwarded from this module's own `keydown`/`keyup` listeners (winit's
-//!   canvas listeners never see them once the textarea is focused). Non-composing, non-browser-
-//!   shortcut keys have their default browser action prevented after being forwarded, so the
-//!   textarea never also emits a matching `input` event.
-//! - Dictation and other direct DOM insertion arrive only through `input`.
+//!   canvas listeners never see them once the textarea is focused). Non-composing keys that
+//!   aren't on the browser-shortcut allowlist have their default browser action prevented after
+//!   being forwarded, so the textarea never also emits a matching `input` event. Browser
+//!   shortcuts (new-tab, reload, history navigation, etc.) are left entirely to the browser: no
+//!   Warp event, default action, and propagation untouched.
+//! - Dictation and other direct DOM insertion arrive only through `input`; composing and
+//!   post-composition-commit `input` events are filtered out by [`reducer::CompositionTracker`].
 //! - CJK/IME composition arrives only through the `composition*` events.
 //! - Paste is handled by this module's own `paste` listener, which stops propagation so the
 //!   document-level paste listener (`platform::wasm::add_paste_listener`) never also sees it.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -31,9 +34,11 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{CompositionEvent, HtmlTextAreaElement, InputEvent, KeyboardEvent};
 use winit::event_loop::EventLoopProxy;
 
-use super::desktop_text_input_reducer::{self as reducer, DesktopKeyboardPayload, DomKeyEventKind};
-use crate::CursorInfo;
+use crate::platform::desktop_text_input_reducer::{
+    self as reducer, CompositionAction, CompositionTracker, DesktopKeyboardPayload, DomKeyEventKind,
+};
 use crate::windowing::winit::app::{ClipboardEvent, CustomEvent};
+use crate::{CursorInfo, EntityId};
 
 /// The ID used for the desktop text-input bridge element in the DOM.
 const ELEMENT_ID: &str = "warp-desktop-text-input";
@@ -54,8 +59,20 @@ pub enum DesktopTextInputEvent {
     },
     /// Composition committed non-empty text.
     CompositionCommit(String),
-    /// Composition was cancelled (blurred or otherwise abandoned) before commit.
+    /// Composition was cancelled (blurred, or abandoned by a focus change) before commit.
     CompositionCancelled,
+}
+
+impl From<CompositionAction> for DesktopTextInputEvent {
+    fn from(action: CompositionAction) -> Self {
+        match action {
+            CompositionAction::Update { text, selection } => {
+                DesktopTextInputEvent::CompositionUpdate { text, selection }
+            }
+            CompositionAction::Commit(text) => DesktopTextInputEvent::CompositionCommit(text),
+            CompositionAction::Cancel => DesktopTextInputEvent::CompositionCancelled,
+        }
+    }
 }
 
 /// Manages the desktop text-input bridge element and its lifecycle.
@@ -64,9 +81,14 @@ pub enum DesktopTextInputEvent {
 /// [`super::soft_keyboard::SoftKeyboardManager`] instead (see [`super::is_mobile_device`]).
 pub struct DesktopTextInputManager {
     element: HtmlTextAreaElement,
+    proxy: EventLoopProxy<CustomEvent>,
+    composition: Rc<RefCell<CompositionTracker>>,
+    /// The view currently reporting the active caret. Lets [`Self::sync`] detect focus moving
+    /// directly between two editable surfaces, since the bridge itself never loses DOM focus
+    /// during such a transition (see [`CursorInfo::view_id`]).
+    active_surface: Cell<Option<EntityId>>,
     /// Stores event listeners to keep them alive. When this struct is dropped, the listeners will
-    /// be cleaned up. Each composition-related listener holds its own clone of a shared
-    /// `Rc<Cell<bool>>` composing flag, kept alive here transitively.
+    /// be cleaned up.
     _listeners: Vec<EventListener>,
 }
 
@@ -119,11 +141,14 @@ impl DesktopTextInputManager {
         gloo::utils::body().append_child(&element)?;
         Self::reset_input_element(&element);
 
-        let composing = Rc::new(Cell::new(false));
-        let listeners = Self::setup_listeners(&element, proxy, &composing);
+        let composition = Rc::new(RefCell::new(CompositionTracker::default()));
+        let listeners = Self::setup_listeners(&element, proxy.clone(), &composition);
 
         Ok(Rc::new(Self {
             element,
+            proxy,
+            composition,
+            active_surface: Cell::new(None),
             _listeners: listeners,
         }))
     }
@@ -131,7 +156,7 @@ impl DesktopTextInputManager {
     fn setup_listeners(
         element: &HtmlTextAreaElement,
         proxy: EventLoopProxy<CustomEvent>,
-        composing: &Rc<Cell<bool>>,
+        composition: &Rc<RefCell<CompositionTracker>>,
     ) -> Vec<EventListener> {
         let mut listeners = Vec::new();
 
@@ -140,11 +165,18 @@ impl DesktopTextInputManager {
             ("keyup", DomKeyEventKind::Up),
         ] {
             let proxy = proxy.clone();
-            let composing = Rc::clone(composing);
+            let composition = Rc::clone(composition);
             listeners.push(EventListener::new(element, event_type, move |event| {
                 let event = event
                     .dyn_ref::<KeyboardEvent>()
                     .expect("keyboard event listener should receive a KeyboardEvent");
+
+                // Browser/OS shortcuts (new-tab, reload, history navigation, etc.) must keep
+                // working untouched: no Warp event, and leave preventDefault/propagation to the
+                // browser entirely.
+                if super::is_browser_shortcut(event) {
+                    return;
+                }
 
                 let payload = DesktopKeyboardPayload {
                     kind,
@@ -154,20 +186,18 @@ impl DesktopTextInputManager {
                     alt: event.alt_key(),
                     shift: event.shift_key(),
                     meta: event.meta_key(),
-                    is_composing: event.is_composing() || composing.get(),
+                    is_composing: event.is_composing() || composition.borrow().is_composing(),
                 };
 
-                // Composition owns the key stream, and browser/OS shortcuts must keep working
-                // (e.g. new-tab, reload, history navigation): leave both to native handling.
+                // Composition owns the key stream, and keys the bridge doesn't forward as a
+                // dedicated event (e.g. a bare dead key) are left to native handling.
                 let Some(conversion) = reducer::convert_key(&payload) else {
                     return;
                 };
 
-                if !super::is_browser_shortcut(event) {
-                    // Accept ownership: block the textarea's own default handling of this key so
-                    // it can't also mutate the value and fire a matching `input` event.
-                    event.prevent_default();
-                }
+                // Accept ownership: block the textarea's own default handling of this key so it
+                // can't also mutate the value and fire a matching `input` event.
+                event.prevent_default();
                 event.stop_propagation();
 
                 let _ = proxy.send_event(CustomEvent::DesktopTextInput(
@@ -179,13 +209,17 @@ impl DesktopTextInputManager {
         {
             let proxy = proxy.clone();
             let element_clone = element.clone();
-            let composing = Rc::clone(composing);
+            let composition = Rc::clone(composition);
             listeners.push(EventListener::new(element, "input", move |event| {
                 let input_event = event.dyn_ref::<InputEvent>();
+                let is_composing_event = input_event.map(|e| e.is_composing()).unwrap_or(false);
 
-                // The composition's own commit path handles its trailing `input` event; ignore it
-                // here so composed text isn't inserted twice.
-                if composing.get() || input_event.map(|e| e.is_composing()).unwrap_or(false) {
+                if composition
+                    .borrow_mut()
+                    .should_ignore_input_event(is_composing_event)
+                {
+                    // Either mid-composition (composition events own the text) or the trailing
+                    // `input` event a committing `compositionend` already accounted for.
                     return;
                 }
 
@@ -217,12 +251,12 @@ impl DesktopTextInputManager {
         }
 
         {
-            let composing = Rc::clone(composing);
+            let composition = Rc::clone(composition);
             listeners.push(EventListener::new(
                 element,
                 "compositionstart",
                 move |_event| {
-                    composing.set(true);
+                    composition.borrow_mut().on_composition_start();
                 },
             ));
         }
@@ -230,6 +264,7 @@ impl DesktopTextInputManager {
         {
             let proxy = proxy.clone();
             let element_clone = element.clone();
+            let composition = Rc::clone(composition);
             listeners.push(EventListener::new(
                 element,
                 "compositionupdate",
@@ -254,9 +289,8 @@ impl DesktopTextInputManager {
                         start,
                         end,
                     );
-                    let _ = proxy.send_event(CustomEvent::DesktopTextInput(
-                        DesktopTextInputEvent::CompositionUpdate { text, selection },
-                    ));
+                    let action = composition.borrow().on_composition_update(text, selection);
+                    let _ = proxy.send_event(CustomEvent::DesktopTextInput(action.into()));
                 },
             ));
         }
@@ -264,24 +298,19 @@ impl DesktopTextInputManager {
         {
             let proxy = proxy.clone();
             let element_clone = element.clone();
-            let composing = Rc::clone(composing);
+            let composition = Rc::clone(composition);
             listeners.push(EventListener::new(
                 element,
                 "compositionend",
                 move |event| {
-                    composing.set(false);
                     let data = event
                         .dyn_ref::<CompositionEvent>()
                         .and_then(|e| e.data())
                         .unwrap_or_default();
                     Self::reset_input_element(&element_clone);
 
-                    let desktop_event = if data.is_empty() {
-                        DesktopTextInputEvent::CompositionCancelled
-                    } else {
-                        DesktopTextInputEvent::CompositionCommit(data)
-                    };
-                    let _ = proxy.send_event(CustomEvent::DesktopTextInput(desktop_event));
+                    let action = composition.borrow_mut().on_composition_end(data);
+                    let _ = proxy.send_event(CustomEvent::DesktopTextInput(action.into()));
                 },
             ));
         }
@@ -295,15 +324,13 @@ impl DesktopTextInputManager {
 
         {
             let proxy = proxy.clone();
-            let composing = Rc::clone(composing);
+            let composition = Rc::clone(composition);
             listeners.push(EventListener::new(element, "blur", move |_event| {
                 // If the browser didn't already fire `compositionend` before the blur (not
-                // guaranteed cross-browser), clear marked text ourselves rather than committing
-                // unfinished composition text.
-                if composing.replace(false) {
-                    let _ = proxy.send_event(CustomEvent::DesktopTextInput(
-                        DesktopTextInputEvent::CompositionCancelled,
-                    ));
+                // guaranteed cross-browser), abandon the in-progress composition rather than
+                // committing unfinished text.
+                if let Some(action) = composition.borrow_mut().reset() {
+                    let _ = proxy.send_event(CustomEvent::DesktopTextInput(action.into()));
                 }
             }));
         }
@@ -336,6 +363,9 @@ impl DesktopTextInputManager {
             }));
         }
 
+        // The document only becomes hidden on a tab switch/minimize; switching to another
+        // application while the browser window stays visible does not change `visibilityState`.
+        // Cover that case with real window focus/blur below.
         {
             let proxy = proxy.clone();
             listeners.push(EventListener::new(
@@ -349,6 +379,17 @@ impl DesktopTextInputManager {
             ));
         }
 
+        for window_event_type in ["blur", "focus"] {
+            let proxy = proxy.clone();
+            listeners.push(EventListener::new(
+                &gloo::utils::window(),
+                window_event_type,
+                move |_event| {
+                    let _ = proxy.send_event(CustomEvent::ActiveCursorPositionUpdated);
+                },
+            ));
+        }
+
         listeners
     }
 
@@ -356,6 +397,11 @@ impl DesktopTextInputManager {
     /// reports an active editable text caret and whether the browser document is currently
     /// active. Also repositions the bridge at the active caret when one is present.
     pub fn sync(&self, cursor: Option<&CursorInfo>) {
+        let new_surface = cursor.map(|c| c.view_id);
+        if self.active_surface.replace(new_surface) != new_surface {
+            self.handle_surface_change();
+        }
+
         if let Some(cursor) = cursor {
             self.position_at(cursor);
         }
@@ -371,6 +417,18 @@ impl DesktopTextInputManager {
         } else if !should_focus && self.has_focus() {
             let _ = self.element.blur();
         }
+    }
+
+    /// Clears any marked text and resets the sentinel when the caret-owning surface changes, so
+    /// stale composition state or a pending sentinel diff from the old surface can't leak into a
+    /// newly focused one that also reports an active caret.
+    fn handle_surface_change(&self) {
+        if let Some(action) = self.composition.borrow_mut().reset() {
+            let _ = self
+                .proxy
+                .send_event(CustomEvent::DesktopTextInput(action.into()));
+        }
+        Self::reset_input_element(&self.element);
     }
 
     /// Returns whether the bridge's textarea currently has focus.

@@ -28846,6 +28846,7 @@ impl View for TerminalView {
             .map(|position| CursorInfo {
                 position,
                 font_size,
+                view_id: ctx.view_id(),
             })
     }
 

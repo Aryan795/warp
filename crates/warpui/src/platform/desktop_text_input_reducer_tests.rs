@@ -85,13 +85,32 @@ fn named_key_produces_keydown_with_no_fallback_chars() {
 }
 
 #[test]
+fn extended_function_key_f13_is_forwarded() {
+    // The canvas keyboard path supports F1-F35; the bridge must not silently drop the upper
+    // half of that range once it owns focus.
+    let payload = key_payload("F13", "F13");
+    let Some(KeyConversion::Down { event, .. }) = convert_key(&payload) else {
+        panic!("expected a Down conversion");
+    };
+    let Event::KeyDown { keystroke, .. } = event else {
+        panic!("expected a KeyDown event");
+    };
+    assert_eq!(keystroke.key, "f13");
+}
+
+#[test]
 fn composing_key_is_left_to_the_browser() {
     let mut payload = key_payload("a", "KeyA");
     payload.is_composing = true;
     assert!(convert_key(&payload).is_none());
 }
 
+// `KEYS_TO_IGNORE` only contains the cmd/ctrl-v entry this test exercises under the wasm target
+// (see `platform::KEYS_TO_IGNORE`); on native targets the desktop bridge's `convert_key` is never
+// actually invoked (only `wasm::desktop_text_input` calls it), so the set is intentionally empty
+// there and this assertion would not hold.
 #[test]
+#[cfg(target_family = "wasm")]
 fn browser_paste_shortcut_is_left_to_the_browser() {
     let mut payload = key_payload("v", "KeyV");
     if crate::platform::OperatingSystem::get().is_mac() {
@@ -160,6 +179,18 @@ fn classify_input_type_covers_insert_and_delete_directions() {
 }
 
 #[test]
+fn classify_input_type_treats_empty_or_unrecognized_types_as_a_potential_insert() {
+    // Tools that mutate `.value` directly and dispatch a generic `Event` (rather than a real
+    // `InputEvent`) report no `inputType` at all; the bridge must still attempt the
+    // sentinel-diff fallback for them instead of silently dropping the insertion.
+    assert_eq!(classify_input_type(""), InputClassification::Insert);
+    assert_eq!(
+        classify_input_type("someFutureInputType"),
+        InputClassification::Insert
+    );
+}
+
+#[test]
 fn extract_inserted_text_diffs_against_the_sentinel() {
     assert_eq!(
         extract_inserted_text(SENTINEL, " hello"),
@@ -177,4 +208,59 @@ fn composition_selection_range_strips_the_sentinel_and_clamps() {
     assert_eq!(composition_selection_range(1, 2, 1, 10), 0..2);
     // A selection that hasn't caught up with the sentinel clamps to zero.
     assert_eq!(composition_selection_range(1, 2, 0, 0), 0..0);
+}
+
+#[test]
+fn composition_commit_suppresses_exactly_the_trailing_input_event() {
+    let mut tracker = CompositionTracker::default();
+    tracker.on_composition_start();
+    assert!(tracker.is_composing());
+
+    let action = tracker.on_composition_end("こんにちは".to_string());
+    assert_eq!(action, CompositionAction::Commit("こんにちは".to_string()));
+    assert!(!tracker.is_composing());
+
+    // The browser's matching post-`compositionend` `input` event must be dropped, not dispatched
+    // as a second insertion of the same text.
+    assert!(tracker.should_ignore_input_event(false));
+
+    // Suppression is one-shot: a later, unrelated `input` event must not also be swallowed.
+    assert!(!tracker.should_ignore_input_event(false));
+}
+
+#[test]
+fn cancelled_composition_does_not_suppress_the_next_input_event() {
+    let mut tracker = CompositionTracker::default();
+    tracker.on_composition_start();
+
+    let action = tracker.on_composition_end(String::new());
+    assert_eq!(action, CompositionAction::Cancel);
+    assert!(!tracker.should_ignore_input_event(false));
+}
+
+#[test]
+fn input_events_are_ignored_while_composing() {
+    let mut tracker = CompositionTracker::default();
+    tracker.on_composition_start();
+    assert!(tracker.should_ignore_input_event(false));
+    // Also honors the DOM InputEvent's own isComposing flag, independent of tracked state.
+    let mut idle_tracker = CompositionTracker::default();
+    assert!(idle_tracker.should_ignore_input_event(true));
+}
+
+#[test]
+fn reset_cancels_an_in_progress_composition_and_clears_suppression() {
+    let mut tracker = CompositionTracker::default();
+    tracker.on_composition_start();
+    assert_eq!(tracker.reset(), Some(CompositionAction::Cancel));
+    assert!(!tracker.is_composing());
+    // The old surface's composition is gone; a fresh input event on the new surface must not be
+    // suppressed by state left over from the old one.
+    assert!(!tracker.should_ignore_input_event(false));
+}
+
+#[test]
+fn reset_is_a_no_op_when_not_composing() {
+    let mut tracker = CompositionTracker::default();
+    assert_eq!(tracker.reset(), None);
 }

@@ -2172,8 +2172,8 @@ impl EventLoop {
     /// events.
     #[cfg(target_family = "wasm")]
     fn handle_desktop_text_input(&mut self, input: crate::platform::wasm::DesktopTextInputEvent) {
+        use crate::platform::desktop_text_input_reducer::{self, KeyConversion};
         use crate::platform::wasm::DesktopTextInputEvent;
-        use crate::platform::wasm::desktop_text_input_reducer::{self, KeyConversion};
 
         let window_id = self.ui_app.read(|ctx| {
             ctx.windows()

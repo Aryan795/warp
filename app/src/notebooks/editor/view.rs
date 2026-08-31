@@ -2766,6 +2766,7 @@ impl View for RichTextEditorView {
             .map(|position| CursorInfo {
                 position,
                 font_size,
+                view_id: ctx.view_id(),
             })
     }
 

@@ -8889,6 +8889,7 @@ impl View for EditorView {
             .map(|position| CursorInfo {
                 position,
                 font_size,
+                view_id: ctx.view_id(),
             })
     }
 }
