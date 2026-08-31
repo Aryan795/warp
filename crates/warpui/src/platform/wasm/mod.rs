@@ -1,8 +1,11 @@
+pub(crate) mod desktop_text_input;
+pub(crate) mod desktop_text_input_reducer;
 pub(crate) mod hidden_input;
 pub(crate) mod mobile_detection;
 pub(crate) mod soft_keyboard;
 
 use gloo::events::{EventListener, EventListenerOptions};
+pub use desktop_text_input::{DesktopTextInputEvent, DesktopTextInputManager};
 pub use hidden_input::{HiddenInput, HiddenInputEvent, InputCallback};
 pub use mobile_detection::{is_mobile_device, is_mobile_user_agent};
 pub use soft_keyboard::{SoftKeyboardInput, SoftKeyboardManager, SoftKeyboardState};
@@ -120,7 +123,7 @@ pub(crate) fn add_prevent_default_listener(canvas: &web_sys::HtmlCanvasElement) 
     }
 }
 
-fn is_browser_shortcut(event: &web_sys::KeyboardEvent) -> bool {
+pub(crate) fn is_browser_shortcut(event: &web_sys::KeyboardEvent) -> bool {
     let key = event.key().to_ascii_lowercase();
 
     if !event.ctrl_key() && !event.alt_key() && !event.meta_key() {

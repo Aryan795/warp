@@ -8879,6 +8879,9 @@ impl View for EditorView {
     }
 
     fn active_cursor_position(&self, ctx: &ViewContext<Self>) -> Option<CursorInfo> {
+        if !self.can_edit(ctx) {
+            return None;
+        }
         let cursor_id = position_id_for_cursor(ctx.view_id());
         let appearance = Appearance::as_ref(ctx);
         let font_size = self.font_size(appearance);
