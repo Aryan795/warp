@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use warp_core::features::FeatureFlag;
-
 use super::*;
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::blocklist::usage::rollup::{AgentAvatar, PerAgentCreditEntry};
@@ -79,6 +77,70 @@ fn model_usage_rows_joins_charged_usage_by_model_id() {
     assert!(codex_row.charged_usage.is_none());
 }
 
+/// The row total must equal the sum of the breakdown rows shown beneath it,
+/// including cache buckets and web search.
+#[test]
+fn model_usage_row_totals_match_the_charged_usage_breakdown_rows() {
+    let charged_usage = PersistedModelTokenCost {
+        total_input: 1_000,
+        output: 500,
+        input_cache_read: 300,
+        input_cache_write: 200,
+        input_cost_in_cents: 10.0,
+        output_cost_in_cents: 20.0,
+        input_cache_read_cost_in_cents: 3.0,
+        input_cache_write_cost_in_cents: 2.0,
+        web_search_count: 2,
+        web_search_cost_in_cents: 5.0,
+    };
+    let models = vec![model("gpt-5.5", 42, PRIMARY_AGENT_CATEGORY)];
+    let charged_usage_by_model = HashMap::from([("gpt-5.5".to_string(), charged_usage)]);
+
+    let rows = model_usage_rows(&models, &charged_usage_by_model);
+
+    assert_eq!(rows[0].tokens, 1_000 + 500 + 300 + 200);
+    assert_eq!(rows[0].cost_in_cents, Some(10.0 + 20.0 + 3.0 + 2.0 + 5.0));
+}
+
+/// Without attributed charges there is no breakdown to reconcile against, so
+/// the row falls back to the raw reported token count.
+#[test]
+fn model_usage_row_falls_back_to_reported_tokens_without_charged_usage() {
+    let models = vec![model("gpt-5.5", 100, PRIMARY_AGENT_CATEGORY)];
+    let rows = model_usage_rows(&models, &HashMap::new());
+    assert_eq!(rows[0].tokens, 100);
+    assert_eq!(rows[0].cost_in_cents, None);
+}
+
+/// The section summary is what users compare against the rows, so it must be
+/// their exact sum.
+#[test]
+fn row_totals_sum_the_displayed_rows() {
+    let models = vec![
+        model("gpt-5.5", 100, PRIMARY_AGENT_CATEGORY),
+        model("codex-model", 50, FULL_TERMINAL_USE_CATEGORY),
+    ];
+    let charged_usage_by_model = HashMap::from([
+        ("gpt-5.5".to_string(), charged_usage_with_input_cost(36.0)),
+        (
+            "codex-model".to_string(),
+            charged_usage_with_input_cost(14.0),
+        ),
+    ]);
+    let rows = model_usage_rows(&models, &charged_usage_by_model);
+    let totals = RowTotals::of_model_rows(&rows);
+
+    assert_eq!(totals.tokens, Some(rows.iter().map(|r| r.tokens).sum()));
+    assert_eq!(totals.cost_in_cents, Some(50.0));
+}
+
+#[test]
+fn row_totals_cost_is_unknown_when_no_row_has_an_attributed_cost() {
+    let models = vec![model("gpt-5.5", 100, PRIMARY_AGENT_CATEGORY)];
+    let rows = model_usage_rows(&models, &HashMap::new());
+    assert_eq!(RowTotals::of_model_rows(&rows).cost_in_cents, None);
+}
+
 fn per_agent_entry(name: &str, credits: f32) -> PerAgentCreditEntry {
     PerAgentCreditEntry {
         conversation_id: AIConversationId::new(),
@@ -123,9 +185,17 @@ fn format_token_count_abbreviates_above_1000() {
 
 #[test]
 fn format_token_count_abbreviates_above_1_000_000_as_m() {
-    assert_eq!(format_token_count(999_999), "1000.0k");
     assert_eq!(format_token_count(1_000_000), "1.0M");
     assert_eq!(format_token_count(1_614_700), "1.6M");
+}
+
+/// A count that rounds up to the next unit is promoted rather than rendered as
+/// "1000.0k".
+#[test]
+fn format_token_count_promotes_counts_that_round_up_to_the_next_unit() {
+    assert_eq!(format_token_count(999_999), "1.0M");
+    assert_eq!(format_token_count(999_500), "1.0M");
+    assert_eq!(format_token_count(999_499), "999.5k");
 }
 
 #[test]
@@ -147,19 +217,7 @@ fn exact_token_count_tooltip_shows_comma_separated_count_when_abbreviated() {
 }
 
 #[test]
-fn format_tokens_and_cost_omits_dollar_suffix_when_flag_disabled() {
-    let _flag = FeatureFlag::PricingTransparency.override_enabled(false);
-
-    assert_eq!(
-        format_tokens_and_cost(Some(9600), Some(36.0)),
-        "9.6k tokens"
-    );
-}
-
-#[test]
-fn format_tokens_and_cost_joins_tokens_and_dollar_with_a_slash_when_flag_enabled() {
-    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
-
+fn format_tokens_and_cost_joins_tokens_and_dollar_with_a_slash() {
     assert_eq!(
         format_tokens_and_cost(Some(9600), Some(36.0)),
         "9.6k tokens / $0.36"
@@ -168,36 +226,27 @@ fn format_tokens_and_cost_joins_tokens_and_dollar_with_a_slash_when_flag_enabled
 
 #[test]
 fn format_tokens_and_cost_omits_dollar_suffix_when_cost_is_unknown() {
-    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
-
     assert_eq!(format_tokens_and_cost(Some(9600), None), "9.6k tokens");
 }
 
 #[test]
 fn format_tokens_and_cost_falls_back_to_cost_only_when_tokens_are_unknown() {
-    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
-
     assert_eq!(format_tokens_and_cost(None, Some(36.0)), "$0.36");
 }
 
 #[test]
 fn format_tokens_and_cost_shows_em_dash_when_both_are_unknown() {
-    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
-
-    assert_eq!(format_tokens_and_cost(None, None), "\u{2014}");
+    assert_eq!(format_tokens_and_cost(None, None), EM_DASH);
 }
 
 #[test]
-fn format_count_and_cost_omits_dollar_suffix_when_flag_disabled() {
-    let _flag = FeatureFlag::PricingTransparency.override_enabled(false);
-
-    assert_eq!(format_count_and_cost(3, "searches", 2.0), "3 searches");
+fn format_cost_only_shows_em_dash_when_cost_is_unknown() {
+    assert_eq!(format_cost_only(None), EM_DASH);
+    assert_eq!(format_cost_only(Some(36.0)), "$0.36");
 }
 
 #[test]
-fn format_count_and_cost_appends_dollar_suffix_when_flag_enabled() {
-    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
-
+fn format_count_and_cost_appends_dollar_suffix() {
     assert_eq!(
         format_count_and_cost(3, "searches", 2.0),
         "3 searches / $0.02"

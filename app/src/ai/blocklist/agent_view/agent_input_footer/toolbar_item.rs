@@ -52,8 +52,9 @@ pub enum AgentToolbarItemKind {
     ModelSelector,
     NLDToggle,
     ContextWindowUsage,
-    /// Pricing-transparency "Conversation" usage popover trigger (Surface 1).
-    /// Positioned between `ContextWindowUsage` and `ModelSelector`.
+    /// Trigger for the "Conversation" usage popover. Gated on
+    /// [`FeatureFlag::PricingTransparency`], since the popover's content is
+    /// entirely dollar figures.
     UsageSummary,
 
     // CLI agent only
@@ -184,6 +185,10 @@ impl AgentToolbarItemKind {
     pub fn is_available(&self, app: &warpui::AppContext) -> bool {
         match self {
             Self::HandoffToCloud => AISettings::as_ref(app).is_cloud_handoff_enabled(app),
+            // Also checked here, not just in `default_right`/`all_available`: a
+            // toolbar config persisted while the flag was on must not keep
+            // surfacing the item after it goes off.
+            Self::UsageSummary => FeatureFlag::PricingTransparency.is_enabled(),
             // Matches the gating on every other project explorer entry point, so the chip
             // cannot open a tool view the rest of the app hides. See
             // `Workspace::compute_left_panel_views` and the `SHOW_PROJECT_EXPLORER`
@@ -226,9 +231,11 @@ impl AgentToolbarItemKind {
         let mut items = vec![
             Self::ContextChip(ContextChipKind::AgentPlanAndTodoList),
             Self::ContextWindowUsage,
-            Self::UsageSummary,
-            Self::ModelSelector,
         ];
+        if FeatureFlag::PricingTransparency.is_enabled() {
+            items.push(Self::UsageSummary);
+        }
+        items.push(Self::ModelSelector);
         if FeatureFlag::CreatingSharedSessions.is_enabled()
             && FeatureFlag::HOARemoteControl.is_enabled()
         {
@@ -257,10 +264,12 @@ impl AgentToolbarItemKind {
             Self::VoiceInput,
             Self::FileAttach,
             Self::ContextWindowUsage,
-            Self::UsageSummary,
             // Opt-in only: deliberately absent from `default_left`/`default_right`.
             Self::FileExplorer,
         ]);
+        if FeatureFlag::PricingTransparency.is_enabled() {
+            items.push(Self::UsageSummary);
+        }
         if FeatureFlag::FastForwardAutoexecuteButton.is_enabled() {
             items.push(Self::FastForwardToggle);
         }

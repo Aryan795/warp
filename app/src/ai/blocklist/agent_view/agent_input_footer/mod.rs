@@ -203,9 +203,8 @@ pub struct AgentInputFooter {
     start_remote_control_button: ViewHandle<ActionButton>,
     stop_remote_control_button: ViewHandle<ActionButton>,
     context_window_button: ViewHandle<ActionButton>,
-    /// Trigger button for the "Conversation" usage popover (pricing-transparency Surface
-    /// 1). Hovering shows a compact usage summary tooltip; clicking toggles
-    /// `usage_popover`.
+    /// Trigger for the "Conversation" usage popover. Hovering shows the
+    /// conversation's total cost; clicking toggles `usage_popover`.
     usage_button: ViewHandle<ActionButton>,
     /// Non-interactive indicators for a cloud follow-up pane: one shown when attached to a live
     /// remote VM, one when the next follow-up will start a new cloud VM. See
@@ -275,12 +274,9 @@ pub struct AgentInputFooter {
     /// Used to anchor the usage popover above or below the input box, matching the
     /// surrounding menu positioning.
     menu_positioning_provider: Arc<dyn MenuPositioningProvider>,
-    /// The "Conversation" usage popover (Surfaces 2/4/6). A single long-lived instance,
-    /// constructed up front like the other footer views (e.g. `agent_todos_popup`);
-    /// `UsagePopoverAction::ToggleUsagePopover`'s handler resets it via
-    /// `UsagePopoverView::reset_for_conversation` on every open rather than constructing a
-    /// new view mid-click-dispatch, so its section-collapse state still resets to the
-    /// default on reopen (per the pricing-transparency spec's resolved decisions).
+    /// The "Conversation" usage popover. A single long-lived instance, pointed at
+    /// the active conversation via `UsagePopoverView::reset_for_conversation` each
+    /// time it opens.
     usage_popover: ViewHandle<UsagePopoverView>,
     usage_popover_open: bool,
 }
@@ -709,9 +705,10 @@ impl AgentInputFooter {
         });
 
         let usage_button = ctx.add_typed_action_view(|_ctx| {
+            // Tooltip text is set by `update_usage_button`, which runs during
+            // construction and on every usage update.
             ActionButton::new("", AgentInputButtonTheme)
                 .with_icon(Icon::PieChart)
-                .with_tooltip("Conversation usage")
                 .with_size(button_size)
                 .with_tooltip_alignment(TooltipAlignment::Left)
                 .on_click(|ctx| {
@@ -719,10 +716,9 @@ impl AgentInputFooter {
                 })
         });
 
-        // Constructed up front (mirroring `agent_todos_popup`) rather than lazily inside the
-        // `ToggleUsagePopover` action handler: creating a new view mid-click-dispatch caused a
-        // hang. The placeholder conversation id is replaced via `reset_for_conversation` each
-        // time the popover opens; until then it simply renders empty (no matching conversation).
+        // Constructed up front, mirroring `agent_todos_popup` and every other lazily-shown
+        // footer popup. The placeholder conversation id is replaced via
+        // `reset_for_conversation` each time the popover opens; until then it renders empty.
         let usage_popover =
             ctx.add_typed_action_view(|_ctx| UsagePopoverView::new(AIConversationId::new()));
         ctx.subscribe_to_view(&usage_popover, |me, _, event, ctx| match event {
@@ -2158,17 +2154,21 @@ impl AgentInputFooter {
         }
     }
 
-    /// Refreshes the usage button's tooltip with a compact dollar-cost
-    /// summary for the active conversation. The full breakdown is only
-    /// shown once the popover itself is opened.
+    /// Refreshes the usage button's tooltip with the active conversation's
+    /// total cost — the same figure the popover's header shows.
     fn update_usage_button(&mut self, ctx: &mut ViewContext<Self>) {
-        let Some(conversation) =
-            BlocklistAIHistoryModel::as_ref(ctx).active_conversation(self.terminal_view_id)
-        else {
-            return;
-        };
-        let totals = conversation.usage_totals();
-        let tooltip = format!("Conversation: {}", format_cost_only(totals.cost_in_cents));
+        // Falls back to the bare label rather than keeping the previous
+        // conversation's figure, which would attribute another conversation's
+        // spend to this one.
+        let tooltip = BlocklistAIHistoryModel::as_ref(ctx)
+            .active_conversation(self.terminal_view_id)
+            .map(|conversation| {
+                format!(
+                    "Conversation usage: {}",
+                    format_cost_only(conversation.usage_totals().total_cost_in_cents())
+                )
+            })
+            .unwrap_or_else(|| "Conversation usage".to_string());
         self.usage_button.update(ctx, |button, ctx| {
             button.set_tooltip(Some(tooltip), ctx);
         });
@@ -2455,11 +2455,9 @@ impl View for AgentInputFooter {
                 .with_child(ChildView::new(&self.handoff_environment_selector).finish());
         }
 
-        // Extract everything we need from the terminal model up front and drop the lock before
-        // calling into `render_toolbar_item`, whose `UsageSummary` branch calls
-        // `menu_positioning_provider.menu_position()`, which re-locks the same terminal model
-        // (via `TerminalView`) and would deadlock since the lock is non-reentrant. Mirrors the
-        // same precaution already taken in `render_cli_mode_footer`.
+        // The lock must be dropped before `render_toolbar_item`: its `UsageSummary` branch
+        // calls `menu_positioning_provider.menu_position()`, which re-locks this same
+        // non-reentrant terminal model and deadlocks. Mirrors `render_cli_mode_footer`.
         let (shared_status, is_cloud_context, is_conversation_transcript_context) = {
             let terminal_model = self.terminal_model.lock();
             let shared_status = terminal_model.shared_session_status().clone();
@@ -2800,12 +2798,8 @@ impl TypedActionView for AgentInputFooter {
             AgentInputFooterAction::ToggleUsagePopover => {
                 self.usage_popover_open = !self.usage_popover_open;
                 if self.usage_popover_open {
-                    // Look up the conversation id with a tightly scoped borrow (resolved to a
-                    // plain `Copy` id before touching `self`/`ctx` again) rather than a new
-                    // view. Constructing a new view here via `ctx.add_typed_action_view`
-                    // previously hung the app: this handler runs while `self` is temporarily
-                    // removed from the view tree by the dispatch machinery, and the button's
-                    // click is still being processed higher up the call stack.
+                    // Resolved to a plain `Copy` id before touching `self`/`ctx` again so the
+                    // history borrow ends before the popover update.
                     let conversation_id = BlocklistAIHistoryModel::as_ref(ctx)
                         .active_conversation(self.terminal_view_id)
                         .map(|conversation| conversation.id());

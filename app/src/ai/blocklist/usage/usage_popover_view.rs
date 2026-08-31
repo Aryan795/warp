@@ -1,28 +1,20 @@
-//! The "Conversation" usage popover (pricing-transparency Surfaces 1, 2,
-//! 6): a click-triggered floating popover anchored to the footer's usage
-//! icon (Surface 1) that replaces the collapsed-inline usage footer with a
-//! richer breakdown: a per-model stacked bar with role pill badges and
-//! per-model dollar costs (Surface 2), and — when the conversation is an
-//! orchestrator with locally-loaded descendants — a per-agent stacked-bar
-//! rollup in place of the per-model section (Surface 6).
+//! The "Conversation" usage popover: a click-triggered floating popover
+//! anchored to the footer's usage icon, showing a per-model breakdown of
+//! tokens and dollar cost — or, when the conversation is an orchestrator with
+//! locally-loaded descendants, a per-agent rollup in place of the per-model
+//! section.
 //!
-//! The context-window breakdown (originally Surface 4) has moved to its own
-//! separately-triggered surface and is not rendered here.
+//! Displayed figures are recomputed from the live [`AIConversation`] on every
+//! render rather than snapshotted at construction, so the numbers update while
+//! streaming.
 //!
-//! Unlike [`super::conversation_usage_view::ConversationUsageView`] (which
-//! renders inline in the block list and remains the production
-//! implementation of the older per-block "1B" pill), this view is a
-//! self-contained floating popover with its own section-collapse state.
-//! Per the pricing-transparency specs' resolved decisions, "1A" (this view,
-//! triggered from the footer icon) is the new canonical entry point; 1B is
-//! not removed here but is expected to be deprecated in a follow-up once 1A
-//! ships.
+//! Two invariants hold across every figure shown here, since users add these
+//! columns up:
+//! * A section's summary equals the sum of the rows beneath it.
+//! * A model row's value equals the sum of its expanded breakdown rows.
 //!
-//! All derived data (credits, token/model breakdown, context-window
-//! segments, response timing, orchestration rollup) is recomputed from the
-//! live [`AIConversation`] on every render rather than snapshotted at
-//! construction, so the popover's numbers update live while streaming
-//! (matching the existing per-block pill's live-update behavior).
+//! Both are maintained by deriving section summaries from the same row list
+//! that gets rendered, rather than from a separately-sourced aggregate.
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -48,12 +40,11 @@ use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::agent_view::orchestration_pill_bar::{
     render_agent_avatar_disc, render_orchestrator_avatar_disc,
 };
-use crate::ai::blocklist::usage::colors::color_for_model;
+use crate::ai::blocklist::usage::colors::chart_color;
 use crate::ai::blocklist::usage::rollup::{
     AgentAvatar, OrchestrationCreditRollup, PerAgentCreditEntry, compute_orchestration_rollup,
 };
 use crate::appearance::Appearance;
-use crate::features::FeatureFlag;
 use crate::persistence::model::{
     FULL_TERMINAL_USE_CATEGORY, ModelTokenUsage, PRIMARY_AGENT_CATEGORY, PersistedModelTokenCost,
 };
@@ -71,6 +62,9 @@ const ROLLUP_TRUNCATION_CAP: usize = 5;
 const BAR_HEIGHT: f32 = 6.;
 /// Width/height of the small color swatch next to each row label.
 const SWATCH_SIZE: f32 = 8.;
+/// Shown in place of a figure the client has no value for. Distinct from
+/// `$0.00`, which is a known zero.
+const EM_DASH: &str = "\u{2014}";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UsagePopoverAction {
@@ -108,10 +102,8 @@ fn space_between_row() -> Flex {
 /// Floating "Conversation" usage popover. Holds only section-expand UI
 /// state; all usage data is read live from [`BlocklistAIHistoryModel`] at
 /// render time. The footer owns a single long-lived instance and calls
-/// [`Self::reset_for_conversation`] each time the popover opens (see the
-/// footer wiring), so section-collapse state always resets to its default
-/// on reopen per the spec's resolved decisions, without ever constructing a
-/// new view mid-click-dispatch.
+/// [`Self::reset_for_conversation`] each time the popover opens, so
+/// section-collapse state resets to its default on reopen.
 pub struct UsagePopoverView {
     conversation_id: AIConversationId,
     model_usage_section_expanded: bool,
@@ -161,17 +153,11 @@ impl UsagePopoverView {
     }
 
     /// Points this (reused) popover at `conversation_id` and resets all
-    /// section-collapse/rollup-truncation state back to its default,
-    /// exactly matching what [`Self::new`] would produce. Called by the
-    /// footer each time the popover is opened, so reopening always starts
-    /// from a clean slate without allocating a new view.
+    /// section-collapse state back to [`Self::new`]'s defaults.
     ///
-    /// Notifies the view context so the popover is actually re-rendered:
-    /// `ViewContext::update` does not implicitly mark a view dirty, so
-    /// without this the popover kept painting its stale initial render
-    /// (constructed with a placeholder conversation id that never matches,
-    /// so it rendered empty) even after being pointed at a real
-    /// conversation.
+    /// The explicit `notify` is required: `ViewContext::update` does not mark
+    /// a view dirty on its own, so without it the popover keeps painting the
+    /// render it produced for the previous conversation.
     pub fn reset_for_conversation(
         &mut self,
         conversation_id: AIConversationId,
@@ -181,7 +167,20 @@ impl UsagePopoverView {
         ctx.notify();
     }
 
-    fn render_header(&self, appearance: &Appearance) -> Box<dyn Element> {
+    /// Header row: the title plus the conversation's authoritative total cost,
+    /// and the account-usage link.
+    ///
+    /// The total is the one figure the whole popover exists to answer, so it
+    /// comes from [`ConversationUsageTotals::total_cost_in_cents`] — inference
+    /// plus platform plus web search — and is the same value the footer icon's
+    /// tooltip shows. It is deliberately not re-derived from the sections
+    /// below, which can under-report when the server hasn't attributed every
+    /// charge to a specific model yet.
+    fn render_header(
+        &self,
+        conversation: &AIConversation,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
         let theme = appearance.theme();
         let background = theme.surface_2();
         let title = Text::new(
@@ -191,6 +190,21 @@ impl UsagePopoverView {
         )
         .with_color(blended_colors::text_main(theme, background))
         .finish();
+
+        let total = Text::new(
+            format_cost_only(conversation.usage_totals().total_cost_in_cents()),
+            appearance.ui_font_family(),
+            appearance.ui_font_size() + 4.,
+        )
+        .with_color(blended_colors::text_sub(theme, background))
+        .finish();
+        let title = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_spacing(8.)
+            .with_child(title)
+            .with_child(total)
+            .finish();
 
         let link_color = blended_colors::text_sub(theme, background);
         let font_family = appearance.ui_font_family();
@@ -334,114 +348,100 @@ impl UsagePopoverView {
     }
 
     /// Renders either the per-model breakdown (default) or, when an
-    /// orchestration rollup applies, the per-agent breakdown in its place
-    /// (Surface 6 resolved decision 2). The section header's collapsed
-    /// summary carries the conversation- (or rollup-) wide total usage
-    /// figure, replacing what used to be a standalone "Total Usage" row
-    /// above this section.
+    /// orchestration rollup applies, the per-agent breakdown in its place.
+    ///
+    /// Returns `None` when there is nothing to break down, so the caller can
+    /// omit the section rather than emit an empty element that still consumes
+    /// the parent column's spacing.
     fn render_usage_breakdown_section(
         &self,
         conversation: &AIConversation,
         rollup: Option<&OrchestrationCreditRollup>,
         appearance: &Appearance,
-    ) -> Box<dyn Element> {
-        let (total_tokens, total_cost_in_cents) = total_usage_tokens_and_cost(conversation, rollup);
-        let collapsed_summary = format_tokens_and_cost(total_tokens, total_cost_in_cents);
-        let collapsed_summary_tooltip = total_tokens.and_then(exact_token_count_tooltip);
+    ) -> Option<Box<dyn Element>> {
+        let (label, summary, rows) = match rollup {
+            Some(rollup) => (
+                "AGENT USAGE",
+                RowTotals {
+                    tokens: rollup.total_tokens.map(u64::from),
+                    cost_in_cents: rollup.total_cost_in_cents,
+                },
+                self.render_agent_rollup_rows(rollup, appearance),
+            ),
+            None => {
+                let rows = model_usage_rows(
+                    conversation.token_usage(),
+                    conversation.charged_usage_by_model(),
+                );
+                if rows.is_empty() {
+                    return None;
+                }
+                (
+                    "INFERENCE USAGE",
+                    RowTotals::of_model_rows(&rows),
+                    self.render_model_usage_rows(&rows, appearance),
+                )
+            }
+        };
 
         let mut column = Flex::column().with_spacing(8.);
-        if let Some(rollup) = rollup {
-            column.add_child(self.render_section_header(
-                "AGENT USAGE",
-                self.model_usage_section_expanded,
-                Some(collapsed_summary),
-                collapsed_summary_tooltip,
-                self.model_usage_toggle_mouse_state.clone(),
-                UsagePopoverAction::ToggleModelUsageSection,
-                appearance,
-            ));
-            if self.model_usage_section_expanded {
-                column.add_child(self.render_agent_rollup_rows(rollup, appearance));
-            }
-        } else {
-            column.add_child(self.render_section_header(
-                "INFERENCE USAGE",
-                self.model_usage_section_expanded,
-                Some(collapsed_summary),
-                collapsed_summary_tooltip,
-                self.model_usage_toggle_mouse_state.clone(),
-                UsagePopoverAction::ToggleModelUsageSection,
-                appearance,
-            ));
-            if self.model_usage_section_expanded {
-                column.add_child(self.render_model_usage_rows(conversation, appearance));
-            }
+        column.add_child(self.render_section_header(
+            label,
+            self.model_usage_section_expanded,
+            Some(format_tokens_and_cost(
+                summary.tokens,
+                summary.cost_in_cents,
+            )),
+            summary.tokens.and_then(exact_token_count_tooltip),
+            self.model_usage_toggle_mouse_state.clone(),
+            UsagePopoverAction::ToggleModelUsageSection,
+            appearance,
+        ));
+        if self.model_usage_section_expanded {
+            column.add_child(rows);
         }
-        column.finish()
+        Some(column.finish())
     }
 
-    /// Renders the non-collapsible "PLATFORM USAGE" section: Warp's
-    /// platform fee (infrastructure/orchestration overhead), which unlike
-    /// inference cost isn't attributable to any single model, so it's
-    /// shown as a single label/value row (no separate content, no
-    /// expand/collapse) rather than folded into the inference usage
-    /// breakdown.
+    /// Renders the non-collapsible "PLATFORM USAGE" section: Warp's platform
+    /// fee, which unlike inference cost isn't attributable to any single
+    /// model.
+    ///
+    /// `None` (rather than a "$0.00" row) when there's no platform fee to
+    /// report, e.g. conversations predating the server-side platform fee.
     fn render_platform_usage_section(
         &self,
         conversation: &AIConversation,
         appearance: &Appearance,
-    ) -> Box<dyn Element> {
+    ) -> Option<Box<dyn Element>> {
         let platform_cost_in_cents = conversation
             .usage_totals()
             .charged_usage
-            .map(|charged_usage| charged_usage.platform_cost_in_cents);
+            .map(|charged_usage| charged_usage.platform_cost_in_cents)
+            .filter(|cost| *cost > 0.)?;
 
-        // Hidden entirely (rather than shown as "$0.00") when there's no
-        // platform fee to report, e.g. conversations predating the
-        // server-side platform fee, or ones where it happens to be zero.
-        if platform_cost_in_cents.is_none_or(|cost| cost <= 0.) {
-            return Empty::new().finish();
-        }
-
-        self.render_static_section_header_with_value(
+        Some(self.render_static_section_header_with_value(
             "PLATFORM USAGE",
-            format_cost_only(platform_cost_in_cents),
+            format_cost_only(Some(platform_cost_in_cents)),
             appearance,
-        )
+        ))
     }
 
     fn render_model_usage_rows(
         &self,
-        conversation: &AIConversation,
+        rows: &[ModelUsageRow],
         appearance: &Appearance,
     ) -> Box<dyn Element> {
-        // Token counts (with role-category info for the badges) come from a
-        // different underlying structure than the per-model charged-usage
-        // breakdown (cost + input/output/cache/web split), so join them here
-        // by model id.
-        let rows = model_usage_rows(
-            conversation.token_usage(),
-            conversation.charged_usage_by_model(),
-        );
-        if rows.is_empty() {
-            return Empty::new().finish();
-        }
-        let total_tokens: u64 = rows.iter().map(|r| r.tokens).sum();
+        let totals = RowTotals::of_model_rows(rows);
+        let total_tokens = totals.tokens.unwrap_or(0);
         let theme = appearance.theme();
         let background = theme.surface_2();
         let font_size = appearance.ui_font_size();
 
         let mut column = Flex::column().with_spacing(6.);
 
-        // "All models" summary row. Uses the conversation-wide cost total
-        // (the same source as the header's "Total Usage" row) rather than
-        // re-summing per-model costs, so the two always agree even if a
-        // model's cost hasn't been individually attributed yet.
         let all_models_value = Text::new(
-            format_tokens_and_cost(
-                Some(total_tokens),
-                conversation.usage_totals().cost_in_cents,
-            ),
+            format_tokens_and_cost(totals.tokens, totals.cost_in_cents),
             appearance.ui_font_family(),
             font_size,
         )
@@ -468,16 +468,18 @@ impl UsagePopoverView {
                 .finish(),
         );
 
-        // Stacked bar: one segment per model, proportional to token share.
+        // Segment widths track the same quantity the rows display, so the bar
+        // and the numbers beside it can't tell different stories.
         let segments: Vec<(ColorU, f32)> = rows
             .iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(index, row)| {
                 let pct = if total_tokens == 0 {
                     0.
                 } else {
                     (row.tokens as f32 / total_tokens as f32) * 100.
                 };
-                (color_for_model(&row.model_id), pct)
+                (chart_color(index), pct)
             })
             .collect();
         column.add_child(render_segmented_bar(
@@ -485,8 +487,8 @@ impl UsagePopoverView {
             theme.outline().into_solid(),
         ));
 
-        for row in &rows {
-            column.add_child(self.render_model_usage_row(row, appearance));
+        for (index, row) in rows.iter().enumerate() {
+            column.add_child(self.render_model_usage_row(index, row, appearance));
         }
 
         column.finish()
@@ -499,21 +501,18 @@ impl UsagePopoverView {
     /// the server hasn't sent per-model charges for this conversation yet).
     fn render_model_usage_row(
         &self,
+        index: usize,
         row: &ModelUsageRow,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let theme = appearance.theme();
         let background = theme.surface_2();
         let font_size = appearance.ui_font_size();
-        let color = color_for_model(&row.model_id);
+        let color = chart_color(index);
         let expanded = self.expanded_model_ids.contains(&row.model_id);
 
-        // "Primary agent" is the common/default case (the conversation's
-        // main model), so calling it out on every row is just noise; only
-        // the exceptional "Full terminal use" badge (and any future
-        // non-default category) is worth displaying. The underlying
-        // `role_badge` field still carries "Primary agent" for sorting
-        // (see `model_usage_rows`).
+        // "Primary agent" is the default case, so showing it on every row is
+        // noise; `role_badge` still carries it for sorting.
         let display_role_badge = row.role_badge.filter(|&role| role != "Primary agent");
         let full_label = match display_role_badge {
             Some(role) => format!("{} ({role})", row.model_id),
@@ -526,13 +525,10 @@ impl UsagePopoverView {
             Icon::ChevronRight
         };
 
-        // Model name and role badge are separate `Text`s (rather than one
-        // formatted string) so they can use different colors. The name uses
-        // `Shrinkable` (not `Expanded`) so it only claims as much width as it
-        // actually needs (ellipsis-clipping once it runs out of room)
-        // instead of being force-stretched to fill the row — `Expanded`
-        // would leave the role badge stranded at the far right of the row
-        // instead of immediately following a short model name.
+        // Name and badge are separate `Text`s so they can use different
+        // colors. `Shrinkable` keeps the name at its intrinsic width so the
+        // badge follows it directly; `Expanded` would strand the badge at the
+        // far right.
         let mut label_row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
         label_row.add_child(
             Shrinkable::new(
@@ -560,12 +556,9 @@ impl UsagePopoverView {
             appearance,
         );
 
-        // The label is wrapped in `Expanded`: a plain (non-flex) `Text` in a
-        // `Flex::row` sizes to its own intrinsic width regardless of the
-        // row's available space, so a long model name would push the
-        // trailing token/cost value and chevron off the edge of the popover
-        // instead of being ellipsis-clipped. `Expanded` bounds it to
-        // whatever space remains after its row-sibling (the swatch here).
+        // `Expanded` bounds the label to the space left after the swatch, so a
+        // long model name ellipsis-clips instead of pushing the value and
+        // chevron off the popover's edge.
         let left = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(7.)
@@ -601,6 +594,18 @@ impl UsagePopoverView {
             .with_child(Container::new(right.finish()).with_margin_left(8.).finish())
             .finish();
 
+        // Only the summary row toggles; wrapping the whole column would make
+        // any click inside the expanded breakdown collapse it again.
+        let model_id = row.model_id.clone();
+        let summary_row = EventHandler::new(summary_row)
+            .on_left_mouse_down(move |ctx, _, _| {
+                ctx.dispatch_typed_action(UsagePopoverAction::ToggleModelExpanded(
+                    model_id.clone(),
+                ));
+                DispatchEventResult::StopPropagation
+            })
+            .finish();
+
         let mut column = Flex::column().with_spacing(6.).with_child(summary_row);
         if expanded {
             let breakdown = match row.charged_usage {
@@ -615,10 +620,9 @@ impl UsagePopoverView {
                 .with_color(blended_colors::text_disabled(theme, background))
                 .finish(),
             };
-            // Extra right padding pulls the breakdown's trailing token/cost
-            // values in from the popover's edge, so they visibly underhang
-            // (rather than overhang) the model total row's own value, which
-            // stops short of the edge to make room for its chevron.
+            // Extra right padding keeps the breakdown's values clear of the
+            // model row's value, which stops short to make room for its
+            // chevron.
             column.add_child(
                 Container::new(breakdown)
                     .with_padding_left(15.)
@@ -627,15 +631,7 @@ impl UsagePopoverView {
             );
         }
 
-        let model_id = row.model_id.clone();
-        EventHandler::new(column.finish())
-            .on_left_mouse_down(move |ctx, _, _| {
-                ctx.dispatch_typed_action(UsagePopoverAction::ToggleModelExpanded(
-                    model_id.clone(),
-                ));
-                DispatchEventResult::StopPropagation
-            })
-            .finish()
+        column.finish()
     }
 
     /// Renders a model's input/output/cache/web-search charged-usage
@@ -775,9 +771,8 @@ impl UsagePopoverView {
         }
     }
 
-    /// Per-agent breakdown (Surface 6), adopting the same stacked-bar +
-    /// swatch treatment as the per-model breakdown rather than Surface 6's
-    /// original plain label/value list.
+    /// Per-agent breakdown, using the same stacked-bar + swatch treatment as
+    /// the per-model breakdown.
     fn render_agent_rollup_rows(
         &self,
         rollup: &OrchestrationCreditRollup,
@@ -817,16 +812,24 @@ impl UsagePopoverView {
                 .finish(),
         );
 
+        // Proportioned by the cost the rows actually display rather than by
+        // credits, which are never shown; credits would make the segment
+        // widths disagree with the numbers beside them. Falls back to credits
+        // only when no contributor has a known dollar figure.
+        let cost_total = rollup.total_cost_in_cents.filter(|total| *total > 0.);
         let segments: Vec<(ColorU, f32)> = rollup
             .per_agent
             .iter()
-            .map(|entry| {
-                let pct = if rollup.total_credits <= 0. {
-                    0.
-                } else {
-                    (entry.credits_spent / rollup.total_credits) * 100.
+            .enumerate()
+            .map(|(index, entry)| {
+                let pct = match cost_total {
+                    Some(total) => (entry.cost_in_cents.unwrap_or(0.) / total) * 100.,
+                    None if rollup.total_credits > 0. => {
+                        (entry.credits_spent / rollup.total_credits) * 100.
+                    }
+                    None => 0.,
                 };
-                (agent_row_color(entry, theme), pct)
+                (agent_row_color(entry, index, theme), pct)
             })
             .collect();
         column.add_child(render_segmented_bar(
@@ -835,8 +838,8 @@ impl UsagePopoverView {
         ));
 
         let (shown, hidden_count) = truncate_rollup_rows(&rollup.per_agent, self.rollup_show_all);
-        for entry in shown {
-            column.add_child(self.render_agent_rollup_row(entry, appearance));
+        for (index, entry) in shown.iter().enumerate() {
+            column.add_child(self.render_agent_rollup_row(index, entry, appearance));
         }
         if hidden_count > 0 {
             column.add_child(self.render_show_more_link(hidden_count, appearance));
@@ -849,6 +852,7 @@ impl UsagePopoverView {
 
     fn render_agent_rollup_row(
         &self,
+        index: usize,
         entry: &PerAgentCreditEntry,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
@@ -856,6 +860,7 @@ impl UsagePopoverView {
         let background = theme.surface_2();
         let font_size = appearance.ui_font_size();
         const ROW_AVATAR_SIZE: f32 = 16.;
+        let swatch = render_swatch(agent_row_color(entry, index, theme));
         let avatar = match entry.avatar {
             AgentAvatar::Orchestrator => {
                 render_orchestrator_avatar_disc(ROW_AVATAR_SIZE, theme, appearance)
@@ -894,6 +899,7 @@ impl UsagePopoverView {
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .with_main_axis_size(MainAxisSize::Min)
                     .with_spacing(8.)
+                    .with_child(swatch)
                     .with_child(avatar)
                     .with_child(name)
                     .finish(),
@@ -931,8 +937,11 @@ impl UsagePopoverView {
         &self,
         conversation: &AIConversation,
         appearance: &Appearance,
-    ) -> Box<dyn Element> {
+    ) -> Option<Box<dyn Element>> {
         let tool_usage = conversation.tool_usage_metadata();
+        if tool_usage.total_tool_calls() == 0 {
+            return None;
+        }
         let mut column = Flex::column().with_spacing(8.);
         column.add_child(self.render_section_header(
             "TOOL CALL SUMMARY",
@@ -944,7 +953,7 @@ impl UsagePopoverView {
             appearance,
         ));
         if !self.tool_call_summary_section_expanded {
-            return column.finish();
+            return Some(column.finish());
         }
 
         let mut inner = Flex::column().with_spacing(4.);
@@ -969,19 +978,19 @@ impl UsagePopoverView {
             appearance,
         ));
         column.add_child(inner.finish());
-        column.finish()
+        Some(column.finish())
     }
 
     fn render_response_time_section(
         &self,
         conversation: &AIConversation,
         appearance: &Appearance,
-    ) -> Box<dyn Element> {
+    ) -> Option<Box<dyn Element>> {
         let ttft_ms = conversation.time_to_first_token_for_last_user_query_ms();
         let response_ms = conversation.total_agent_response_time_since_last_user_query_ms();
         let wall_ms = conversation.wall_to_wall_response_time_since_last_query();
         if ttft_ms == 0 && response_ms == 0 && wall_ms.unwrap_or(0) == 0 {
-            return Empty::new().finish();
+            return None;
         }
 
         // Prefer the wall-to-wall total (including tool call time) for the
@@ -1001,7 +1010,7 @@ impl UsagePopoverView {
             appearance,
         ));
         if !self.response_time_section_expanded {
-            return column.finish();
+            return Some(column.finish());
         }
 
         let mut inner = Flex::column().with_spacing(4.);
@@ -1025,7 +1034,7 @@ impl UsagePopoverView {
             ));
         }
         column.add_child(inner.finish());
-        column.finish()
+        Some(column.finish())
     }
 }
 
@@ -1043,16 +1052,19 @@ impl View for UsagePopoverView {
         };
         let rollup = compute_orchestration_rollup(self.conversation_id, history);
 
+        // Absent sections are skipped rather than rendered empty, so they don't
+        // leave the column's inter-section spacing behind as a stray gap.
+        let sections = [
+            Some(self.render_header(conversation, appearance)),
+            self.render_usage_breakdown_section(conversation, rollup.as_ref(), appearance),
+            self.render_platform_usage_section(conversation, appearance),
+            self.render_tool_call_summary_section(conversation, appearance),
+            self.render_response_time_section(conversation, appearance),
+        ];
         let mut column = Flex::column().with_spacing(12.);
-        column.add_child(self.render_header(appearance));
-        column.add_child(self.render_usage_breakdown_section(
-            conversation,
-            rollup.as_ref(),
-            appearance,
-        ));
-        column.add_child(self.render_platform_usage_section(conversation, appearance));
-        column.add_child(self.render_tool_call_summary_section(conversation, appearance));
-        column.add_child(self.render_response_time_section(conversation, appearance));
+        for section in sections.into_iter().flatten() {
+            column.add_child(section);
+        }
 
         let content = Container::new(column.finish())
             .with_background(theme.surface_2())
@@ -1126,13 +1138,7 @@ impl TypedActionView for UsagePopoverView {
     }
 }
 
-/// One row of the per-model usage breakdown, aggregated across a model's
-/// warp/byok/custom-endpoint token counts. Role badges mirror the existing
-/// credits-based breakdown's category constants. `charged_usage` comes from
-/// a separate per-model structure (`AIConversation::charged_usage_by_model`)
-/// joined in by model id, since the token/category source
-/// (`AIConversation::token_usage`) doesn't carry cost; `cost_in_cents` is
-/// derived from it for the collapsed row's value text.
+/// One row of the per-model usage breakdown.
 struct ModelUsageRow {
     model_id: String,
     role_badge: Option<&'static str>,
@@ -1141,9 +1147,55 @@ struct ModelUsageRow {
     charged_usage: Option<PersistedModelTokenCost>,
 }
 
-/// Builds the sorted per-model row list from raw per-conversation token
-/// usage. Rows are ordered primary-agent-first (matching the existing
-/// credits-based breakdown's sort), then alphabetically by model id.
+/// Every token bucket the expanded breakdown itemizes.
+///
+/// Deliberately not [`PersistedModelTokenCost::tokens`], which excludes cache
+/// tokens: the breakdown shows cache rows, so excluding them here would leave
+/// the rows summing past their own row total.
+fn charged_usage_tokens(usage: &PersistedModelTokenCost) -> u64 {
+    usage.total_input + usage.output + usage.input_cache_read + usage.input_cache_write
+}
+
+/// Every cost bucket the expanded breakdown itemizes, including web search
+/// (which [`PersistedModelTokenCost::cost_in_cents`] omits).
+fn charged_usage_cost_in_cents(usage: &PersistedModelTokenCost) -> f32 {
+    usage.cost_in_cents() + usage.web_search_cost_in_cents
+}
+
+/// Tokens and cost for a set of rendered rows.
+#[derive(Clone, Copy)]
+struct RowTotals {
+    tokens: Option<u64>,
+    cost_in_cents: Option<f32>,
+}
+
+impl RowTotals {
+    /// Sums the values the model rows actually display, so a section summary
+    /// built from this always equals the rows beneath it.
+    ///
+    /// The cost is `None` only when no row has a known cost; a partially
+    /// attributed set still reports the portion that is known, matching the
+    /// visible rows.
+    fn of_model_rows(rows: &[ModelUsageRow]) -> Self {
+        let cost_in_cents = rows
+            .iter()
+            .filter_map(|row| row.cost_in_cents)
+            .reduce(|acc, cost| acc + cost);
+        Self {
+            tokens: Some(rows.iter().map(|row| row.tokens).sum()),
+            cost_in_cents,
+        }
+    }
+}
+
+/// Builds the sorted per-model row list. Rows are ordered primary-agent-first,
+/// then alphabetically by model id.
+///
+/// Tokens and cost come from the per-model charged-usage breakdown when the
+/// server has attributed charges to this model, so the row total matches the
+/// breakdown rows shown when it's expanded. Models without attributed charges
+/// fall back to the raw token counts and render "No detailed breakdown
+/// available" when expanded, so there's nothing to disagree with.
 fn model_usage_rows(
     models: &[ModelTokenUsage],
     charged_usage_by_model: &HashMap<String, PersistedModelTokenCost>,
@@ -1151,19 +1203,21 @@ fn model_usage_rows(
     let mut rows: Vec<ModelUsageRow> = models
         .iter()
         .filter_map(|model| {
-            let tokens = model.warp_tokens as u64
+            let reported_tokens = model.warp_tokens as u64
                 + model.byok_tokens as u64
                 + model.custom_endpoint_tokens as u64;
-            if tokens == 0 {
+            if reported_tokens == 0 {
                 return None;
             }
-            let role_badge = role_badge_for_model(model);
             let charged_usage = charged_usage_by_model.get(&model.model_id).copied();
             Some(ModelUsageRow {
                 model_id: model.model_id.clone(),
-                role_badge,
-                tokens,
-                cost_in_cents: charged_usage.map(|usage| usage.cost_in_cents()),
+                role_badge: role_badge_for_model(model),
+                tokens: charged_usage
+                    .as_ref()
+                    .map(charged_usage_tokens)
+                    .unwrap_or(reported_tokens),
+                cost_in_cents: charged_usage.as_ref().map(charged_usage_cost_in_cents),
                 charged_usage,
             })
         })
@@ -1217,53 +1271,32 @@ fn truncate_rollup_rows(
     }
 }
 
-fn agent_row_color(entry: &PerAgentCreditEntry, theme: &WarpTheme) -> ColorU {
+/// The orchestrator keeps its fixed identity color; children take chart
+/// colors by position, matching the per-model bar.
+fn agent_row_color(entry: &PerAgentCreditEntry, index: usize, theme: &WarpTheme) -> ColorU {
     match entry.avatar {
         AgentAvatar::Orchestrator => theme.ansi_fg_cyan(),
-        AgentAvatar::Child => color_for_model(&entry.display_name),
+        AgentAvatar::Child => chart_color(index),
     }
 }
 
-/// Computes the conversation- (or, when an orchestration rollup applies,
-/// rollup-) wide total tokens and dollar cost, shared by the inference/agent
-/// usage section's collapsed-summary text and its expanded "All models"/
-/// "All agents" row so the two always agree.
-fn total_usage_tokens_and_cost(
-    conversation: &AIConversation,
-    rollup: Option<&OrchestrationCreditRollup>,
-) -> (Option<u64>, Option<f32>) {
-    match rollup {
-        Some(rollup) => (
-            rollup.total_tokens.map(u64::from),
-            rollup.total_cost_in_cents,
-        ),
-        None => {
-            let total_tokens: u64 = conversation
-                .token_usage()
-                .iter()
-                .map(|model| {
-                    (model.warp_tokens + model.byok_tokens + model.custom_endpoint_tokens) as u64
-                })
-                .sum();
-            (
-                Some(total_tokens),
-                conversation.usage_totals().cost_in_cents,
-            )
-        }
-    }
-}
-
-/// Formats a raw token count using `k`/`M`-suffixed abbreviations above
-/// 1,000 and 1,000,000 tokens respectively (e.g. `9.6k`, `1.6M`), matching
-/// the Figma copy's token formatting.
+/// Formats a raw token count with `k`/`M` abbreviations, e.g. `9.6k`, `1.6M`.
+///
+/// The thresholds compare the *rounded* value, so 999,999 reads as `1.0M`
+/// rather than `1000.0k`.
 fn format_token_count(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}M", tokens as f64 / 1_000_000.)
-    } else if tokens >= 1000 {
-        format!("{:.1}k", tokens as f64 / 1000.)
-    } else {
-        tokens.to_string()
+    /// Smallest quotient that still rounds up to `1.0` at one decimal place.
+    const ROUNDS_TO_ONE: f64 = 0.9995;
+
+    let millions = tokens as f64 / 1_000_000.;
+    if millions >= ROUNDS_TO_ONE {
+        return format!("{millions:.1}M");
     }
+    let thousands = tokens as f64 / 1000.;
+    if thousands >= ROUNDS_TO_ONE {
+        return format!("{thousands:.1}k");
+    }
+    tokens.to_string()
 }
 
 /// Returns the exact (unabbreviated, comma-separated) token count for a
@@ -1303,16 +1336,11 @@ fn with_tooltip(
     .finish()
 }
 
-/// Renders a small opaque tooltip box containing `text`. The background's
-/// alpha channel is forced to fully opaque explicitly, rather than trusting
-/// any theme color's own alpha: neither `Fill::into_solid()` nor
-/// `coloru_with_opacity()` ever *force* full opacity -- they only preserve
-/// or proportionally scale whatever alpha the color already has -- and
-/// `theme.background()` (and, transitively through its blend chain,
-/// `surface_1()`/`surface_2()`/`surface_3()`) can carry a reduced alpha
-/// from the user's window-opacity/blur setting. Without forcing it here,
-/// the box reads as translucent against whatever row happens to be behind
-/// it.
+/// Renders a small opaque tooltip box containing `text`.
+///
+/// The alpha is forced to 255 because theme surfaces can carry a reduced alpha
+/// from the user's window-opacity setting, and neither `into_solid()` nor
+/// `coloru_with_opacity()` forces opacity.
 fn render_tooltip_box(text: String, appearance: &Appearance) -> Box<dyn Element> {
     let theme = appearance.theme();
     let surface = theme.surface_3().into_solid();
@@ -1338,52 +1366,34 @@ fn render_tooltip_box(text: String, appearance: &Appearance) -> Box<dyn Element>
 }
 
 /// Formats a token count alongside its dollar cost, e.g. `"9.6k tokens /
-/// $0.36"`. Per the pricing-transparency "do not show credits" decision,
-/// this is the only value format used in the popover — credits are never
-/// displayed. Either figure may be unknown (e.g. a rollup contributor
-/// without a per-agent token/cost baseline): the two are joined with `/`
-/// when both are known, and the popover falls back to whichever single
-/// figure is available, or an em dash when neither is known. The dollar
-/// figure is omitted entirely when `FeatureFlag::PricingTransparency` is
-/// disabled.
+/// $0.36"`, falling back to whichever figure is known and to an em dash when
+/// neither is.
 pub(crate) fn format_tokens_and_cost(tokens: Option<u64>, cost_in_cents: Option<f32>) -> String {
     let token_text = tokens.map(|tokens| format!("{} tokens", format_token_count(tokens)));
-    let cost_text = FeatureFlag::PricingTransparency
-        .is_enabled()
-        .then(|| cost_in_cents.map(|cost| format!("${:.2}", cost / 100.)))
-        .flatten();
+    let cost_text = cost_in_cents.map(format_cents);
     match (token_text, cost_text) {
         (Some(tokens), Some(cost)) => format!("{tokens} / {cost}"),
         (Some(tokens), None) => tokens,
         (None, Some(cost)) => cost,
-        (None, None) => "\u{2014}".to_string(),
+        (None, None) => EM_DASH.to_string(),
     }
 }
 
-/// Formats a count alongside its dollar cost, e.g. `"3 searches / $0.02"`,
-/// for breakdown rows whose unit isn't tokens (currently just web
-/// searches). The dollar figure is omitted when `FeatureFlag::PricingTransparency`
-/// is disabled, matching [`format_tokens_and_cost`].
+/// Formats a count alongside its dollar cost, e.g. `"3 searches / $0.02"`, for
+/// breakdown rows whose unit isn't tokens.
 fn format_count_and_cost(count: u32, unit: &str, cost_in_cents: f32) -> String {
-    let count_text = format!("{count} {unit}");
-    if !FeatureFlag::PricingTransparency.is_enabled() {
-        return count_text;
-    }
-    format!("{count_text} / ${:.2}", cost_in_cents / 100.)
+    format!("{count} {unit} / {}", format_cents(cost_in_cents))
 }
 
-/// Formats a bare dollar cost, e.g. `"$0.36"`, for values with no
-/// associated token/count figure (currently the platform fee and the
-/// footer icon's hover tooltip). Shows an em dash when the cost is unknown
-/// or `FeatureFlag::PricingTransparency` is disabled.
+/// Formats a bare dollar cost, e.g. `"$0.36"`, or an em dash when unknown.
 pub(crate) fn format_cost_only(cost_in_cents: Option<f32>) -> String {
-    if !FeatureFlag::PricingTransparency.is_enabled() {
-        return "\u{2014}".to_string();
-    }
-    match cost_in_cents {
-        Some(cost) => format!("${:.2}", cost / 100.),
-        None => "\u{2014}".to_string(),
-    }
+    cost_in_cents
+        .map(format_cents)
+        .unwrap_or(EM_DASH.to_string())
+}
+
+fn format_cents(cost_in_cents: f32) -> String {
+    format!("${:.2}", cost_in_cents / 100.)
 }
 
 /// Renders a small rounded color swatch used to key a row to its bar

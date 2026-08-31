@@ -1,27 +1,13 @@
-//! Deterministic color assignment for the pricing-transparency usage popover
-//! (Surfaces 2, 6): per-model stacked-bar colors, plus the shared chart
-//! palette also used by the pill bar's per-agent color logic, so both
-//! "stacked bar" treatments in the popover share one palette.
+//! Chart colors for the usage popover's stacked bars and row swatches.
 //!
-//! Colors are taken directly from the Figma "Pricing transparency" file's
-//! chart palette (`191:367` / `408:23019`), rather than the app's ANSI
-//! palette, so the bars visually read as data-visualization chart segments
-//! rather than terminal-themed content.
-//!
-//! Note: the context-window breakdown (Surface 4) that originally lived in
-//! this popover has been split out into its own, separately-triggered
-//! surface, so this module no longer carries context-window-category color
-//! assignment. See git history for the prior `color_for_context_window_category`
-//! implementation if that surface needs it again.
-
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+//! Colors come from the Figma "Pricing transparency" chart palette
+//! (`191:367` / `408:23019`) rather than the app's ANSI palette, so the bars
+//! read as data-visualization segments rather than terminal-themed content.
 
 use pathfinder_color::ColorU;
 
-/// The six chart colors used across the popover's stacked bars, in the
-/// order sampled from Figma: magenta, blue, yellow, cyan/lavender, green,
-/// red.
+/// The six chart colors, in the order sampled from Figma: magenta, blue,
+/// yellow, cyan/lavender, green, red.
 ///
 /// A plain function (rather than a `const` array) because `ColorU::new` is
 /// not a `const fn`.
@@ -36,18 +22,15 @@ fn chart_palette() -> [ColorU; 6] {
     ]
 }
 
-/// Deterministic per-model color for the MODEL USAGE stacked bar and its
-/// row swatches (Surface 2, resolved decision 8). Hashing the model id
-/// keeps a given model's color stable across renders and popover reopens
-/// without needing to persist an assignment anywhere.
-pub fn color_for_model(model_id: &str) -> ColorU {
+/// Chart color for the row at `index` in a breakdown list, cycling once the
+/// palette is exhausted.
+///
+/// Assigning by position rather than by hashing the row's identity keeps the
+/// legend unambiguous: hashing into six buckets collides often enough that two
+/// rows in the same bar would frequently share a swatch. Callers must pass a
+/// stable index, which every breakdown list here already has since the rows are
+/// deterministically sorted before rendering.
+pub fn chart_color(index: usize) -> ColorU {
     let palette = chart_palette();
-    let mut hasher = DefaultHasher::new();
-    model_id.hash(&mut hasher);
-    let idx = (hasher.finish() as usize) % palette.len();
-    palette[idx]
+    palette[index % palette.len()]
 }
-
-#[cfg(test)]
-#[path = "colors_tests.rs"]
-mod tests;
