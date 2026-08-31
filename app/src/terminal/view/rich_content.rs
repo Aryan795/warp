@@ -234,8 +234,7 @@ pub enum RichContentMetadata {
         exchange_id: AIAgentExchangeId,
     },
     UsageFooter,
-    /// A docked, closeable "Turn" usage panel (Surface 3 of the
-    /// pricing-transparency usage surfaces). See `TurnUsageView`.
+    /// A docked, closeable "Turn" usage panel. See `TurnUsageView`.
     TurnPanel,
     InitStep {
         step_kind: InitStepKind,

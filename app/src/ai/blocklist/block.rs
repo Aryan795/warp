@@ -1080,8 +1080,7 @@ pub struct AIBlock {
     /// Whether the usage summary footer is expanded.
     is_usage_footer_expanded: bool,
 
-    /// Whether the turn-scoped "Turn" panel is expanded (Surface 3 of the
-    /// pricing-transparency usage surfaces). Independent of
+    /// Whether the turn-scoped "Turn" panel is expanded. Independent of
     /// `is_usage_footer_expanded` -- the two panels are separate surfaces
     /// with no cross-navigation between them.
     is_turn_panel_expanded: bool,
@@ -6176,8 +6175,7 @@ pub enum AIBlockEvent {
         is_expanded: bool,
     },
 
-    /// Emitted when we want to show or hide the turn-scoped "Turn" panel
-    /// (Surface 3 of the pricing-transparency usage surfaces).
+    /// Emitted when we want to show or hide the turn-scoped "Turn" panel.
     TurnPanelToggled {
         conversation_id: AIConversationId,
         /// The exchange this block renders, used to look up that specific
@@ -6423,8 +6421,12 @@ pub enum AIBlockAction {
     OpenFeedbackDocs,
     /// Toggle the usage summary footer expansion state
     ToggleIsUsageFooterExpanded,
-    /// Toggle the turn-scoped "Turn" panel expansion state (Surface 3)
+    /// Toggle the turn-scoped "Turn" panel expansion state.
     ToggleIsTurnPanelExpanded,
+    /// Explicitly set the turn-scoped "Turn" panel's expansion state, for
+    /// callers that mean "close" (or "open") rather than "toggle" and so
+    /// must not depend on the panel's current state.
+    SetIsTurnPanelExpanded(bool),
     CommentExpanded {
         id: CommentId,
     },
@@ -6697,6 +6699,14 @@ impl TypedActionView for AIBlock {
             }
             AIBlockAction::ToggleIsTurnPanelExpanded => {
                 self.is_turn_panel_expanded = !self.is_turn_panel_expanded;
+                ctx.emit(AIBlockEvent::TurnPanelToggled {
+                    conversation_id: self.client_ids.conversation_id,
+                    exchange_id: self.client_ids.client_exchange_id,
+                    is_expanded: self.is_turn_panel_expanded,
+                });
+            }
+            AIBlockAction::SetIsTurnPanelExpanded(is_expanded) => {
+                self.is_turn_panel_expanded = *is_expanded;
                 ctx.emit(AIBlockEvent::TurnPanelToggled {
                     conversation_id: self.client_ids.conversation_id,
                     exchange_id: self.client_ids.client_exchange_id,

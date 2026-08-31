@@ -3635,15 +3635,20 @@ fn render_response_footer(props: Props, app: &AppContext) -> Option<Box<dyn Elem
         flex.add_child(fork_button);
     }
 
-    // The turn-scoped usage panel (Surface 3 of the pricing-transparency work) is gated
-    // behind `PricingTransparency`. When it's enabled and there's turn-scoped data to show,
-    // its pie-chart trigger icon replaces the legacy credit-count button rather than sitting
-    // alongside it.
+    // The turn-scoped usage panel is gated behind `PricingTransparency`. When it's enabled
+    // and there's an archived turn-usage snapshot for *this block's own exchange* (not just
+    // the conversation's current turn), its pie-chart trigger icon replaces the legacy
+    // credit-count button rather than sitting alongside it.
     let turn_panel_trigger_visible = FeatureFlag::PricingTransparency.is_enabled()
         && props
             .model
-            .conversation(app)
-            .is_some_and(|conversation| conversation.tool_calls_for_last_block().is_some());
+            .exchange_id(app)
+            .zip(props.model.conversation(app))
+            .is_some_and(|(exchange_id, conversation)| {
+                conversation
+                    .turn_usage_snapshot_for_exchange(exchange_id)
+                    .is_some()
+            });
     if turn_panel_trigger_visible {
         flex.add_child(render_turn_panel_button(props, app));
     } else {
@@ -3857,28 +3862,29 @@ fn render_usage_button(props: Props, app: &AppContext) -> Box<dyn Element> {
 }
 
 /// Renders the per-turn icon that, on click, opens/closes the docked "Turn"
-/// panel (Surface 3 of the pricing-transparency usage surfaces). Per the
-/// resolved spec decision, this uses the same hover-tooltip/click-to-open
-/// pattern as the usage button above, but is otherwise an independent
-/// trigger with no cross-navigation to the usage footer / "Conversation"
-/// popover.
+/// panel. Uses the same hover-tooltip/click-to-open pattern as the usage
+/// button above, but is otherwise an independent trigger with no
+/// cross-navigation to the usage footer / "Conversation" popover.
 fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> {
     let Some(conversation) = props.model.conversation(app) else {
         return Empty::new().finish();
     };
-
-    // Only show the trigger once turn-scoped data actually exists (i.e. at
-    // least one block has completed since a user query kicked it off).
-    if conversation.tool_calls_for_last_block().is_none() {
+    // Visibility is already gated on this block's own exchange having turn
+    // data (see `turn_panel_trigger_visible`), so this only needs to fetch
+    // that same data for the tooltip.
+    let Some(exchange_id) = props.model.exchange_id(app) else {
         return Empty::new().finish();
-    }
+    };
+    let Some(turn_usage) = conversation.turn_usage_for_exchange(exchange_id) else {
+        return Empty::new().finish();
+    };
 
     let appearance = Appearance::as_ref(app);
     let ui_builder = appearance.ui_builder().clone();
     // Sum turn-scoped per-model cost for the tooltip, so it reads as the
     // same total the panel's per-model rows add up to.
-    let turn_cost_in_cents: f32 = conversation
-        .per_model_usage_for_last_block()
+    let turn_cost_in_cents: f32 = turn_usage
+        .per_model
         .iter()
         .map(|(_, model_usage)| model_usage.cost_in_cents())
         .sum();
@@ -3892,7 +3898,8 @@ fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> 
     // tooltip is meant to be a quick dollars/credits readout, not a full
     // usage summary.
     let usage_display_unit = AISettings::as_ref(app).usage_display_unit;
-    let credits_spent_for_last_block = conversation.credits_spent_for_last_block().unwrap_or(0.0);
+    let credits_spent_for_last_block = turn_usage.inference_credits_spent.unwrap_or(0.0)
+        + turn_usage.platform_credits_spent.unwrap_or(0.0);
     let tooltip_text = format!(
         "Turn: {}",
         format_usage(

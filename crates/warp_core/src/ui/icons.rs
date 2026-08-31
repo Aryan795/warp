@@ -267,8 +267,6 @@ pub enum Icon {
     FileCopy,
     Credits,
     CreditCard,
-    /// Small pie/donut-style usage indicator, matching the Figma design for
-    /// the per-turn usage panel trigger.
     TurnUsagePie,
     AddressedComment,
     ClockSnooze,

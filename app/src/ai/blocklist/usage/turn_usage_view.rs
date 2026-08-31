@@ -1,22 +1,18 @@
-//! The docked, closeable "Turn" panel (Surface 3 of the pricing-transparency
-//! usage surfaces). Unlike [`super::conversation_usage_view::ConversationUsageView`]
-//! (which shows conversation-cumulative totals, optionally alongside a
-//! "last response" annotation), the tool-call/diff/command/token/cost
-//! values in this view are scoped to a single agent turn ("block") -- see
-//! the turn-scoped getters on `AIConversation` (e.g.
-//! `tool_calls_for_last_block`). `context_window_usage` is the one
-//! exception: it is inherently conversation-level, captured here as the
-//! conversation's cumulative value as of that turn (see
-//! [`TurnUsageInfo::context_window_usage`]).
+//! The docked, closeable "Turn" panel. Unlike
+//! [`super::conversation_usage_view::ConversationUsageView`] (which shows
+//! conversation-cumulative totals, optionally alongside a "last response"
+//! annotation), the tool-call/diff/command/token/cost values in this view
+//! are scoped to a single agent turn ("block") -- see
+//! `AIConversation::current_turn_usage`/`turn_usage_snapshot_for_exchange`.
+//! `context_window_usage` is the one exception: it is inherently
+//! conversation-level, captured here as the conversation's cumulative value
+//! as of that turn (see [`TurnUsageInfo::context_window_usage`]).
 //!
-//! Per resolved user feedback on the per-turn-usage-panel spec, this panel:
-//! * is triggered independently from (and has no cross-navigation link to)
-//!   the "Conversation" popover (Surface 2);
-//! * has no per-section collapse/expand affordance -- all sections (INFERENCE
-//!   USAGE / TOOL CALL SUMMARY / RESPONSE TIME) are always fully expanded;
-//! * aligns the value column across all sections, not just within each
-//!   section;
-//! * is dismissed via a standard "X" close button in the header.
+//! This panel is triggered independently from (and has no cross-navigation
+//! link to) the "Conversation" popover; has no per-section collapse/expand
+//! affordance (all sections are always fully expanded); aligns the value
+//! column across all sections, not just within each section; and is
+//! dismissed via a standard "X" close button in the header.
 
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
@@ -103,8 +99,7 @@ pub struct TurnUsageInfo {
     /// this turn. Context window usage is inherently conversation-level --
     /// it cannot be scoped to a single turn -- so this is a point-in-time
     /// value (the conversation's running total as of this turn) rather than
-    /// a per-turn delta, per the spec, which explicitly calls out this
-    /// scope mixing as deliberate.
+    /// a per-turn delta.
     pub context_window_usage: f32,
     /// Platform usage charged (in US cents) over this turn, rendered as its
     /// own "PLATFORM USAGE" section. `None` when no request with charge
@@ -422,10 +417,9 @@ impl TurnUsageView {
     /// The "INFERENCE USAGE" section header, with the turn's total tokens
     /// (and cost, when known) in the value column instead of an empty
     /// placeholder, so the total lines up with the other numeric amounts in
-    /// the value column. The cost is omitted if no model reports one (e.g.
-    /// the synthetic "auto" placeholder row used when no model has been
-    /// used yet), matching how per-model rows omit an unknown cost rather
-    /// than showing `$0.00`.
+    /// the value column. The cost is omitted when no model reports one,
+    /// matching how per-model rows omit an unknown cost rather than
+    /// showing `$0.00`.
     fn inference_usage_header_row(&self, appearance: &Appearance) -> LabelValueRow {
         let header_font_size = appearance.overline_font_size() + 3.;
         let total_tokens: u64 = self.usage_info.models.iter().map(|m| m.tokens()).sum();
@@ -647,17 +641,12 @@ impl TurnUsageView {
     /// `values`). Extracted from `render()` so tests can verify row-by-row
     /// alignment without needing a full GUI layout pass.
     ///
-    /// Section headers occupy the label column with a *value-column
-    /// companion* built via the same [`Self::render_section_header`]
-    /// helper (passed an empty label) rather than an `Empty` placeholder.
-    /// This matters because `Empty`'s layout height resolves to zero while
-    /// the header `Text`'s height reflects real font metrics -- pairing
-    /// `Empty` opposite a real header would shift every later row in the
-    /// value column up relative to its label, compounding once per section
-    /// header. Using the same `Text`-producing helper for both columns
-    /// guarantees identical heights regardless of content, matching
-    /// `ConversationUsageView::render_section_header`'s established
-    /// pattern of pairing a real (if empty) header `Text` in both columns.
+    /// Section headers pair with a value-column companion built via the
+    /// same [`Self::render_section_header`] helper (passed an empty label)
+    /// rather than an `Empty` placeholder, since `Empty` has zero layout
+    /// height and would shift every later value row out of alignment with
+    /// its label -- matching `ConversationUsageView::render_section_header`'s
+    /// existing pattern.
     fn build_label_value_columns(
         &self,
         appearance: &Appearance,

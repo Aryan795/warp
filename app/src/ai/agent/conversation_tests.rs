@@ -1371,6 +1371,7 @@ fn test_exchange(model_id: &str) -> AIAgentExchange {
 /// completed turns.
 #[test]
 fn turn_usage_snapshot_for_exchange_preserves_historical_turn_data() {
+    let _flag = FeatureFlag::PricingTransparency.override_enabled(true);
     App::test((), |mut app| async move {
         initialize_custom_endpoint_usage_test_app(&mut app);
         app.add_singleton_model(LLMPreferences::new);

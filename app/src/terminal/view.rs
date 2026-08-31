@@ -2732,9 +2732,8 @@ pub struct TerminalView {
     /// Cached view ids for usage footers keyed by the AI block view id that owns them.
     usage_footer_view_ids: HashMap<EntityId, EntityId>,
 
-    /// Cached view ids for turn-scoped "Turn" panels (Surface 3 of the
-    /// pricing-transparency usage surfaces), keyed by the AI block view id
-    /// that owns them. Mirrors `usage_footer_view_ids`.
+    /// Cached view ids for turn-scoped "Turn" panels, keyed by the AI block
+    /// view id that owns them. Mirrors `usage_footer_view_ids`.
     turn_panel_view_ids: HashMap<EntityId, EntityId>,
 
     // Whether the block onboarding view is active or not.
@@ -6207,7 +6206,10 @@ impl TerminalView {
                     for owner_id in &owner_block_ids {
                         if let Some(ai_block_handle) = self.ai_block_handle_by_view_id(*owner_id) {
                             ai_block_handle.update(ctx, |block, ctx| {
-                                block.handle_action(&AIBlockAction::ToggleIsTurnPanelExpanded, ctx);
+                                block.handle_action(
+                                    &AIBlockAction::SetIsTurnPanelExpanded(false),
+                                    ctx,
+                                );
                             });
                         }
                     }
@@ -7081,12 +7083,11 @@ impl TerminalView {
         ctx.notify();
     }
 
-    /// Handle the opening and closing of the turn-scoped "Turn" panel
-    /// (Surface 3 of the pricing-transparency usage surfaces). Mirrors
-    /// `handle_usage_footer_toggled`, but is a fully independent surface: a
-    /// separate rich-content item, tracked in its own `turn_panel_view_ids`
-    /// map, with no cross-navigation to the usage footer / "Conversation"
-    /// popover.
+    /// Handle the opening and closing of the turn-scoped "Turn" panel.
+    /// Mirrors `handle_usage_footer_toggled`, but is a fully independent
+    /// surface: a separate rich-content item, tracked in its own
+    /// `turn_panel_view_ids` map, with no cross-navigation to the usage
+    /// footer / "Conversation" popover.
     fn handle_turn_panel_toggled(
         &mut self,
         source_ai_block_view_id: EntityId,
@@ -7118,48 +7119,24 @@ impl TerminalView {
 
         // Prefer the turn's own archived snapshot (see
         // `AIConversation::turn_usage_snapshot_for_exchange`) so a panel
-        // opened on an older response shows that response's own turn data,
-        // not whatever the conversation's current turn happens to be by the
-        // time the panel is opened. The `*_for_last_block` getters are only
-        // a fallback for conversations that predate the snapshot archive.
-        let snapshot = conversation.turn_usage_snapshot_for_exchange(exchange_id);
-        let (
-            tool_calls,
-            files_changed,
-            lines_added,
-            lines_removed,
-            commands_executed,
-            per_model_usage,
-            context_window_usage,
-            platform_usage_in_cents,
-        ) = match snapshot {
-            Some(snapshot) => (
-                snapshot.tool_calls,
-                snapshot.files_changed,
-                snapshot.lines_added,
-                snapshot.lines_removed,
-                snapshot.commands_executed,
-                snapshot.per_model.clone(),
-                snapshot.context_window_usage,
-                snapshot.platform_usage_in_cents,
-            ),
-            None => (
-                conversation.tool_calls_for_last_block().unwrap_or(0),
-                conversation.files_changed_for_last_block().unwrap_or(0),
-                conversation.lines_added_for_last_block().unwrap_or(0),
-                conversation.lines_removed_for_last_block().unwrap_or(0),
-                conversation.commands_executed_for_last_block().unwrap_or(0),
-                conversation.per_model_usage_for_last_block(),
-                conversation.context_window_usage(),
-                conversation.platform_usage_in_cents_for_last_block(),
-            ),
+        // opened on an older response shows that response's own turn data --
+        // including timing and credits -- not whatever the conversation's
+        // current turn happens to be by the time the panel is opened.
+        // Falling back to `current_turn_usage` only serves conversations
+        // that predate the snapshot archive.
+        let Some(turn_usage) = conversation.turn_usage_for_exchange(exchange_id) else {
+            report_error!("No turn usage available for turn panel");
+            return;
         };
 
         // Multiple models can be used within a single turn (e.g. if the
         // router switched models mid-turn), so this is a list of rows
         // rather than a single aggregate. Sorted by descending token usage
-        // (then model_id) for a stable, usage-ranked display order.
-        let mut models: Vec<TurnModelUsage> = per_model_usage
+        // (then model_id) for a stable, usage-ranked display order. Left
+        // empty when no model has recorded activity yet, rather than
+        // fabricating a placeholder row.
+        let mut models: Vec<TurnModelUsage> = turn_usage
+            .per_model
             .into_iter()
             .map(|(model_id, usage)| TurnModelUsage {
                 model_id,
@@ -7183,58 +7160,38 @@ impl TerminalView {
                 .cmp(&a.tokens())
                 .then_with(|| a.model_id.cmp(&b.model_id))
         });
-        if models.is_empty() {
-            models.push(TurnModelUsage {
-                model_id: "auto".to_string(),
-                total_input: 0,
-                output: 0,
-                input_cache_read: 0,
-                input_cache_write: 0,
-                cost_in_cents: None,
-                inference_breakdown: None,
-            });
-        }
 
         let turn_usage_info = TurnUsageInfo {
             models,
-            context_window_usage,
-            platform_usage_in_cents,
-            // Not part of the archived per-exchange snapshot (no per-model
-            // credits breakdown exists to snapshot), so these always read
-            // the conversation's current values rather than historical
-            // ones.
-            inference_credits_spent_for_last_block: conversation
-                .inference_credits_spent_for_last_block(),
-            platform_credits_spent_for_last_block: conversation
-                .platform_credits_spent_for_last_block(),
-            tool_calls,
-            files_changed,
-            lines_added,
-            lines_removed,
-            commands_executed,
+            context_window_usage: turn_usage.context_window_usage,
+            platform_usage_in_cents: turn_usage.platform_usage_in_cents,
+            inference_credits_spent_for_last_block: turn_usage.inference_credits_spent,
+            platform_credits_spent_for_last_block: turn_usage.platform_credits_spent,
+            tool_calls: turn_usage.tool_calls,
+            files_changed: turn_usage.files_changed,
+            lines_added: turn_usage.lines_added,
+            lines_removed: turn_usage.lines_removed,
+            commands_executed: turn_usage.commands_executed,
         };
 
         let timing_info = TimingInfo {
-            time_to_first_token_ms: conversation.time_to_first_token_for_last_user_query_ms(),
-            total_agent_response_time_ms: conversation
-                .total_agent_response_time_since_last_user_query_ms(),
-            wall_to_wall_response_time_ms: conversation
-                .wall_to_wall_response_time_since_last_query(),
+            time_to_first_token_ms: turn_usage.time_to_first_token_ms,
+            total_agent_response_time_ms: turn_usage.total_agent_response_time_ms,
+            wall_to_wall_response_time_ms: turn_usage.wall_to_wall_response_time_ms,
         };
 
         let turn_usage_view = ctx.add_typed_action_view(|ctx| {
             TurnUsageView::new(turn_usage_info, Some(timing_info), ctx)
         });
 
-        // Close the panel when the user clicks its "X" button, by toggling
-        // the same flag/action the trigger icon uses.
+        // Close the panel when the user clicks its "X" button.
         ctx.subscribe_to_view(&turn_usage_view, move |me, _, event, ctx| match event {
             TurnUsageViewEvent::CloseRequested => {
                 if let Some(ai_block_handle) =
                     me.ai_block_handle_by_view_id(source_ai_block_view_id)
                 {
                     ai_block_handle.update(ctx, |block, ctx| {
-                        block.handle_action(&AIBlockAction::ToggleIsTurnPanelExpanded, ctx);
+                        block.handle_action(&AIBlockAction::SetIsTurnPanelExpanded(false), ctx);
                     });
                 }
             }
@@ -15604,7 +15561,7 @@ impl TerminalView {
             }
             if self.turn_panel_view_ids.contains_key(view_id) {
                 handle.update(ctx, |block, ctx| {
-                    block.handle_action(&AIBlockAction::ToggleIsTurnPanelExpanded, ctx);
+                    block.handle_action(&AIBlockAction::SetIsTurnPanelExpanded(false), ctx);
                 });
             }
         }

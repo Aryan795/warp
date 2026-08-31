@@ -568,8 +568,6 @@ impl BlocklistAIController {
                     should_refresh_model_config: false,
                     #[allow(deprecated)]
                     request_cost: None,
-                    // Synthetic cancellation event: no per-request charge
-                    // breakdown is available (or needed) for this notification.
                     request_charges: None,
                 },
             )),
