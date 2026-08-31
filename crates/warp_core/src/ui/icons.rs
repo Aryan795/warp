@@ -170,8 +170,6 @@ pub enum Icon {
     User,
     Users,
     CoinsStacked,
-    /// Small pie/donut-style usage indicator, used for the agent input
-    /// footer's conversation-usage trigger.
     PieChart,
     Phone,
     Navigation,
