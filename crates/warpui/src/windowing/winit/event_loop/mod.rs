@@ -2,6 +2,8 @@ mod key_events;
 
 #[cfg(test)]
 mod drag_drop_tests;
+#[cfg(test)]
+mod focus_handoff_tests;
 
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
@@ -75,6 +77,21 @@ const MOMENTUM_THRESHOLD: f32 = 50.0; // Min-velocity to start momentum scroll, 
 const MOMENTUM_MIN_VELOCITY: f32 = 1.0; // When velocity falls below this, scrolling stops. 1.0 is subpixel
 const MOMENTUM_MAX_VELOCITY: f32 = 2000.0; // Hard cap on momentum initial velocity (px/s)
 const MIN_VELOCITY_TIME_DELTA: f32 = 0.004; // Floor for time deltas to prevent spikes from batched events
+
+/// Determines whether a canvas [`WindowEvent::Focused`] transition is an artifact of DOM focus
+/// moving to/from another in-page element (e.g. the desktop text-input bridge's `<textarea>`,
+/// see `platform::wasm::desktop_text_input`) rather than a genuine change in which browser
+/// tab/window holds focus.
+///
+/// `document_has_focus` should reflect `document.hasFocus()` at the moment the canvas focus
+/// event fired: it stays `true` throughout an in-page focus handoff (the browsing context itself
+/// never lost top-level focus), and only goes `false` on a real external blur (tab switch,
+/// alt-tab, etc). Only a canvas blur (`is_focused == false`) can ever be a false signal this way;
+/// the canvas regaining focus is always a genuine, idempotent-at-worst `Focused(true)`.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+fn is_internal_focus_handoff(is_focused: bool, document_has_focus: bool) -> bool {
+    !is_focused && document_has_focus
+}
 
 /// TryFrom implementation for converting winit's `KeyCode` to
 /// `crate::platform::keyboard::KeyCode`.
@@ -1340,6 +1357,19 @@ impl EventLoop {
                 // "unfocused windows" anyway - you're either in the app or switched away entirely.
                 #[cfg(target_family = "wasm")]
                 if !is_focused && crate::platform::wasm::is_mobile_device() {
+                    return None;
+                }
+
+                // On desktop WASM, focusing the desktop text-input bridge's `<textarea>` blurs
+                // the canvas (and vice versa when the canvas reclaims it), which this pinned
+                // winit web backend reports as this same `WindowEvent::Focused`. See
+                // `is_internal_focus_handoff` for why that must not be treated as the app
+                // becoming active/inactive.
+                #[cfg(target_family = "wasm")]
+                if is_internal_focus_handoff(
+                    is_focused,
+                    gloo::utils::document().has_focus().unwrap_or(false),
+                ) {
                     return None;
                 }
 

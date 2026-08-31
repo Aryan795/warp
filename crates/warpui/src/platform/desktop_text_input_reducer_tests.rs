@@ -197,7 +197,34 @@ fn extract_inserted_text_diffs_against_the_sentinel() {
         Some("hello".to_string())
     );
     assert_eq!(extract_inserted_text(SENTINEL, " "), None);
-    assert_eq!(extract_inserted_text(SENTINEL, "hello"), None);
+}
+
+#[test]
+fn extract_inserted_text_treats_a_full_replacement_without_the_sentinel_as_inserted_text() {
+    // A dictation tool (e.g. MacWhisper) that fully replaces `.value` - rather than appending
+    // after the sentinel - and dispatches a generic `input` event with no `InputEvent.data` must
+    // still be recognized as an insertion instead of being silently dropped. This is the primary
+    // scenario the desktop text-input bridge exists to support.
+    assert_eq!(
+        extract_inserted_text(SENTINEL, "transcription"),
+        Some("transcription".to_string())
+    );
+    // An empty replacement (nothing was actually inserted) still yields no insertion.
+    assert_eq!(extract_inserted_text(SENTINEL, ""), None);
+}
+
+#[test]
+fn generic_full_replacement_dictation_produces_exactly_one_insertion() {
+    // Mirrors the desktop bridge's `input` listener end-to-end at the reducer level: an
+    // unrecognized/absent `inputType` first classifies as a potential insert, then the fallback
+    // extracts the inserted text from the textarea's raw value when `InputEvent.data` is absent.
+    // Together these must resolve to exactly one inserted-text event (and therefore exactly one
+    // `TypedCharacters` dispatch), not zero.
+    assert_eq!(classify_input_type(""), InputClassification::Insert);
+    assert_eq!(
+        extract_inserted_text(SENTINEL, "transcription"),
+        Some("transcription".to_string())
+    );
 }
 
 #[test]
@@ -290,4 +317,26 @@ fn reset_cancels_an_in_progress_composition_and_clears_suppression() {
 fn reset_is_a_no_op_when_not_composing() {
     let mut tracker = CompositionTracker::default();
     assert_eq!(tracker.reset(), None);
+}
+
+#[test]
+fn a_stale_pending_commit_does_not_survive_a_later_cancelled_composition() {
+    // A regression test for a stale suppression outliving the commit that armed it: if a
+    // commit's own trailing `input` event never arrives (e.g. a browser quirk), and a later,
+    // distinct composition is then cancelled before producing any text, the earlier suppression
+    // must not still be sitting there waiting to swallow an unrelated `input` event.
+    let mut tracker = CompositionTracker::default();
+    tracker.on_composition_start();
+    let action = tracker.on_composition_end("a".to_string());
+    assert_eq!(action, CompositionAction::Commit("a".to_string()));
+    // The trailing `input` event for this commit never arrives.
+
+    tracker.on_composition_start();
+    let action = tracker.on_composition_end(String::new());
+    assert_eq!(action, CompositionAction::Cancel);
+
+    // A later, ordinary `input` event carrying the same text as the earlier commit must be
+    // treated as a real, separate insertion - not mistaken for that commit's already-passed
+    // (and never-arrived) trailing duplicate.
+    assert!(!tracker.should_ignore_input_event(false, Some("a")));
 }

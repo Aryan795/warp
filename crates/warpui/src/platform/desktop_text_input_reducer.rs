@@ -326,15 +326,18 @@ pub(crate) fn classify_input_type(input_type: &str) -> InputClassification {
     }
 }
 
-/// Given the bridge's sentinel prefix and the textarea's current value, extracts the text that a
+/// Given the bridge's sentinel prefix and the textarea's current value, extracts the text a
 /// direct DOM mutation (e.g. a tool that sets `.value` and fires a generic `input` event without
-/// `InputEvent.data`) inserted after the sentinel. Returns `None` if the value no longer starts
-/// with the sentinel, or if nothing was inserted.
+/// `InputEvent.data`) inserted. Handles two shapes of direct mutation:
+/// - The sentinel is still present as a prefix (the tool appended after it): the inserted text is
+///   whatever follows the sentinel.
+/// - The sentinel is gone entirely (the tool replaced `.value` wholesale, e.g. a dictation tool
+///   like MacWhisper assigning the full transcription): the entire value is the inserted text.
+///
+/// Returns `None` if nothing was actually inserted (the value is unchanged, or empty).
 pub(crate) fn extract_inserted_text(sentinel: &str, value: &str) -> Option<String> {
-    value
-        .strip_prefix(sentinel)
-        .filter(|inserted| !inserted.is_empty())
-        .map(str::to_string)
+    let inserted = value.strip_prefix(sentinel).unwrap_or(value);
+    (!inserted.is_empty()).then(|| inserted.to_string())
 }
 
 /// Builds the existing Warp key event for a deletion inferred from an `input` event, matching the
@@ -430,8 +433,14 @@ impl CompositionTracker {
 
     /// Call when `compositionend` fires. A non-empty commit arms suppression for the trailing
     /// `input` event that immediately follows it.
+    ///
+    /// Always clears any suppression left over from an earlier commit first: if that commit's
+    /// own trailing `input` event never arrived (a browser quirk, or a fast follow-on
+    /// composition), the earlier `pending_commit` would otherwise still be armed here and could
+    /// go on to swallow an unrelated, later `input` event that happens to carry the same text.
     pub(crate) fn on_composition_end(&mut self, data: String) -> CompositionAction {
         self.composing = false;
+        self.pending_commit = None;
         if data.is_empty() {
             CompositionAction::Cancel
         } else {

@@ -8872,7 +8872,13 @@ impl View for EditorView {
                 self.clear_selections(ctx);
             }
 
-            self.maybe_commit_incomplete_ime_text(ctx);
+            // Discard (never commit) an incomplete IME composition on blur: the surface losing
+            // focus is no longer the one the user is looking at, so treating its preedit as if
+            // it had been typed would silently insert text the user never confirmed. This is the
+            // only place that observes this view's own focus loss, so it must be the one to
+            // clear it - mirroring how `TerminalView::on_blur` clears its own raw-grid composing
+            // surface instead of committing it.
+            self.clear_marked_text(ctx);
             ctx.emit(Event::Blurred);
             ctx.notify();
         }

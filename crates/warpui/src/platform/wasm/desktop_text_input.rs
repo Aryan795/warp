@@ -425,9 +425,9 @@ impl DesktopTextInputManager {
     /// this runs, Warp's own focus has already moved to the new surface (this bridge's `sync()`
     /// only observes that change after the fact), so a dispatched event would be delivered to the
     /// new surface, not the one that was actually composing. Clearing the old surface's own
-    /// marked text is instead each editable view's own responsibility on `on_blur`, mirroring how
-    /// `EditorView` already commits incomplete marked text there; `TerminalView` does the same for
-    /// its raw-grid composing surface.
+    /// marked text is instead each editable view's own responsibility on `on_blur`: `EditorView`
+    /// and `TerminalView` both discard (never commit) their own incomplete marked text there,
+    /// since that's the only place that observes the old surface's own focus loss.
     fn handle_surface_change(&self) {
         self.composition.borrow_mut().reset();
         Self::reset_input_element(&self.element);
