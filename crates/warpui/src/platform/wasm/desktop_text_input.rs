@@ -81,7 +81,6 @@ impl From<CompositionAction> for DesktopTextInputEvent {
 /// [`super::soft_keyboard::SoftKeyboardManager`] instead (see [`super::is_mobile_device`]).
 pub struct DesktopTextInputManager {
     element: HtmlTextAreaElement,
-    proxy: EventLoopProxy<CustomEvent>,
     composition: Rc<RefCell<CompositionTracker>>,
     /// The view currently reporting the active caret. Lets [`Self::sync`] detect focus moving
     /// directly between two editable surfaces, since the bridge itself never loses DOM focus
@@ -146,7 +145,6 @@ impl DesktopTextInputManager {
 
         Ok(Rc::new(Self {
             element,
-            proxy,
             composition,
             active_surface: Cell::new(None),
             _listeners: listeners,
@@ -213,10 +211,11 @@ impl DesktopTextInputManager {
             listeners.push(EventListener::new(element, "input", move |event| {
                 let input_event = event.dyn_ref::<InputEvent>();
                 let is_composing_event = input_event.map(|e| e.is_composing()).unwrap_or(false);
+                let data = input_event.and_then(|e| e.data());
 
                 if composition
                     .borrow_mut()
-                    .should_ignore_input_event(is_composing_event)
+                    .should_ignore_input_event(is_composing_event, data.as_deref())
                 {
                     // Either mid-composition (composition events own the text) or the trailing
                     // `input` event a committing `compositionend` already accounted for.
@@ -224,7 +223,6 @@ impl DesktopTextInputManager {
                 }
 
                 let input_type = input_event.map(|e| e.input_type()).unwrap_or_default();
-                let data = input_event.and_then(|e| e.data());
 
                 let desktop_event = match reducer::classify_input_type(&input_type) {
                     reducer::InputClassification::Insert => data
@@ -419,15 +417,19 @@ impl DesktopTextInputManager {
         }
     }
 
-    /// Clears any marked text and resets the sentinel when the caret-owning surface changes, so
-    /// stale composition state or a pending sentinel diff from the old surface can't leak into a
-    /// newly focused one that also reports an active caret.
+    /// Resets the bridge's own composition state and sentinel when the caret-owning surface
+    /// changes, so a pending sentinel diff or composition bookkeeping from the old surface can't
+    /// leak into a newly focused one that also reports an active caret.
+    ///
+    /// Deliberately does *not* dispatch a `ClearMarkedText`/cancellation event here: by the time
+    /// this runs, Warp's own focus has already moved to the new surface (this bridge's `sync()`
+    /// only observes that change after the fact), so a dispatched event would be delivered to the
+    /// new surface, not the one that was actually composing. Clearing the old surface's own
+    /// marked text is instead each editable view's own responsibility on `on_blur`, mirroring how
+    /// `EditorView` already commits incomplete marked text there; `TerminalView` does the same for
+    /// its raw-grid composing surface.
     fn handle_surface_change(&self) {
-        if let Some(action) = self.composition.borrow_mut().reset() {
-            let _ = self
-                .proxy
-                .send_event(CustomEvent::DesktopTextInput(action.into()));
-        }
+        self.composition.borrow_mut().reset();
         Self::reset_input_element(&self.element);
     }
 

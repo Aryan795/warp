@@ -222,10 +222,37 @@ fn composition_commit_suppresses_exactly_the_trailing_input_event() {
 
     // The browser's matching post-`compositionend` `input` event must be dropped, not dispatched
     // as a second insertion of the same text.
-    assert!(tracker.should_ignore_input_event(false));
+    assert!(tracker.should_ignore_input_event(false, Some("こんにちは")));
 
     // Suppression is one-shot: a later, unrelated `input` event must not also be swallowed.
-    assert!(!tracker.should_ignore_input_event(false));
+    assert!(!tracker.should_ignore_input_event(false, Some("more")));
+}
+
+#[test]
+fn a_non_matching_input_event_after_a_commit_is_not_dropped() {
+    // A regression test for trading a double-insert for a dropped insert: if the trailing
+    // `input` event's data doesn't match what was just committed (a different browser ordering,
+    // or a distinct direct-input event arriving instead of the expected duplicate), it must be
+    // treated as a real, separate insertion rather than silently swallowed.
+    let mut tracker = CompositionTracker::default();
+    tracker.on_composition_start();
+    tracker.on_composition_end("hello".to_string());
+
+    assert!(!tracker.should_ignore_input_event(false, Some("world")));
+    // The pending suppression is one-shot and was already consumed above, so a subsequent event
+    // carrying the originally-committed text is no longer treated as the (already-passed)
+    // trailing duplicate either.
+    assert!(!tracker.should_ignore_input_event(false, Some("hello")));
+}
+
+#[test]
+fn an_input_event_with_no_data_after_a_commit_is_not_dropped() {
+    // A tool that mutates `.value` directly and fires a generic `input` event carries no
+    // `InputEvent.data`; it must not be mistaken for the trailing composition duplicate.
+    let mut tracker = CompositionTracker::default();
+    tracker.on_composition_start();
+    tracker.on_composition_end("hello".to_string());
+    assert!(!tracker.should_ignore_input_event(false, None));
 }
 
 #[test]
@@ -235,17 +262,17 @@ fn cancelled_composition_does_not_suppress_the_next_input_event() {
 
     let action = tracker.on_composition_end(String::new());
     assert_eq!(action, CompositionAction::Cancel);
-    assert!(!tracker.should_ignore_input_event(false));
+    assert!(!tracker.should_ignore_input_event(false, None));
 }
 
 #[test]
 fn input_events_are_ignored_while_composing() {
     let mut tracker = CompositionTracker::default();
     tracker.on_composition_start();
-    assert!(tracker.should_ignore_input_event(false));
+    assert!(tracker.should_ignore_input_event(false, None));
     // Also honors the DOM InputEvent's own isComposing flag, independent of tracked state.
     let mut idle_tracker = CompositionTracker::default();
-    assert!(idle_tracker.should_ignore_input_event(true));
+    assert!(idle_tracker.should_ignore_input_event(true, None));
 }
 
 #[test]
@@ -256,7 +283,7 @@ fn reset_cancels_an_in_progress_composition_and_clears_suppression() {
     assert!(!tracker.is_composing());
     // The old surface's composition is gone; a fresh input event on the new surface must not be
     // suppressed by state left over from the old one.
-    assert!(!tracker.should_ignore_input_event(false));
+    assert!(!tracker.should_ignore_input_event(false, None));
 }
 
 #[test]

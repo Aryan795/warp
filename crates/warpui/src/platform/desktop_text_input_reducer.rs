@@ -402,7 +402,13 @@ pub(crate) enum CompositionAction {
 #[derive(Debug, Default)]
 pub(crate) struct CompositionTracker {
     composing: bool,
-    suppress_next_input: bool,
+    /// The text committed by the most recent `compositionend`, while its matching trailing
+    /// `input` event is still expected. Consumed (one-shot) by `should_ignore_input_event`,
+    /// which only suppresses an `input` event whose data actually matches this text - so a
+    /// distinct `input` event that arrives instead (e.g. a fast follow-on keystroke, or a
+    /// browser that never fires the trailing duplicate) is processed normally instead of being
+    /// silently dropped.
+    pending_commit: Option<String>,
 }
 
 impl CompositionTracker {
@@ -429,17 +435,24 @@ impl CompositionTracker {
         if data.is_empty() {
             CompositionAction::Cancel
         } else {
-            self.suppress_next_input = true;
+            self.pending_commit = Some(data.clone());
             CompositionAction::Commit(data)
         }
     }
 
     /// Call for every `input` event, composing or not, before applying any other input handling.
-    /// Returns `true` if the caller must drop this event entirely: either it arrived mid-
-    /// composition (composition events own the text), or it is the trailing `input` event a
-    /// committing `compositionend` already accounted for.
-    pub(crate) fn should_ignore_input_event(&mut self, is_composing_event: bool) -> bool {
-        if std::mem::take(&mut self.suppress_next_input) {
+    /// `data` is the event's `InputEvent.data`, used to confirm a pending trailing duplicate
+    /// before dropping it. Returns `true` if the caller must drop this event entirely: either it
+    /// arrived mid-composition (composition events own the text), or its data matches the
+    /// trailing `input` event a committing `compositionend` already accounted for.
+    pub(crate) fn should_ignore_input_event(
+        &mut self,
+        is_composing_event: bool,
+        data: Option<&str>,
+    ) -> bool {
+        if let Some(expected) = self.pending_commit.take()
+            && data == Some(expected.as_str())
+        {
             return true;
         }
         self.composing || is_composing_event
@@ -449,7 +462,7 @@ impl CompositionTracker {
     /// old surface is abandoned (never committed into the new one) and stale suppression can't
     /// leak into unrelated input on the new surface. Returns the action to dispatch, if any.
     pub(crate) fn reset(&mut self) -> Option<CompositionAction> {
-        self.suppress_next_input = false;
+        self.pending_commit = None;
         std::mem::take(&mut self.composing).then_some(CompositionAction::Cancel)
     }
 }
