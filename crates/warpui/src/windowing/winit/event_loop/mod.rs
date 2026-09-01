@@ -1,6 +1,8 @@
 mod key_events;
 
 #[cfg(test)]
+mod click_count_tests;
+#[cfg(test)]
 mod drag_drop_tests;
 
 use std::collections::HashMap;
@@ -46,6 +48,14 @@ use crate::{AppContext, WindowId};
 /// This is the time duration beyond which clicks get treated as separate single clicks instead of
 /// double-click, triple-click, etc.
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+
+/// The maximum distance (in logical pixels) the cursor may have moved between clicks for them to
+/// still be treated as part of the same multi-click sequence. Without this, two quick clicks on
+/// different rows (e.g. different tabs) within [`MULTI_CLICK_INTERVAL`] would incorrectly be
+/// treated as a double-click on the second row. This mirrors the position-aware click count that
+/// macOS provides natively via `NSEvent.clickCount`, and is comparable to the default
+/// double-click distance thresholds used elsewhere (e.g. Windows' `SM_CXDOUBLECLK`/`SM_CYDOUBLECLK`).
+const MULTI_CLICK_DISTANCE: f32 = 5.0;
 
 /// The debounce timeout for drag-and-drop files. Multiple DroppedFile events
 /// are received within this time window and then combined into a single DragAndDropFiles event.
@@ -102,6 +112,10 @@ struct MouseButtonPressState {
     pressed_at: Instant,
     button_pressed: MouseButton,
     click_count: u32,
+    /// The cursor position (in logical pixels) at the time of this click. Used to ensure a
+    /// subsequent click is only counted as part of the same multi-click sequence if it lands
+    /// close enough to this position; see [`MULTI_CLICK_DISTANCE`].
+    position: Vector2F,
 }
 
 #[derive(Debug)]
@@ -199,18 +213,26 @@ impl WindowState {
 
     /// When a mouse button is pressed, save it to [`Self::current_mouse_button_pressed`] so that
     /// we can detect dragging. Also save it to [`Self::last_mouse_button_pressed`] for
-    /// double/triple-click. Returns the calculated click_count.
-    fn determine_click_count_and_update_button_state(&mut self, button: MouseButton) -> u32 {
+    /// double/triple-click. `position` is the logical-pixel cursor position of this click.
+    /// Returns the calculated click_count.
+    fn determine_click_count_and_update_button_state(
+        &mut self,
+        button: MouseButton,
+        position: Vector2F,
+    ) -> u32 {
         self.current_mouse_button_pressed = Some(button);
         let now = Instant::now();
-        // Increment the click_count if the button type is the same and the duration is faster than
-        // MULTI_CLICK_INTERVAL.
+        // Increment the click_count if the button type is the same, the duration is faster than
+        // MULTI_CLICK_INTERVAL, and the click landed close enough to the previous one. Without
+        // the position check, quick clicks on different rows (e.g. different tabs) would
+        // incorrectly be counted as a double-click.
         let click_count = self
             .last_mouse_button_pressed
             .take()
             .filter(|old_state| {
                 old_state.button_pressed == button
                     && now.duration_since(old_state.pressed_at) <= MULTI_CLICK_INTERVAL
+                    && (old_state.position - position).length() <= MULTI_CLICK_DISTANCE
             })
             .map(|old_state| old_state.click_count + 1)
             .unwrap_or(1);
@@ -218,6 +240,7 @@ impl WindowState {
             pressed_at: now,
             button_pressed: button,
             click_count,
+            position,
         };
         self.last_mouse_button_pressed = Some(new_state);
         click_count
@@ -287,7 +310,9 @@ fn convert_touch_started(
     window_state.cancel_momentum_scroll();
 
     window_state.last_cursor_position = touch.location.to_logical(scale_factor as f64);
-    let click_count = window_state.determine_click_count_and_update_button_state(MouseButton::Left);
+    let position = window_state.last_cursor_position.to_vec2f();
+    let click_count =
+        window_state.determine_click_count_and_update_button_state(MouseButton::Left, position);
     window_state.current_mouse_button_pressed = None;
 
     // Store click_count and start time for double-tap and long-press detection.
@@ -1183,8 +1208,9 @@ impl EventLoop {
             }
             WindowEvent::MouseInput { state, button, .. } => match state {
                 ElementState::Pressed => {
-                    let click_count =
-                        window_state.determine_click_count_and_update_button_state(button);
+                    let position = window_state.last_cursor_position.to_vec2f();
+                    let click_count = window_state
+                        .determine_click_count_and_update_button_state(button, position);
                     match button {
                         MouseButton::Left => {
                             // ctrl-click should actually be registered as a right-click on mac
