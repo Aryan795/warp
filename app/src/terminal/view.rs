@@ -6914,6 +6914,12 @@ impl TerminalView {
         conversation_id: &AIConversationId,
         ctx: &mut ViewContext<Self>,
     ) {
+        let can_resume = BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation(conversation_id)
+            .is_some_and(|conversation| conversation.status().is_manually_resumable());
+        if !can_resume {
+            return;
+        }
         // If `AgentView` is enabled, this button is only rendered when the agent view is already
         // active for the selected conversation, so this call is redundant.
         if !FeatureFlag::AgentView.is_enabled() {
@@ -28796,17 +28802,11 @@ impl View for TerminalView {
         } else {
             BlocklistAIHistoryModel::as_ref(app).active_conversation(self.id())
         };
-        // Set CanResumeConversation flag if the latest exchange (across all tasks,
-        // including subtasks) was manually cancelled or finished with an error.
-        if FeatureFlag::AIResumeButton.is_enabled() {
-            let latest_exchange = active_conversation.and_then(|c| c.latest_exchange());
-            let was_manually_cancelled = latest_exchange
-                .and_then(|e| e.output_status.cancel_reason())
-                .is_some_and(|reason| reason.is_manually_cancelled());
-            let has_error = active_conversation.is_some_and(|c| c.status().is_error());
-            if was_manually_cancelled || has_error {
-                context.set.insert(init::CAN_RESUME_CONVERSATION_KEY);
-            }
+        if FeatureFlag::AIResumeButton.is_enabled()
+            && active_conversation
+                .is_some_and(|conversation| conversation.status().is_manually_resumable())
+        {
+            context.set.insert(init::CAN_RESUME_CONVERSATION_KEY);
         }
         if active_conversation
             .as_ref()
