@@ -211,7 +211,7 @@ fn test_history_data_source_reflects_live_exit_status_update() {
         let mixer = app.add_model(|_| CommandSearchMixer::new());
         mixer.update(&mut app, |mixer, ctx| {
             mixer.add_async_source(
-                history_data_source_for_session(session_id),
+                history_data_source_for_session(session_id, None),
                 HashSet::from([QueryFilter::History]),
                 AddAsyncSourceOptions {
                     debounce_interval: None,

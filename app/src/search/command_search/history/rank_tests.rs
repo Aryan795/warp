@@ -252,7 +252,11 @@ fn cwd_prior_smooths_a_single_observation_toward_neutral() {
 fn cwd_affinity_smooths_toward_neutral_and_converges_with_evidence() {
     // Direct check of the Beta(K, K)-smoothed fraction itself, pinning down the exact values
     // the constants above produce (K = CWD_PRIOR_SMOOTHING_STRENGTH = 3.0).
-    assert_eq!(cwd_affinity(0, 0), 0.5, "no pwd data at all must be neutral");
+    assert_eq!(
+        cwd_affinity(0, 0),
+        0.5,
+        "no pwd data at all must be neutral"
+    );
     assert!(
         (cwd_affinity(1, 1) - 4.0 / 7.0).abs() < 1e-9,
         "a single matching observation should land close to, not at, neutral"
