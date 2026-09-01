@@ -1,12 +1,29 @@
 use std::collections::HashSet;
 use std::future::Future;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
+use regex::Regex;
+use strum::IntoEnumIterator;
 use uuid::Uuid;
 use warp_util::sync::Condition;
 
 use super::MCPProvider;
+
+static HOME_SUBDIR_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([^/]+)/[^/]+$").expect("Regex is valid"));
+
+/// Returns the subdirectory under the home directory that needs its own directory watcher,
+/// inferred from the provider's home config path. Matches paths that are exactly one directory
+/// deep (e.g. `.codex/config.toml` → `.codex`). Returns `None` when the config file lives
+/// directly in the home dir (e.g. `.claude.json`).
+pub(crate) fn home_subdir_to_watch(provider: MCPProvider) -> Option<PathBuf> {
+    let path_str = provider.home_config_path().to_str()?;
+    HOME_SUBDIR_REGEX
+        .captures(path_str)
+        .and_then(|caps| caps.get(1))
+        .map(|m| PathBuf::from(m.as_str()))
+}
 
 /// Late-subscriber-safe latch for the one-time initial global file-based MCP scan.
 ///
@@ -43,6 +60,7 @@ impl InitialGlobalMcpReadiness {
         self.complete.set();
     }
 
+    #[cfg(test)]
     pub fn result(&self) -> Option<Vec<Uuid>> {
         self.result
             .lock()
@@ -93,10 +111,6 @@ impl InitialGlobalScanCohort {
         }
     }
 
-    pub fn insert(&mut self, source: (PathBuf, MCPProvider)) {
-        self.pending.insert(source);
-    }
-
     pub fn contains(&self, source: &(PathBuf, MCPProvider)) -> bool {
         self.pending.contains(source)
     }
@@ -105,6 +119,7 @@ impl InitialGlobalScanCohort {
         self.pending.is_empty()
     }
 
+    #[cfg(test)]
     pub fn has_emitted(&self) -> bool {
         self.emitted
     }
@@ -125,37 +140,64 @@ impl InitialGlobalScanCohort {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn complete_is_idempotent_and_late_safe() {
-        let latch = InitialGlobalMcpReadiness::pending();
-        assert!(!latch.is_complete());
-        assert_eq!(latch.result(), None);
-
-        let first = vec![Uuid::nil()];
-        latch.complete(first.clone());
-        latch.complete(vec![Uuid::new_v4()]);
-
-        assert!(latch.is_complete());
-        assert_eq!(latch.result(), Some(first.clone()));
-        assert_eq!(
-            futures::executor::block_on(latch.wait()),
-            first,
-            "a waiter attached after completion must still see the frozen set"
-        );
-    }
-
-    #[test]
-    fn cohort_emits_once_when_the_last_source_settles() {
-        let source = (PathBuf::from("/tmp/.mcp.json"), MCPProvider::Warp);
-        let mut cohort = InitialGlobalScanCohort::from_pending(HashSet::from([source.clone()]));
-        assert!(!cohort.try_complete());
-        assert!(cohort.remove(&source));
-        assert!(cohort.try_complete());
-        assert!(cohort.has_emitted());
-        assert!(!cohort.try_complete());
-    }
+#[derive(Debug, Default)]
+pub(crate) struct InitialGlobalScanPlan {
+    pub pending: HashSet<(PathBuf, MCPProvider)>,
+    pub direct_parses: Vec<(PathBuf, PathBuf, MCPProvider)>,
+    pub watch_subdirs: Vec<(PathBuf, PathBuf)>,
 }
+
+/// Pure description of which global home-config sources the startup scan owes, and
+/// whether each should be read by a direct parse or by watching an existing subdir.
+///
+/// `subdir_is_present` is injected so tests can assert cohort membership without
+/// constructing a live watcher whose queued scans race with construction.
+pub(crate) fn plan_initial_global_scan(
+    home_dir: Option<PathBuf>,
+    warp_config: Option<(PathBuf, PathBuf)>,
+    subdir_is_present: impl Fn(&Path) -> bool,
+) -> InitialGlobalScanPlan {
+    let mut plan = InitialGlobalScanPlan::default();
+    if let Some((config_path, root_path)) = warp_config {
+        plan.pending
+            .insert((config_path.clone(), MCPProvider::Warp));
+        plan.direct_parses
+            .push((config_path, root_path, MCPProvider::Warp));
+    }
+    let Some(home_dir) = home_dir else {
+        return plan;
+    };
+    for provider in MCPProvider::iter() {
+        if provider == MCPProvider::Warp {
+            continue;
+        }
+        let config_path = home_dir.join(provider.home_config_path());
+        plan.pending.insert((config_path.clone(), provider));
+        match home_subdir_to_watch(provider) {
+            None => {
+                plan.direct_parses
+                    .push((config_path, home_dir.clone(), provider));
+            }
+            Some(subdir) => {
+                let subdir_path = home_dir.join(&subdir);
+                if subdir_is_present(&subdir_path) {
+                    if !plan
+                        .watch_subdirs
+                        .iter()
+                        .any(|(path, _)| path == &subdir_path)
+                    {
+                        plan.watch_subdirs.push((subdir_path, home_dir.clone()));
+                    }
+                } else {
+                    plan.direct_parses
+                        .push((config_path, home_dir.clone(), provider));
+                }
+            }
+        }
+    }
+    plan
+}
+
+#[cfg(test)]
+#[path = "initial_global_readiness_tests.rs"]
+mod tests;

@@ -66,16 +66,17 @@ pub(super) fn startup_result_from_outcomes(
 /// Subscribe, inspect current state, then wait until every server reaches a
 /// terminal state or `timeout` elapses.
 ///
-/// Must not run concurrently with another MCP wait: the driver keeps at most
-/// one subscription to [`TemplatableMCPServerManager`].
+/// Returns typed per-server outcomes. Strict vs degraded handling belongs to the
+/// caller. Must not run concurrently with another MCP wait: the driver keeps at
+/// most one subscription to [`TemplatableMCPServerManager`].
 pub(super) fn wait_for_mcp_servers_terminal(
     servers: HashMap<Uuid, String>,
     timeout: Duration,
     kind: McpWaitKind,
     ctx: &mut ModelContext<AgentDriver>,
-) -> impl Future<Output = Result<(), AgentDriverError>> + use<> {
+) -> impl Future<Output = Result<Vec<McpServerWaitOutcome>, AgentDriverError>> + use<> {
     if servers.is_empty() {
-        return Either::Right(future::ready(Ok(())));
+        return Either::Right(future::ready(Ok(Vec::new())));
     }
 
     let (tx, rx) = oneshot::channel::<()>();
@@ -157,13 +158,10 @@ pub(super) fn wait_for_mcp_servers_terminal(
         .unwrap_or(true)
     {
         ctx.unsubscribe_from_model(&templatable_mcp_manager);
-        return Either::Right(future::ready(startup_result_from_outcomes(
-            failed
-                .lock()
-                .map(|failed_servers| failed_servers.clone())
-                .unwrap_or_default(),
-            timeout,
-        )));
+        return Either::Right(future::ready(Ok(failed
+            .lock()
+            .map(|failed_servers| failed_servers.clone())
+            .unwrap_or_default())));
     }
 
     let log_label = match kind {
@@ -211,7 +209,7 @@ pub(super) fn wait_for_mcp_servers_terminal(
                 .into_iter()
                 .map(|detail| McpServerWaitOutcome::TimedOut { detail }),
         );
-        startup_result_from_outcomes(outcomes, timeout)
+        Ok(outcomes)
     })
 }
 
@@ -262,10 +260,10 @@ fn inspect_current_servers(
     }
 }
 
-fn file_based_manager(
+fn file_based_manager<'ctx>(
     kind: McpWaitKind,
-    ctx: &ModelContext<AgentDriver>,
-) -> Option<&FileBasedMCPManager> {
+    ctx: &'ctx ModelContext<'_, AgentDriver>,
+) -> Option<&'ctx FileBasedMCPManager> {
     (kind == McpWaitKind::FileBased).then(|| FileBasedMCPManager::as_ref(ctx))
 }
 
@@ -273,7 +271,7 @@ fn classify_state(
     uuid: Uuid,
     name: &str,
     state: Option<MCPServerState>,
-    error: Option<String>,
+    error: Option<&str>,
     kind: McpWaitKind,
     file_based: Option<&FileBasedMCPManager>,
 ) -> Option<McpServerWaitOutcome> {
@@ -285,7 +283,9 @@ fn classify_state(
     match state {
         Some(MCPServerState::Running) => Some(McpServerWaitOutcome::Ready),
         Some(MCPServerState::FailedToStart) => {
-            let error = error.map(|message| format!(": {message}")).unwrap_or_default();
+            let error = error
+                .map(|message| format!(": {message}"))
+                .unwrap_or_default();
             let detail = format!("'{name}' failed to start{error}");
             log::warn!("MCP server {detail}");
             Some(McpServerWaitOutcome::FailedToStart { detail })
@@ -306,7 +306,7 @@ fn record_pending_detail(
     uuid: Uuid,
     name: &str,
     state: Option<MCPServerState>,
-    error: Option<String>,
+    error: Option<&str>,
     kind: McpWaitKind,
 ) {
     if kind != McpWaitKind::FileBased {
@@ -328,7 +328,7 @@ fn timeout_details(
     pending_details: &Arc<Mutex<HashMap<Uuid, String>>>,
     kind: McpWaitKind,
 ) -> Vec<String> {
-    let mut details = match kind {
+    let mut details: Vec<String> = match kind {
         McpWaitKind::FileBased => pending_details
             .lock()
             .map(|details| details.values().cloned().collect())
@@ -345,4 +345,45 @@ fn timeout_details(
     };
     details.sort();
     details
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_result_ignores_ready_outcomes() {
+        let result = startup_result_from_outcomes(
+            [McpServerWaitOutcome::Ready, McpServerWaitOutcome::Ready],
+            Duration::from_secs(20),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn startup_result_collects_sorted_failure_details() {
+        let result = startup_result_from_outcomes(
+            [
+                McpServerWaitOutcome::TimedOut {
+                    detail: "beta (uuid): Starting".to_string(),
+                },
+                McpServerWaitOutcome::FailedToStart {
+                    detail: "'alpha' failed to start".to_string(),
+                },
+            ],
+            Duration::from_secs(20),
+        );
+        match result {
+            Err(AgentDriverError::MCPStartupFailed { details }) => {
+                assert_eq!(
+                    details,
+                    vec![
+                        "'alpha' failed to start".to_string(),
+                        "beta (uuid): Starting did not start within 20s".to_string(),
+                    ]
+                );
+            }
+            other => panic!("expected MCPStartupFailed, got {other:?}"),
+        }
+    }
 }

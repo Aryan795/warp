@@ -20,8 +20,11 @@ use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
 use watcher::HomeDirectoryWatcherEvent;
 
 use crate::HomeDirectoryWatcher;
+use crate::ai::mcp::initial_global_readiness::plan_initial_global_scan;
+pub(crate) use crate::ai::mcp::initial_global_readiness::{
+    InitialGlobalScanCohort, home_subdir_to_watch,
+};
 use crate::ai::mcp::parsing::normalize_codex_toml_to_json;
-pub(crate) use crate::ai::mcp::initial_global_readiness::InitialGlobalScanCohort;
 use crate::ai::mcp::{MCPProvider, ParsedTemplatableMCPServerResult, home_config_file_path};
 use crate::warp_managed_paths_watcher::{
     WarpManagedPathsWatcher, WarpManagedPathsWatcherEvent, warp_managed_mcp_config_path,
@@ -29,24 +32,6 @@ use crate::warp_managed_paths_watcher::{
 
 static ENV_VAR_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{([^}]+)\}").expect("Regex is valid"));
-
-/// Matches home config paths that are exactly one directory deep (e.g. `.codex/config.toml`,
-/// `.warp/.mcp.json`), capturing the parent directory component.
-static HOME_SUBDIR_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^([^/]+)/[^/]+$").expect("Regex is valid"));
-
-/// Returns the subdirectory under the home directory that needs its own [`DirectoryWatcher`],
-/// inferred from the provider's home config path. Matches paths that are exactly one directory
-/// deep (e.g. `.codex/config.toml` → `.codex`, `.warp/.mcp.json` → `.warp`). Returns `None`
-/// when the config file lives directly in the home dir (e.g. `.claude.json`) and is already
-/// covered by `HomeDirectoryWatcher`.
-fn home_subdir_to_watch(provider: MCPProvider) -> Option<PathBuf> {
-    let path_str = provider.home_config_path().to_str()?;
-    HOME_SUBDIR_REGEX
-        .captures(path_str)
-        .and_then(|caps| caps.get(1))
-        .map(|m| PathBuf::from(m.as_str()))
-}
 
 /// Messages sent from `RepositorySubscriber`s to detect file-based MCPs.
 enum FileMCPDetectionMessage {
@@ -212,11 +197,14 @@ impl FileMCPWatcher {
                 ctx,
             );
             if !watching_started {
-                initial_config_parses.extend(plan.pending.iter().filter_map(|(config_path, provider)| {
-                    config_path
-                        .starts_with(&subdir_path)
-                        .then(|| (config_path.clone(), home_dir.clone(), *provider))
-                }));
+                initial_config_parses.extend(
+                    plan.pending
+                        .iter()
+                        .filter(|(config_path, _)| config_path.starts_with(&subdir_path))
+                        .map(|(config_path, provider)| {
+                            (config_path.clone(), home_dir.clone(), *provider)
+                        }),
+                );
             }
         }
 
@@ -446,8 +434,7 @@ impl FileMCPWatcher {
             providers_in_scope(home_dir.clone(), subdir_path.to_path_buf())
         {
             let key = (config_path.clone(), provider);
-            if self.initial_global_scan.contains(&key)
-                && !self.in_flight_parses.contains_key(&key)
+            if self.initial_global_scan.contains(&key) && !self.in_flight_parses.contains_key(&key)
             {
                 self.update_servers_from_config_file(&config_path, home_dir.clone(), provider, ctx);
             }
@@ -754,65 +741,6 @@ impl FileMCPWatcher {
     }
 }
 
-#[derive(Debug, Default)]
-struct InitialGlobalScanPlan {
-    pending: HashSet<(PathBuf, MCPProvider)>,
-    direct_parses: Vec<(PathBuf, PathBuf, MCPProvider)>,
-    watch_subdirs: Vec<(PathBuf, PathBuf)>,
-}
-
-/// Pure description of which global home-config sources the startup scan owes, and
-/// whether each should be read by a direct parse or by watching an existing subdir.
-///
-/// `subdir_is_present` is injected so tests can assert cohort membership without
-/// constructing a live [`FileMCPWatcher`] (whose queued scans race with construction).
-fn plan_initial_global_scan(
-    home_dir: Option<PathBuf>,
-    warp_config: Option<(PathBuf, PathBuf)>,
-    subdir_is_present: impl Fn(&Path) -> bool,
-) -> InitialGlobalScanPlan {
-    let mut plan = InitialGlobalScanPlan::default();
-    if let Some((config_path, root_path)) = warp_config {
-        plan.pending
-            .insert((config_path.clone(), MCPProvider::Warp));
-        plan.direct_parses
-            .push((config_path, root_path, MCPProvider::Warp));
-    }
-    let Some(home_dir) = home_dir else {
-        return plan;
-    };
-    for provider in MCPProvider::iter() {
-        if provider == MCPProvider::Warp {
-            continue;
-        }
-        let config_path = home_dir.join(provider.home_config_path());
-        plan.pending.insert((config_path.clone(), provider));
-        match home_subdir_to_watch(provider) {
-            None => {
-                plan.direct_parses
-                    .push((config_path, home_dir.clone(), provider));
-            }
-            Some(subdir) => {
-                let subdir_path = home_dir.join(&subdir);
-                if subdir_is_present(&subdir_path) {
-                    if !plan
-                        .watch_subdirs
-                        .iter()
-                        .any(|(path, _)| path == &subdir_path)
-                    {
-                        plan.watch_subdirs
-                            .push((subdir_path, home_dir.clone()));
-                    }
-                } else {
-                    plan.direct_parses
-                        .push((config_path, home_dir.clone(), provider));
-                }
-            }
-        }
-    }
-    plan
-}
-
 fn should_watch_repository(
     source: RepoDetectionSource,
     settings_mode: settings::SettingsMode,
@@ -1075,3 +1003,7 @@ impl SingletonEntity for FileMCPWatcher {}
 #[cfg(test)]
 #[path = "file_mcp_watcher_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "file_mcp_watcher_initial_global_tests.rs"]
+mod initial_global_tests;

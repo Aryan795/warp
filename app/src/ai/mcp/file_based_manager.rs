@@ -161,6 +161,7 @@ impl FileBasedMCPManager {
 
     /// Returns the frozen initial-global-scan wait set once the scan has completed, or `None`
     /// while it is still pending.
+    #[cfg(test)]
     pub fn initial_global_scan_result(&self) -> Option<Vec<Uuid>> {
         self.initial_global_readiness.result()
     }
@@ -818,6 +819,7 @@ pub enum FileBasedMCPManagerEvent {
     /// The one-time initial global home-config scan settled. Fires exactly once, as soon as
     /// the scan finishes, which can be well before any particular subscriber attaches.
     InitialGlobalMcpScanComplete {
+        #[allow(dead_code)]
         wait_server_uuids: Vec<Uuid>,
     },
 }
@@ -831,3 +833,7 @@ impl SingletonEntity for FileBasedMCPManager {}
 #[cfg(test)]
 #[path = "file_based_manager_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "file_based_manager_initial_global_tests.rs"]
+mod initial_global_tests;

@@ -80,10 +80,9 @@ use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::llms::{LLMId, LLMPreferences};
 use crate::ai::mcp::file_based_manager::{FileBasedMCPManager, FileBasedMCPManagerEvent};
 use crate::ai::mcp::parsing::{ParsedTemplatableMCPServerResult, normalize_mcp_json, resolve_json};
-use crate::ai::mcp::templatable_manager::TemplatableMCPServerManagerEvent;
 use crate::ai::mcp::{
-    JSONMCPServer, MCPServerState, TemplatableMCPServerInstallation, TemplatableMCPServerManager,
-    VariableType, VariableValue, builtin,
+    JSONMCPServer, TemplatableMCPServerInstallation, TemplatableMCPServerManager, VariableType,
+    VariableValue, builtin,
 };
 use crate::ai::skills::{
     SkillManager, SkillWatcher, filter_skills_by_spec, read_skills_from_directories,
@@ -921,7 +920,6 @@ impl From<PrepareEnvironmentError> for AgentDriverError {
         }
     }
 }
-
 
 impl AgentDriver {
     #[tracing::instrument(name = "AgentDriver::new", skip_all, err, fields(
@@ -1983,12 +1981,14 @@ impl AgentDriver {
         servers: HashMap<Uuid, String>,
         ctx: &mut ModelContext<Self>,
     ) -> impl Future<Output = Result<(), AgentDriverError>> + use<> {
-        mcp_wait::wait_for_mcp_servers_terminal(
+        let timeout = self.mcp_startup_timeout;
+        let wait = mcp_wait::wait_for_mcp_servers_terminal(
             servers,
-            self.mcp_startup_timeout,
+            timeout,
             mcp_wait::McpWaitKind::Spawned,
             ctx,
-        )
+        );
+        async move { mcp_wait::startup_result_from_outcomes(wait.await?, timeout) }
     }
 
     /// Fold an MCP startup result into `degraded`, propagating any error that
@@ -2238,12 +2238,13 @@ impl AgentDriver {
                 })
                 .collect()
         };
-        mcp_wait::wait_for_mcp_servers_terminal(
+        let wait = mcp_wait::wait_for_mcp_servers_terminal(
             named_servers,
             timeout,
             mcp_wait::McpWaitKind::FileBased,
             ctx,
-        )
+        );
+        async move { mcp_wait::startup_result_from_outcomes(wait.await?, timeout) }
     }
 
     /// Await the one-time initial global home-config MCP scan, returning the UUIDs of
@@ -2276,6 +2277,46 @@ impl AgentDriver {
                 }
             }
         }
+    }
+
+    /// Wait for the initial global file-based MCP scan and for each auto-started
+    /// server to reach a terminal state, applying strict/degraded policy.
+    async fn await_initial_global_file_based_mcp(
+        foreground: &ModelSpawner<Self>,
+        setup_events: &SetupClientEventReporter,
+    ) -> Result<(), AgentDriverError> {
+        let mcp_startup_timeout = foreground.spawn(|me, _| me.mcp_startup_timeout).await?;
+        let deadline = Instant::now() + mcp_startup_timeout;
+        let scan_wait = foreground
+            .spawn(move |me, ctx| me.wait_for_initial_global_file_based_mcp_scan(deadline, ctx))
+            .await?;
+        let scan_result = setup_events
+            .record_result(SetupStep::InitialGlobalMcpScan, scan_wait)
+            .await;
+        let wait_uuids = match &scan_result {
+            Ok(uuids) => uuids.clone(),
+            Err(_) => Vec::new(),
+        };
+        Self::handle_mcp_startup_result(scan_result.map(|_| ()), foreground).await?;
+        if wait_uuids.is_empty() {
+            return Ok(());
+        }
+        log::info!(
+            "Checking readiness for {} initial global file-based MCP server(s)",
+            wait_uuids.len()
+        );
+        let readiness = setup_events
+            .record_result(SetupStep::InitialGlobalMcpReadiness, async {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                foreground
+                    .spawn(move |me, ctx| {
+                        me.wait_for_file_based_mcps_running(wait_uuids, remaining, ctx)
+                    })
+                    .await?
+                    .await
+            })
+            .await;
+        Self::handle_mcp_startup_result(readiness, foreground).await
     }
 
     /// Resolve global skill specs and the GitHub repositories that should be cloned for them.
@@ -3034,51 +3075,7 @@ impl AgentDriver {
         // they are dropped automatically when the harness result resolves.
         match task.harness {
             HarnessKind::Oz => {
-                // First-turn barrier for auto-started global file-based MCP servers. The scan
-                // starts during application init, so it often finishes before this join; a
-                // late driver still observes the latched result. Shared deadline keeps scan
-                // plus readiness inside one MCP startup timeout.
-                let mcp_startup_timeout = foreground.spawn(|me, _| me.mcp_startup_timeout).await?;
-                let initial_global_mcp_deadline = Instant::now() + mcp_startup_timeout;
-                let initial_global_scan_wait = foreground
-                    .spawn(move |me, ctx| {
-                        me.wait_for_initial_global_file_based_mcp_scan(
-                            initial_global_mcp_deadline,
-                            ctx,
-                        )
-                    })
-                    .await?;
-                let scan_result = setup_events
-                    .record_result(SetupStep::InitialGlobalMcpScan, initial_global_scan_wait)
-                    .await;
-                let initial_global_wait_uuids = match &scan_result {
-                    Ok(uuids) => uuids.clone(),
-                    Err(_) => Vec::new(),
-                };
-                Self::handle_mcp_startup_result(scan_result.map(|_| ()), &foreground).await?;
-                if !initial_global_wait_uuids.is_empty() {
-                    log::info!(
-                        "Checking readiness for {} initial global file-based MCP server(s)",
-                        initial_global_wait_uuids.len()
-                    );
-                    let initial_global_readiness = setup_events
-                        .record_result(SetupStep::InitialGlobalMcpReadiness, async {
-                            let remaining_readiness_timeout = initial_global_mcp_deadline
-                                .saturating_duration_since(Instant::now());
-                            foreground
-                                .spawn(move |me, ctx| {
-                                    me.wait_for_file_based_mcps_running(
-                                        initial_global_wait_uuids,
-                                        remaining_readiness_timeout,
-                                        ctx,
-                                    )
-                                })
-                                .await?
-                                .await
-                        })
-                        .await;
-                    Self::handle_mcp_startup_result(initial_global_readiness, &foreground).await?;
-                }
+                Self::await_initial_global_file_based_mcp(&foreground, &setup_events).await?;
 
                 let status_rx = foreground
                     .spawn(move |me, ctx| me.execute_run(task.prompt, ctx))
@@ -4932,3 +4929,7 @@ fn write_session_joined(join_url: &str, output_format: OutputFormat) {
 #[cfg(test)]
 #[path = "driver_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "driver_initial_global_mcp_tests.rs"]
+mod initial_global_mcp_tests;
