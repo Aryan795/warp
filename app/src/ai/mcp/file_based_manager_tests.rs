@@ -1043,6 +1043,50 @@ fn initial_global_scan_keeps_auto_started_uuid_across_reparse_before_completion(
     });
 }
 
+#[test]
+fn initial_global_scan_includes_servers_enabled_before_completion() {
+    let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
+    let Some(home_dir) = dirs::home_dir() else {
+        return;
+    };
+    let json = r#"{"global-claude": {"command": "npx", "args": ["claude"]}}"#;
+
+    App::test((), |mut app| async move {
+        let manager = setup_app(&mut app);
+        set_file_based_mcp_enabled(&mut app, false);
+        manager.update(&mut app, |m, ctx| {
+            m.handle_watcher_event(
+                &FileMCPWatcherEvent::ConfigParsed {
+                    config_path: home_dir.join(".claude.json"),
+                    root_path: home_dir.clone(),
+                    provider: MCPProvider::Claude,
+                    servers: parse_mcp_json(json),
+                },
+                ctx,
+            );
+        });
+        let spawned_uuid = manager.update(&mut app, |m, _| {
+            assert_eq!(m.initial_global_scan_result(), None);
+            m.file_based_servers()
+                .into_iter()
+                .map(|s| s.uuid())
+                .next()
+                .expect("the global third-party server should be tracked")
+        });
+        set_file_based_mcp_enabled(&mut app, true);
+        manager.update(&mut app, |m, ctx| {
+            m.handle_watcher_event(&FileMCPWatcherEvent::InitialGlobalMcpScanComplete, ctx);
+        });
+        manager.update(&mut app, |m, _| {
+            assert_eq!(
+                m.initial_global_scan_result(),
+                Some(vec![spawned_uuid]),
+                "enabling file-based MCP during the pending scan must include the spawned server"
+            );
+        });
+    });
+}
+
 /// A consumer that queries `initial_global_scan_result` after the scan has already completed
 /// must receive the cached snapshot immediately — this is what lets `AgentDriver` avoid missing
 /// the transient completion event when it subscribes well after application startup.

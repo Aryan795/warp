@@ -323,13 +323,8 @@ impl FileBasedMCPManager {
             .entry(root_path.clone())
             .or_default()
             .insert(provider, auto_started_uuids.iter().copied().collect());
-        if matches!(
-            self.initial_global_scan_state,
-            InitialGlobalMcpScanState::Pending,
-        ) && Self::scope_for_source(&root_path, provider) == FileBasedMCPServerScope::Global
-        {
-            self.initial_global_auto_started_uuids
-                .extend(auto_started_uuids.iter().copied());
+        if Self::scope_for_source(&root_path, provider) == FileBasedMCPServerScope::Global {
+            self.record_pending_initial_global_auto_starts(auto_started_uuids.iter().copied());
         }
 
         // Determine which servers have been removed.
@@ -590,9 +585,21 @@ impl FileBasedMCPManager {
         } else {
             // Toggle on: spawn global third-party servers (global Warp servers are
             // already running; project-scoped servers are unaffected).
+            self.record_pending_initial_global_auto_starts(
+                global_third_party_servers.iter().map(|s| s.uuid()),
+            );
             ctx.emit(FileBasedMCPManagerEvent::SpawnServers {
                 installations: global_third_party_servers,
             });
+        }
+    }
+
+    fn record_pending_initial_global_auto_starts(&mut self, uuids: impl IntoIterator<Item = Uuid>) {
+        if matches!(
+            self.initial_global_scan_state,
+            InitialGlobalMcpScanState::Pending,
+        ) {
+            self.initial_global_auto_started_uuids.extend(uuids);
         }
     }
 
