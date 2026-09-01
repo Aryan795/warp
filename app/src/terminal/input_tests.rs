@@ -7322,6 +7322,58 @@ fn test_vim_escape_with_history_menu() {
 }
 
 #[test]
+fn input_action_up_does_not_panic_when_inline_history_is_already_checked_out() {
+    let _flag = FeatureFlag::InlineHistoryMenu.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let history_file_commands = vec!["cd ~".to_string(), "ls".to_string()];
+        let (window_id, terminal) = add_window_with_bootstrapped_terminal_and_window_id(
+            &mut app,
+            Some(history_file_commands),
+            None,
+        )
+        .await;
+        let input = terminal.read(&app, |view, _| view.input().clone());
+
+        input.update(&mut app, |input, ctx| {
+            input.handle_action(&InputAction::Up, ctx);
+            input.handle_action(&InputAction::Up, ctx);
+        });
+        input.read(&app, |input, ctx| {
+            assert!(
+                input
+                    .suggestions_mode_model
+                    .as_ref(ctx)
+                    .is_inline_history_menu(),
+                "Up while Input is checked out should open and keep inline history"
+            );
+        });
+
+        let history_menu = app
+            .views_of_type::<super::inline_history::InlineHistoryMenuView>(window_id)
+            .expect("window should still be open")
+            .into_iter()
+            .next()
+            .expect("inline history menu view should exist");
+        history_menu.update(&mut app, |_, ctx| {
+            input.update(ctx, |input, ctx| {
+                input.handle_action(&InputAction::Up, ctx);
+            });
+        });
+        input.read(&app, |input, ctx| {
+            assert!(
+                input
+                    .suggestions_mode_model
+                    .as_ref(ctx)
+                    .is_inline_history_menu(),
+                "re-entrant Up must not panic or dismiss inline history"
+            );
+        });
+    });
+}
+
+#[test]
 fn test_vim_escape_with_completions() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);

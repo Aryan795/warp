@@ -9318,10 +9318,18 @@ impl Input {
         ctx.notify();
     }
 
+    fn try_update_child<V: Entity>(
+        handle: &ViewHandle<V>,
+        ctx: &mut ViewContext<Self>,
+        update: impl FnOnce(&mut V, &mut ViewContext<V>),
+    ) {
+        let _ = handle.try_update(ctx, update);
+    }
+
     fn editor_up(&mut self, ctx: &mut ViewContext<Self>) {
         if self.should_show_auth_secret_ftux(ctx) {
             if let Some(ftux_view) = self.auth_secret_ftux_view().cloned() {
-                ftux_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&ftux_view, ctx, |view, ctx| {
                     view.select_previous_in_dropdown(ctx);
                 });
             }
@@ -9332,7 +9340,7 @@ impl Input {
             && selector.as_ref(ctx).is_menu_open()
         {
             let selector = selector.clone();
-            selector.update(ctx, |selector, ctx| {
+            Self::try_update_child(&selector, ctx, |selector, ctx| {
                 selector.select_previous(ctx);
             });
             return;
@@ -9351,9 +9359,9 @@ impl Input {
         // For some input suggestion modes, the menu handles its own actions.
         let handled = match self.suggestions_mode_model.as_ref(ctx).mode() {
             InputSuggestionsMode::AIContextMenu { .. } => {
-                self.editor.update(ctx, |editor, ctx| {
+                Self::try_update_child(&self.editor, ctx, |editor, ctx| {
                     if let Some(ai_context_menu) = editor.ai_context_menu() {
-                        ai_context_menu.update(ctx, |menu, ctx| {
+                        let _ = ai_context_menu.try_update(ctx, |menu, ctx| {
                             menu.handle_action(&AIContextMenuAction::Prev, ctx);
                         });
                     }
@@ -9363,19 +9371,19 @@ impl Input {
             InputSuggestionsMode::SlashCommands => {
                 if self.is_cloud_mode_input_v2_composing(ctx) {
                     if let Some(view) = self.cloud_mode_v2_slash_commands_view.clone() {
-                        view.update(ctx, |view, ctx| {
+                        Self::try_update_child(&view, ctx, |view, ctx| {
                             view.select_up(ctx);
                         });
                     }
                 } else {
-                    self.inline_slash_commands_view.update(ctx, |view, ctx| {
+                    Self::try_update_child(&self.inline_slash_commands_view, ctx, |view, ctx| {
                         view.select_up(ctx);
                     });
                 }
                 true
             }
             InputSuggestionsMode::ConversationMenu => {
-                self.inline_conversation_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_conversation_menu_view, ctx, |view, ctx| {
                     view.select_up(ctx);
                 });
                 true
@@ -9384,7 +9392,7 @@ impl Input {
                 action: UserQueryMenuAction::ForkFrom,
                 ..
             } => {
-                self.user_query_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.user_query_menu_view, ctx, |view, ctx| {
                     view.select_up(ctx);
                 });
                 true
@@ -9393,31 +9401,31 @@ impl Input {
                 action: UserQueryMenuAction::Rewind,
                 ..
             } => {
-                self.rewind_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.rewind_menu_view, ctx, |view, ctx| {
                     view.select_up(ctx);
                 });
                 true
             }
             InputSuggestionsMode::ModelSelector => {
-                self.inline_model_selector_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_model_selector_view, ctx, |view, ctx| {
                     view.select_up(ctx);
                 });
                 true
             }
             InputSuggestionsMode::ProfileSelector => {
-                self.inline_profile_selector_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_profile_selector_view, ctx, |view, ctx| {
                     view.select_up(ctx);
                 });
                 true
             }
             InputSuggestionsMode::PromptsMenu => {
-                self.inline_prompts_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_prompts_menu_view, ctx, |view, ctx| {
                     view.select_up(ctx);
                 });
                 true
             }
             InputSuggestionsMode::SkillMenu => {
-                self.inline_skill_selector_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_skill_selector_view, ctx, |view, ctx| {
                     view.select_up(ctx);
                 });
                 true
@@ -9425,25 +9433,25 @@ impl Input {
             InputSuggestionsMode::InlineHistoryMenu { .. } => {
                 if self.is_cloud_mode_input_v2_composing(ctx) {
                     if let Some(view) = self.cloud_mode_v2_history_menu_view.clone() {
-                        view.update(ctx, |view, ctx| {
+                        Self::try_update_child(&view, ctx, |view, ctx| {
                             view.select_up(ctx);
                         });
                     }
                 } else {
-                    self.inline_history_menu_view.update(ctx, |view, ctx| {
+                    Self::try_update_child(&self.inline_history_menu_view, ctx, |view, ctx| {
                         view.select_up(ctx);
                     });
                 }
                 true
             }
             InputSuggestionsMode::IndexedReposMenu => {
-                self.inline_repos_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_repos_menu_view, ctx, |view, ctx| {
                     view.select_up(ctx);
                 });
                 true
             }
             InputSuggestionsMode::PlanMenu { .. } => {
-                self.inline_plan_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_plan_menu_view, ctx, |view, ctx| {
                     view.select_up(ctx);
                 });
                 true
@@ -9461,7 +9469,7 @@ impl Input {
 
         // If the input suggestions menu is open, always cycle to the next option.
         if self.suggestions_mode_model.as_ref(ctx).is_visible() && self.can_query_history(ctx) {
-            self.input_suggestions.update(ctx, |suggestions, ctx| {
+            Self::try_update_child(&self.input_suggestions, ctx, |suggestions, ctx| {
                 suggestions.select_prev(ctx);
             });
             return;
@@ -9469,7 +9477,9 @@ impl Input {
 
         // Otherwise, check if the cursor is on the first row and open the
         // history up menu.
-        let editor = self.editor.as_ref(ctx);
+        let Some(editor) = self.editor.try_as_ref(ctx) else {
+            return;
+        };
         if editor.single_cursor_on_first_row(ctx) {
             if FeatureFlag::InlineHistoryMenu.is_enabled()
                 && self.suggestions_mode_model.as_ref(ctx).is_closed()
@@ -9483,15 +9493,30 @@ impl Input {
             } else {
                 self.collate_ai_and_command_history(ctx)
             };
-            let original_buffer = self.editor.as_ref(ctx).buffer_text(ctx);
+            let Some(original_buffer) = self
+                .editor
+                .try_as_ref(ctx)
+                .map(|editor| editor.buffer_text(ctx))
+            else {
+                return;
+            };
 
             let matches = InputSuggestions::history_prefix_search(&original_buffer, history);
-            self.input_suggestions
-                .update(ctx, move |input_suggestions, ctx| {
+            Self::try_update_child(
+                &self.input_suggestions,
+                ctx,
+                move |input_suggestions, ctx| {
                     input_suggestions.set_history_matches(matches, ctx);
-                });
+                },
+            );
 
-            let original_cursor_point = self.editor.as_ref(ctx).single_cursor_to_point(ctx);
+            let Some(original_cursor_point) = self
+                .editor
+                .try_as_ref(ctx)
+                .map(|editor| editor.single_cursor_to_point(ctx))
+            else {
+                return;
+            };
             let original_input_type = self.ai_input_model.as_ref(ctx).input_type();
             let original_input_was_locked = self.ai_input_model.as_ref(ctx).is_input_type_locked();
             self.suggestions_mode_model.update(ctx, |m, ctx| {
@@ -9512,7 +9537,7 @@ impl Input {
         }
         // Finally, if we're neither scrolling through an existing suggestion
         // list nor entering the history mode, we move the cursor up.
-        self.editor.update(ctx, |input, ctx| input.move_up(ctx));
+        Self::try_update_child(&self.editor, ctx, |input, ctx| input.move_up(ctx));
     }
 
     // TODO - Implement PageUp functionality for input suggestions menu
@@ -9719,9 +9744,9 @@ impl Input {
         // For some input suggestion modes, the menu handles its own actions.
         let handled = match self.suggestions_mode_model.as_ref(ctx).mode() {
             InputSuggestionsMode::AIContextMenu { .. } => {
-                self.editor.update(ctx, |editor, ctx| {
+                Self::try_update_child(&self.editor, ctx, |editor, ctx| {
                     if let Some(ai_context_menu) = editor.ai_context_menu() {
-                        ai_context_menu.update(ctx, |menu, ctx| {
+                        let _ = ai_context_menu.try_update(ctx, |menu, ctx| {
                             menu.handle_action(&AIContextMenuAction::Next, ctx);
                         });
                     }
@@ -9731,19 +9756,19 @@ impl Input {
             InputSuggestionsMode::SlashCommands => {
                 if self.is_cloud_mode_input_v2_composing(ctx) {
                     if let Some(view) = self.cloud_mode_v2_slash_commands_view.clone() {
-                        view.update(ctx, |view, ctx| {
+                        Self::try_update_child(&view, ctx, |view, ctx| {
                             view.select_down(ctx);
                         });
                     }
                 } else {
-                    self.inline_slash_commands_view.update(ctx, |view, ctx| {
+                    Self::try_update_child(&self.inline_slash_commands_view, ctx, |view, ctx| {
                         view.select_down(ctx);
                     });
                 }
                 true
             }
             InputSuggestionsMode::ConversationMenu => {
-                self.inline_conversation_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_conversation_menu_view, ctx, |view, ctx| {
                     view.select_down(ctx);
                 });
                 true
@@ -9752,7 +9777,7 @@ impl Input {
                 action: UserQueryMenuAction::ForkFrom,
                 ..
             } => {
-                self.user_query_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.user_query_menu_view, ctx, |view, ctx| {
                     view.select_down(ctx);
                 });
                 true
@@ -9761,43 +9786,43 @@ impl Input {
                 action: UserQueryMenuAction::Rewind,
                 ..
             } => {
-                self.rewind_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.rewind_menu_view, ctx, |view, ctx| {
                     view.select_down(ctx);
                 });
                 true
             }
             InputSuggestionsMode::ModelSelector => {
-                self.inline_model_selector_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_model_selector_view, ctx, |view, ctx| {
                     view.select_down(ctx);
                 });
                 true
             }
             InputSuggestionsMode::ProfileSelector => {
-                self.inline_profile_selector_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_profile_selector_view, ctx, |view, ctx| {
                     view.select_down(ctx);
                 });
                 true
             }
             InputSuggestionsMode::PromptsMenu => {
-                self.inline_prompts_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_prompts_menu_view, ctx, |view, ctx| {
                     view.select_down(ctx);
                 });
                 true
             }
             InputSuggestionsMode::SkillMenu => {
-                self.inline_skill_selector_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_skill_selector_view, ctx, |view, ctx| {
                     view.select_down(ctx);
                 });
                 true
             }
             InputSuggestionsMode::IndexedReposMenu => {
-                self.inline_repos_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_repos_menu_view, ctx, |view, ctx| {
                     view.select_down(ctx);
                 });
                 true
             }
             InputSuggestionsMode::PlanMenu { .. } => {
-                self.inline_plan_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_plan_menu_view, ctx, |view, ctx| {
                     view.select_down(ctx);
                 });
                 true
@@ -9819,12 +9844,12 @@ impl Input {
         {
             if self.is_cloud_mode_input_v2_composing(ctx) {
                 if let Some(view) = self.cloud_mode_v2_history_menu_view.clone() {
-                    view.update(ctx, |view, ctx| {
+                    Self::try_update_child(&view, ctx, |view, ctx| {
                         view.select_down(ctx);
                     });
                 }
             } else {
-                self.inline_history_menu_view.update(ctx, |view, ctx| {
+                Self::try_update_child(&self.inline_history_menu_view, ctx, |view, ctx| {
                     view.select_down(ctx);
                 });
             }
@@ -9832,20 +9857,27 @@ impl Input {
         }
 
         if self.suggestions_mode_model.as_ref(ctx).is_visible() {
-            if self.input_suggestions.as_ref(ctx).is_empty() {
-                // arrow down on an empty suggestions means we should close it.
-                self.close_input_suggestions_and_restore_buffer(true, true, ctx);
-            } else {
-                self.input_suggestions.update(ctx, |suggestions, ctx| {
-                    suggestions.select_next(ctx);
-                });
+            match self.input_suggestions.try_as_ref(ctx) {
+                Some(suggestions) if suggestions.is_empty() => {
+                    // arrow down on an empty suggestions means we should close it.
+                    self.close_input_suggestions_and_restore_buffer(true, true, ctx);
+                }
+                Some(_) => {
+                    Self::try_update_child(&self.input_suggestions, ctx, |suggestions, ctx| {
+                        suggestions.select_next(ctx);
+                    });
+                }
+                None => {}
             }
         } else if FeatureFlag::CycleNextCommandSuggestion.is_enabled()
-            && self.editor.as_ref(ctx).is_empty(ctx)
+            && self
+                .editor
+                .try_as_ref(ctx)
+                .is_some_and(|editor| editor.is_empty(ctx))
         {
             self.cycle_next_command_suggestion(ctx);
         } else {
-            self.editor.update(ctx, |editor, ctx| editor.move_down(ctx));
+            Self::try_update_child(&self.editor, ctx, |editor, ctx| editor.move_down(ctx));
 
             // Try to expand the most recent passive code diff if it exists.
             ctx.emit(Event::TryHandlePassiveCodeDiff(
