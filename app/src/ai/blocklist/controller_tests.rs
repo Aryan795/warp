@@ -16,8 +16,10 @@ use super::response_stream::{PendingResume, RecoveryBudget};
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
-    AIAgentAttachment, AIAgentContext, AIAgentInput, CancellationReason, ImageContext,
-    PassiveSuggestionTrigger, UserQueryMode,
+    AIAgentAction, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType,
+    AIAgentActionType, AIAgentAttachment, AIAgentContext, AIAgentInput, AIAgentOutput,
+    AIAgentOutputMessage, CancellationReason, ImageContext, MessageId, PassiveSuggestionTrigger,
+    UserQueryMode,
 };
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::orchestration_events::{
@@ -67,6 +69,42 @@ fn file_attachment(file_name: &str) -> PendingAttachment {
     })
 }
 
+fn init_project_action(id: &str) -> AIAgentAction {
+    AIAgentAction {
+        id: AIAgentActionId::from(id.to_owned()),
+        task_id: TaskId::new("task".to_owned()),
+        action: AIAgentActionType::InitProject,
+        requires_result: true,
+    }
+}
+
+#[test]
+fn server_results_suppress_only_their_paired_actions() {
+    let resolved = init_project_action("resolved");
+    let unresolved = init_project_action("unresolved");
+    let output = AIAgentOutput {
+        messages: vec![
+            AIAgentOutputMessage::action(MessageId::new("m1".to_owned()), resolved.clone()),
+            AIAgentOutputMessage::action(MessageId::new("m2".to_owned()), unresolved.clone()),
+        ],
+        ..Default::default()
+    };
+    let result = AIAgentActionResult {
+        id: resolved.id.clone(),
+        task_id: resolved.task_id.clone(),
+        result: AIAgentActionResultType::InitProject,
+    };
+    let inputs = vec![AIAgentInput::ActionResult {
+        result: result.clone(),
+        context: Arc::new([]),
+    }];
+
+    let (actions_to_queue, server_results) =
+        super::partition_actions_with_server_results(&output, &inputs);
+
+    assert_eq!(actions_to_queue, vec![unresolved]);
+    assert_eq!(server_results, vec![result]);
+}
 #[test]
 fn passive_suggestions_request_params_omit_ambient_agent_task_id() {
     App::test((), |mut app| async move {
