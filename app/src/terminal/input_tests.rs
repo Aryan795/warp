@@ -104,6 +104,7 @@ use crate::terminal::universal_developer_input::UniversalDeveloperInputButtonBar
 use crate::terminal::view::Event as TerminalViewEvent;
 use crate::terminal::view::inline_banner::ByoLlmAuthBannerSessionState;
 use crate::terminal::writeable_pty::command_history::update_command_history;
+use crate::test_util::assert_eventually;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::themes::theme::AnsiColorIdentifier;
 use crate::warp_managed_paths_watcher::WarpManagedPathsWatcher;
@@ -7321,23 +7322,83 @@ fn test_vim_escape_with_history_menu() {
     });
 }
 
+fn selected_inline_history_command(
+    history_menu: &ViewHandle<super::inline_history::InlineHistoryMenuView>,
+    app: &App,
+) -> Option<String> {
+    history_menu.read(app, |view, ctx| {
+        match view.model().as_ref(ctx).selected_item() {
+            Some(super::inline_history::AcceptHistoryItem::Command { command, .. }) => {
+                Some(command.clone())
+            }
+            _ => None,
+        }
+    })
+}
+
 #[test]
 fn input_action_up_defers_until_inline_history_checkout_completes() {
     let _flag = FeatureFlag::InlineHistoryMenu.override_enabled(true);
     App::test((), |mut app| async move {
         initialize_app(&mut app);
 
-        let history_file_commands = vec!["cd ~".to_string(), "ls".to_string()];
-        let (window_id, terminal) = add_window_with_bootstrapped_terminal_and_window_id(
+        let older_command = "echo older-history-fixture";
+        let newer_command = "echo newer-history-fixture";
+        let session_info = SessionInfo::new_for_test();
+        let seeded_session_id = session_info.session_id;
+        let (window_id, terminal) =
+            add_window_with_bootstrapped_terminal_and_window_id(&mut app, None, Some(session_info))
+                .await;
+        simulate_directory_for_completion(
+            seeded_session_id,
+            &terminal,
             &mut app,
-            Some(history_file_commands),
-            None,
-        )
-        .await;
-        let input = terminal.read(&app, |view, _| view.input().clone());
+            std::env::temp_dir().to_string_lossy().into_owned(),
+        );
 
-        input.update(&mut app, |input, ctx| {
-            input.handle_action(&InputAction::Up, ctx);
+        let now = Local::now();
+        History::handle(&app).update(&mut app, |history, _| {
+            history.append_commands(
+                seeded_session_id,
+                vec![
+                    HistoryEntry::command_at_time(
+                        older_command.to_string(),
+                        now - chrono::Duration::seconds(2),
+                        Some(seeded_session_id),
+                        false,
+                    ),
+                    HistoryEntry::command_at_time(
+                        newer_command.to_string(),
+                        now - chrono::Duration::seconds(1),
+                        Some(seeded_session_id),
+                        false,
+                    ),
+                ],
+            );
+        });
+        History::handle(&app).read(&app, |history, _| {
+            let commands = history
+                .commands(seeded_session_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|entry| entry.command.as_str())
+                .collect_vec();
+            assert!(
+                commands.contains(&older_command) && commands.contains(&newer_command),
+                "seeded commands missing from History.commands({seeded_session_id:?}): {commands:?}"
+            );
+        });
+
+        let input = terminal.read(&app, |view, _| view.input().clone());
+        terminal.update(&mut app, |terminal, ctx| {
+            terminal
+                .model_event_dispatcher()
+                .update(ctx, |dispatcher, _| {
+                    dispatcher.set_active_session_id(seeded_session_id);
+                });
+            terminal.input().update(ctx, |input, ctx| {
+                input.handle_action(&InputAction::Up, ctx);
+            });
         });
         input.read(&app, |input, ctx| {
             assert!(
@@ -7355,6 +7416,14 @@ fn input_action_up_defers_until_inline_history_checkout_completes() {
             .into_iter()
             .next()
             .expect("inline history menu view should exist");
+        assert_eventually!(
+            selected_inline_history_command(&history_menu, &app).as_deref() == Some(newer_command)
+                && input.read(&app, |input, ctx| input.buffer_text(ctx)) == newer_command,
+            "opening history should preview the newest seeded command, got selection {:?} buffer {:?}",
+            selected_inline_history_command(&history_menu, &app),
+            input.read(&app, |input, ctx| input.buffer_text(ctx)),
+        );
+
         history_menu.update(&mut app, |_, ctx| {
             input.update(ctx, |input, ctx| {
                 input.handle_action(&InputAction::Up, ctx);
@@ -7368,7 +7437,17 @@ fn input_action_up_defers_until_inline_history_checkout_completes() {
                     .is_inline_history_menu(),
                 "Up dispatched while InlineHistoryMenuView is checked out must still run after that checkout ends"
             );
+            assert_eq!(
+                input.buffer_text(ctx),
+                older_command,
+                "deferred Up should preview the previous seeded command"
+            );
         });
+        assert_eq!(
+            selected_inline_history_command(&history_menu, &app).as_deref(),
+            Some(older_command),
+            "deferred Up should select the previous seeded command"
+        );
     });
 }
 
