@@ -1,12 +1,4 @@
-//! The "Conversation" usage popover: a click-triggered floating popover
-//! anchored to the footer's usage icon, showing a per-model breakdown of
-//! tokens and dollar cost — or, when the conversation is an orchestrator with
-//! locally-loaded descendants, a per-agent rollup in place of the per-model
-//! section.
-//!
-//! Displayed figures are recomputed from the live [`AIConversation`] on every
-//! render rather than snapshotted at construction, so the numbers update while
-//! streaming.
+//! The "Conversation" usage popover, anchored to the footer's usage icon.
 //!
 //! Two invariants hold across every figure shown here, since users add these
 //! columns up:
@@ -24,7 +16,6 @@ use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
 use thousands::Separable;
 use warp_core::ui::Icon;
-use warp_core::ui::theme::WarpTheme;
 use warpui::elements::{
     Border, ChildAnchor, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss,
     DispatchEventResult, DropShadow, Empty, EventHandler, Expanded, Flex, Hoverable,
@@ -40,9 +31,10 @@ use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::ai::blocklist::agent_view::orchestration_pill_bar::{
     render_agent_avatar_disc, render_orchestrator_avatar_disc,
 };
-use crate::ai::blocklist::usage::colors::chart_color;
+use crate::ai::blocklist::usage::colors::{ORCHESTRATOR_COLOR, chart_color};
 use crate::ai::blocklist::usage::rollup::{
-    AgentAvatar, OrchestrationCreditRollup, PerAgentCreditEntry, compute_orchestration_rollup,
+    AgentAvatar, OrchestrationCreditRollup, PerAgentCreditEntry, ROLLUP_TRUNCATION_CAP,
+    compute_orchestration_rollup, truncate_rollup_rows,
 };
 use crate::appearance::Appearance;
 use crate::persistence::model::{
@@ -54,10 +46,6 @@ use crate::workspace::WorkspaceAction;
 
 /// Fixed popover width, matching the Figma reference (`336px`).
 const POPOVER_WIDTH: f32 = 336.;
-/// Maximum number of per-agent rollup rows shown before truncating behind
-/// "Show N more" (PRODUCT invariant carried over from the pre-existing
-/// rollup feature).
-const ROLLUP_TRUNCATION_CAP: usize = 5;
 /// Height of the segmented usage/context-window bars.
 const BAR_HEIGHT: f32 = 6.;
 /// Width/height of the small color swatch next to each row label.
@@ -88,10 +76,37 @@ pub enum UsagePopoverEvent {
     Close,
 }
 
-/// A `Flex::row` preconfigured for `label ... value` rows: cross-axis
-/// centered, and `SpaceBetween` + `MainAxisSize::Max` so the two ends
-/// actually push apart (an easy warpui footgun: `SpaceBetween` alone has no
-/// effect unless the row is also told to claim the max available width).
+/// What a collapsible section shows in place of its content while collapsed.
+#[derive(Default)]
+struct CollapsedSummary {
+    text: Option<String>,
+    /// Disambiguates an abbreviated `text`, e.g. the exact count behind
+    /// "144.3k tokens".
+    tooltip: Option<String>,
+}
+
+impl CollapsedSummary {
+    fn new(text: String) -> Self {
+        Self {
+            text: Some(text),
+            tooltip: None,
+        }
+    }
+
+    fn with_tooltip(mut self, tooltip: Option<String>) -> Self {
+        self.tooltip = tooltip;
+        self
+    }
+}
+
+/// The click target that expands and collapses a section.
+struct SectionToggle {
+    mouse_state: MouseStateHandle,
+    action: UsagePopoverAction,
+}
+
+/// A `Flex::row` preconfigured for `label ... value` rows: `SpaceBetween`
+/// alone has no effect unless the row also claims the max available width.
 fn space_between_row() -> Flex {
     Flex::row()
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -105,7 +120,9 @@ fn space_between_row() -> Flex {
 /// [`Self::reset_for_conversation`] each time the popover opens, so
 /// section-collapse state resets to its default on reopen.
 pub struct UsagePopoverView {
-    conversation_id: AIConversationId,
+    /// `None` until the footer first opens the popover and points it at the
+    /// active conversation.
+    conversation_id: Option<AIConversationId>,
     model_usage_section_expanded: bool,
     tool_call_summary_section_expanded: bool,
     response_time_section_expanded: bool,
@@ -114,14 +131,9 @@ pub struct UsagePopoverView {
     /// Keyed by model id rather than a fixed set of fields since the list of
     /// models is dynamic per-conversation.
     expanded_model_ids: HashSet<String>,
-    /// Persistent per-tooltip hover state, keyed by a descriptive string
-    /// unique to each hoverable instance (e.g. a model id for the "full
-    /// model name" tooltip, or `"value:model:{id}"` for that model's
-    /// token-count tooltip). Lazily populated since the set of rows is
-    /// dynamic; wrapped in a `RefCell` so it can be populated from
-    /// `View::render`'s `&self`. A fresh `MouseStateHandle::default()` on
-    /// every render would never register as hovered, since the hover-in
-    /// delay needs a stable handle across renders to fire.
+    /// Hover state per tooltip, keyed by a string unique to each hoverable
+    /// instance. The handles must persist across renders: the hover-in delay
+    /// never fires on a handle rebuilt every frame.
     hover_states: RefCell<HashMap<String, MouseStateHandle>>,
     model_usage_toggle_mouse_state: MouseStateHandle,
     tool_call_summary_toggle_mouse_state: MouseStateHandle,
@@ -132,11 +144,9 @@ pub struct UsagePopoverView {
 }
 
 impl UsagePopoverView {
-    pub fn new(conversation_id: AIConversationId) -> Self {
+    pub fn new(conversation_id: Option<AIConversationId>) -> Self {
         Self {
             conversation_id,
-            // All sections default to expanded, matching the "rev" Figma
-            // proposals (Surface 2 spec §5).
             model_usage_section_expanded: true,
             tool_call_summary_section_expanded: true,
             response_time_section_expanded: true,
@@ -154,28 +164,18 @@ impl UsagePopoverView {
 
     /// Points this (reused) popover at `conversation_id` and resets all
     /// section-collapse state back to [`Self::new`]'s defaults.
-    ///
-    /// The explicit `notify` is required: `ViewContext::update` does not mark
-    /// a view dirty on its own, so without it the popover keeps painting the
-    /// render it produced for the previous conversation.
     pub fn reset_for_conversation(
         &mut self,
         conversation_id: AIConversationId,
         ctx: &mut ViewContext<Self>,
     ) {
-        *self = Self::new(conversation_id);
+        *self = Self::new(Some(conversation_id));
         ctx.notify();
     }
 
-    /// Header row: the title plus the conversation's authoritative total cost,
-    /// and the account-usage link.
-    ///
-    /// The total is the one figure the whole popover exists to answer, so it
-    /// comes from [`ConversationUsageTotals::total_cost_in_cents`] — inference
-    /// plus platform plus web search — and is the same value the footer icon's
-    /// tooltip shows. It is deliberately not re-derived from the sections
-    /// below, which can under-report when the server hasn't attributed every
-    /// charge to a specific model yet.
+    /// The total is deliberately not re-derived from the sections below, which
+    /// under-report when the server hasn't attributed every charge to a model
+    /// yet. It matches what the footer icon's tooltip shows.
     fn render_header(
         &self,
         conversation: &AIConversation,
@@ -231,21 +231,25 @@ impl UsagePopoverView {
 
     /// Renders a collapsible section header: an overline `label` on the
     /// left and, on the right, a chevron indicating expand state. When the
-    /// section is collapsed and `collapsed_summary` is provided, that
-    /// summary text (e.g. "144.3k tokens / $0.21", "12 tool calls") is
-    /// shown just before the chevron, so key information stays visible
-    /// without expanding the section.
-    #[allow(clippy::too_many_arguments)]
+    /// section is collapsed, `summary`'s text (e.g. "144.3k tokens / $0.21",
+    /// "12 tool calls") is shown just before the chevron, so key information
+    /// stays visible without expanding the section.
     fn render_section_header(
         &self,
         label: &str,
         expanded: bool,
-        collapsed_summary: Option<String>,
-        collapsed_summary_tooltip: Option<String>,
-        mouse_state: MouseStateHandle,
-        action: UsagePopoverAction,
+        summary: CollapsedSummary,
+        toggle: SectionToggle,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
+        let CollapsedSummary {
+            text: collapsed_summary,
+            tooltip: collapsed_summary_tooltip,
+        } = summary;
+        let SectionToggle {
+            mouse_state,
+            action,
+        } = toggle;
         let theme = appearance.theme();
         let background = theme.surface_2();
         let label_color = blended_colors::text_disabled(theme, background);
@@ -385,18 +389,22 @@ impl UsagePopoverView {
         };
 
         let mut column = Flex::column().with_spacing(8.);
-        column.add_child(self.render_section_header(
-            label,
-            self.model_usage_section_expanded,
-            Some(format_tokens_and_cost(
-                summary.tokens,
-                summary.cost_in_cents,
-            )),
-            summary.tokens.and_then(exact_token_count_tooltip),
-            self.model_usage_toggle_mouse_state.clone(),
-            UsagePopoverAction::ToggleModelUsageSection,
-            appearance,
-        ));
+        column.add_child(
+            self.render_section_header(
+                label,
+                self.model_usage_section_expanded,
+                CollapsedSummary::new(format_tokens_and_cost(
+                    summary.tokens,
+                    summary.cost_in_cents,
+                ))
+                .with_tooltip(summary.tokens.and_then(exact_token_count_tooltip)),
+                SectionToggle {
+                    mouse_state: self.model_usage_toggle_mouse_state.clone(),
+                    action: UsagePopoverAction::ToggleModelUsageSection,
+                },
+                appearance,
+            ),
+        );
         if self.model_usage_section_expanded {
             column.add_child(rows);
         }
@@ -407,8 +415,9 @@ impl UsagePopoverView {
     /// fee, which unlike inference cost isn't attributable to any single
     /// model.
     ///
-    /// `None` (rather than a "$0.00" row) when there's no platform fee to
-    /// report, e.g. conversations predating the server-side platform fee.
+    /// Omitted entirely when the server sent no charged usage at all. A charged
+    /// usage whose platform fee is zero renders `$0.00`, matching how the rest
+    /// of the popover distinguishes a known zero from an unknown figure.
     fn render_platform_usage_section(
         &self,
         conversation: &AIConversation,
@@ -417,8 +426,7 @@ impl UsagePopoverView {
         let platform_cost_in_cents = conversation
             .usage_totals()
             .charged_usage
-            .map(|charged_usage| charged_usage.platform_cost_in_cents)
-            .filter(|cost| *cost > 0.)?;
+            .map(|charged_usage| charged_usage.platform_cost_in_cents)?;
 
         Some(self.render_static_section_header_with_value(
             "PLATFORM USAGE",
@@ -511,11 +519,9 @@ impl UsagePopoverView {
         let color = chart_color(index);
         let expanded = self.expanded_model_ids.contains(&row.model_id);
 
-        // "Primary agent" is the default case, so showing it on every row is
-        // noise; `role_badge` still carries it for sorting.
-        let display_role_badge = row.role_badge.filter(|&role| role != "Primary agent");
-        let full_label = match display_role_badge {
-            Some(role) => format!("{} ({role})", row.model_id),
+        let badge = row.role.and_then(ModelRole::badge_label);
+        let full_label = match badge {
+            Some(badge) => format!("{} ({badge})", row.model_id),
             None => row.model_id.clone(),
         };
         let chevron_color = blended_colors::text_disabled(theme, background);
@@ -541,11 +547,15 @@ impl UsagePopoverView {
             )
             .finish(),
         );
-        if let Some(role) = display_role_badge {
+        if let Some(badge) = badge {
             label_row.add_child(
-                Text::new(format!(" ({role})"), appearance.ui_font_family(), font_size)
-                    .with_color(blended_colors::text_sub(theme, background))
-                    .finish(),
+                Text::new(
+                    format!(" ({badge})"),
+                    appearance.ui_font_family(),
+                    font_size,
+                )
+                .with_color(blended_colors::text_sub(theme, background))
+                .finish(),
             );
         }
 
@@ -699,9 +709,8 @@ impl UsagePopoverView {
         if charged_usage.web_search_count > 0 {
             column.add_child(render_label_value_row(
                 "Web searches",
-                format_count_and_cost(
+                format_searches_and_cost(
                     charged_usage.web_search_count as u32,
-                    "searches",
                     charged_usage.web_search_cost_in_cents,
                 ),
                 appearance,
@@ -829,7 +838,7 @@ impl UsagePopoverView {
                     }
                     None => 0.,
                 };
-                (agent_row_color(entry, index, theme), pct)
+                (agent_row_color(entry, index), pct)
             })
             .collect();
         column.add_child(render_segmented_bar(
@@ -860,7 +869,7 @@ impl UsagePopoverView {
         let background = theme.surface_2();
         let font_size = appearance.ui_font_size();
         const ROW_AVATAR_SIZE: f32 = 16.;
-        let swatch = render_swatch(agent_row_color(entry, index, theme));
+        let swatch = render_swatch(agent_row_color(entry, index));
         let avatar = match entry.avatar {
             AgentAvatar::Orchestrator => {
                 render_orchestrator_avatar_disc(ROW_AVATAR_SIZE, theme, appearance)
@@ -921,9 +930,8 @@ impl UsagePopoverView {
         )
     }
 
-    /// "Show fewer" affordance (Surface 6 resolved decision 4): once "Show
-    /// N more" has been clicked, this provides a way back to the truncated
-    /// view without collapsing and reopening the whole section.
+    /// A way back to the truncated view without collapsing and reopening the
+    /// whole section.
     fn render_show_fewer_link(&self, appearance: &Appearance) -> Box<dyn Element> {
         render_text_link(
             "Show fewer".to_string(),
@@ -946,10 +954,11 @@ impl UsagePopoverView {
         column.add_child(self.render_section_header(
             "TOOL CALL SUMMARY",
             self.tool_call_summary_section_expanded,
-            Some(format!("{} tool calls", tool_usage.total_tool_calls())),
-            None,
-            self.tool_call_summary_toggle_mouse_state.clone(),
-            UsagePopoverAction::ToggleToolCallSummarySection,
+            CollapsedSummary::new(format!("{} tool calls", tool_usage.total_tool_calls())),
+            SectionToggle {
+                mouse_state: self.tool_call_summary_toggle_mouse_state.clone(),
+                action: UsagePopoverAction::ToggleToolCallSummarySection,
+            },
             appearance,
         ));
         if !self.tool_call_summary_section_expanded {
@@ -981,6 +990,8 @@ impl UsagePopoverView {
         Some(column.finish())
     }
 
+    /// Unlike every other section here, these figures cover only the exchanges
+    /// since the most recent user query, so the header says so explicitly.
     fn render_response_time_section(
         &self,
         conversation: &AIConversation,
@@ -1001,12 +1012,13 @@ impl UsagePopoverView {
 
         let mut column = Flex::column().with_spacing(8.);
         column.add_child(self.render_section_header(
-            "RESPONSE TIME",
+            "LAST RESPONSE TIME",
             self.response_time_section_expanded,
-            Some(format!("{:.1}s", total_time_ms as f64 / 1000.)),
-            None,
-            self.response_time_toggle_mouse_state.clone(),
-            UsagePopoverAction::ToggleResponseTimeSection,
+            CollapsedSummary::new(format!("{:.1}s", total_time_ms as f64 / 1000.)),
+            SectionToggle {
+                mouse_state: self.response_time_toggle_mouse_state.clone(),
+                action: UsagePopoverAction::ToggleResponseTimeSection,
+            },
             appearance,
         ));
         if !self.response_time_section_expanded {
@@ -1047,10 +1059,13 @@ impl View for UsagePopoverView {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
         let history = BlocklistAIHistoryModel::as_ref(app);
-        let Some(conversation) = history.conversation(&self.conversation_id) else {
+        let Some(conversation_id) = self.conversation_id else {
             return Empty::new().finish();
         };
-        let rollup = compute_orchestration_rollup(self.conversation_id, history);
+        let Some(conversation) = history.conversation(&conversation_id) else {
+            return Empty::new().finish();
+        };
+        let rollup = compute_orchestration_rollup(conversation_id, history);
 
         // Absent sections are skipped rather than rendered empty, so they don't
         // leave the column's inter-section spacing behind as a stray gap.
@@ -1138,10 +1153,28 @@ impl TypedActionView for UsagePopoverView {
     }
 }
 
+/// The role a model was used in, derived from its token-usage categories.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModelRole {
+    PrimaryAgent,
+    FullTerminalUse,
+}
+
+impl ModelRole {
+    /// `None` for [`Self::PrimaryAgent`], which is the default role and so is
+    /// noise on every row.
+    fn badge_label(self) -> Option<&'static str> {
+        match self {
+            Self::PrimaryAgent => None,
+            Self::FullTerminalUse => Some("Full terminal use"),
+        }
+    }
+}
+
 /// One row of the per-model usage breakdown.
 struct ModelUsageRow {
     model_id: String,
-    role_badge: Option<&'static str>,
+    role: Option<ModelRole>,
     tokens: u64,
     cost_in_cents: Option<f32>,
     charged_usage: Option<PersistedModelTokenCost>,
@@ -1212,7 +1245,7 @@ fn model_usage_rows(
             let charged_usage = charged_usage_by_model.get(&model.model_id).copied();
             Some(ModelUsageRow {
                 model_id: model.model_id.clone(),
-                role_badge: role_badge_for_model(model),
+                role: role_for_model(model),
                 tokens: charged_usage
                     .as_ref()
                     .map(charged_usage_tokens)
@@ -1222,20 +1255,20 @@ fn model_usage_rows(
             })
         })
         .collect();
-    rows.sort_by(|a, b| match (a.role_badge, b.role_badge) {
-        (Some("Primary agent"), Some("Primary agent")) => a.model_id.cmp(&b.model_id),
-        (Some("Primary agent"), _) => Ordering::Less,
-        (_, Some("Primary agent")) => Ordering::Greater,
-        _ => a.model_id.cmp(&b.model_id),
+    rows.sort_by(|a, b| {
+        let primary = |role| role == Some(ModelRole::PrimaryAgent);
+        match (primary(a.role), primary(b.role)) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => a.model_id.cmp(&b.model_id),
+        }
     });
     rows
 }
 
-/// Determines the role-pill text for a model based on which token-usage
-/// category buckets it has non-zero tokens in. Mirrors the category
-/// constants used by the existing credits-based breakdown
-/// (`PRIMARY_AGENT_CATEGORY` / `FULL_TERMINAL_USE_CATEGORY`).
-fn role_badge_for_model(model: &ModelTokenUsage) -> Option<&'static str> {
+/// Determines a model's role from which token-usage category buckets it has
+/// non-zero tokens in.
+fn role_for_model(model: &ModelTokenUsage) -> Option<ModelRole> {
     let categories = [
         &model.warp_token_usage_by_category,
         &model.byok_token_usage_by_category,
@@ -1247,35 +1280,19 @@ fn role_badge_for_model(model: &ModelTokenUsage) -> Option<&'static str> {
             .any(|map| map.get(category).is_some_and(|&tokens| tokens > 0))
     };
     if has_category(PRIMARY_AGENT_CATEGORY) {
-        Some("Primary agent")
+        Some(ModelRole::PrimaryAgent)
     } else if has_category(FULL_TERMINAL_USE_CATEGORY) {
-        Some("Full terminal use")
+        Some(ModelRole::FullTerminalUse)
     } else {
         None
     }
 }
 
-/// Splits the per-agent rollup list into the rows to render now and the
-/// count still hidden, honoring the truncation cap and "show all" state.
-fn truncate_rollup_rows(
-    entries: &[PerAgentCreditEntry],
-    show_all: bool,
-) -> (&[PerAgentCreditEntry], usize) {
-    if show_all || entries.len() <= ROLLUP_TRUNCATION_CAP {
-        (entries, 0)
-    } else {
-        (
-            &entries[..ROLLUP_TRUNCATION_CAP],
-            entries.len() - ROLLUP_TRUNCATION_CAP,
-        )
-    }
-}
-
 /// The orchestrator keeps its fixed identity color; children take chart
 /// colors by position, matching the per-model bar.
-fn agent_row_color(entry: &PerAgentCreditEntry, index: usize, theme: &WarpTheme) -> ColorU {
+fn agent_row_color(entry: &PerAgentCreditEntry, index: usize) -> ColorU {
     match entry.avatar {
-        AgentAvatar::Orchestrator => theme.ansi_fg_cyan(),
+        AgentAvatar::Orchestrator => ORCHESTRATOR_COLOR,
         AgentAvatar::Child => chart_color(index),
     }
 }
@@ -1379,10 +1396,10 @@ pub(crate) fn format_tokens_and_cost(tokens: Option<u64>, cost_in_cents: Option<
     }
 }
 
-/// Formats a count alongside its dollar cost, e.g. `"3 searches / $0.02"`, for
-/// breakdown rows whose unit isn't tokens.
-fn format_count_and_cost(count: u32, unit: &str, cost_in_cents: f32) -> String {
-    format!("{count} {unit} / {}", format_cents(cost_in_cents))
+/// Formats a web-search count alongside its dollar cost, e.g.
+/// `"3 searches / $0.02"`.
+fn format_searches_and_cost(count: u32, cost_in_cents: f32) -> String {
+    format!("{count} searches / {}", format_cents(cost_in_cents))
 }
 
 /// Formats a bare dollar cost, e.g. `"$0.36"`, or an em dash when unknown.

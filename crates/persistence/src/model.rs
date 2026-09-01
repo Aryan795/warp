@@ -1524,7 +1524,7 @@ impl From<&stream_finished::ToolUsageMetadata> for ToolUsageMetadata {
 
 /// The kind of a context-window segment, mirroring the proto
 /// `ContextWindowSegmentType` enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextWindowSegmentType {
     #[default]

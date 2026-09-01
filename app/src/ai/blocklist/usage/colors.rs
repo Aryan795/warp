@@ -1,36 +1,34 @@
 //! Chart colors for the usage popover's stacked bars and row swatches.
 //!
-//! Colors come from the Figma "Pricing transparency" chart palette
-//! (`191:367` / `408:23019`) rather than the app's ANSI palette, so the bars
-//! read as data-visualization segments rather than terminal-themed content.
+//! Colors come from the Figma "Pricing transparency" chart palette rather than
+//! the app's ANSI palette, so the bars read as data-visualization segments
+//! rather than terminal-themed content.
 
 use pathfinder_color::ColorU;
 
-/// The six chart colors, in the order sampled from Figma: magenta, blue,
-/// yellow, cyan/lavender, green, red.
-///
-/// A plain function (rather than a `const` array) because `ColorU::new` is
-/// not a `const fn`.
-fn chart_palette() -> [ColorU; 6] {
-    [
-        ColorU::new(0xff, 0x8f, 0xfd, 0xff), // magenta
-        ColorU::new(0xa5, 0xd5, 0xfe, 0xff), // blue
-        ColorU::new(0xfe, 0xfd, 0xc2, 0xff), // yellow
-        ColorU::new(0xd0, 0xd1, 0xfe, 0xff), // cyan / lavender
-        ColorU::new(0xb4, 0xfa, 0x72, 0xff), // green
-        ColorU::new(0xff, 0x82, 0x72, 0xff), // red
-    ]
+const fn rgb(r: u8, g: u8, b: u8) -> ColorU {
+    ColorU { r, g, b, a: 0xff }
 }
 
+/// Colors assigned to breakdown rows by position.
+const CHART_PALETTE: [ColorU; 6] = [
+    rgb(0xff, 0x8f, 0xfd), // magenta
+    rgb(0xa5, 0xd5, 0xfe), // blue
+    rgb(0xfe, 0xfd, 0xc2), // yellow
+    rgb(0xd0, 0xd1, 0xfe), // cyan / lavender
+    rgb(0xb4, 0xfa, 0x72), // green
+    rgb(0xff, 0x82, 0x72), // red
+];
+
+/// Reserved for the orchestrator row, which keeps a fixed identity color rather
+/// than taking one by position. Drawn from the same palette family so the bar
+/// stays data-visualization colored.
+pub const ORCHESTRATOR_COLOR: ColorU = rgb(0x7d, 0xd3, 0xd8);
+
 /// Chart color for the row at `index` in a breakdown list, cycling once the
-/// palette is exhausted.
-///
-/// Assigning by position rather than by hashing the row's identity keeps the
-/// legend unambiguous: hashing into six buckets collides often enough that two
-/// rows in the same bar would frequently share a swatch. Callers must pass a
-/// stable index, which every breakdown list here already has since the rows are
-/// deterministically sorted before rendering.
+/// palette is exhausted. Callers must pass a stable index, which every
+/// breakdown list here has since its rows are deterministically sorted before
+/// rendering.
 pub fn chart_color(index: usize) -> ColorU {
-    let palette = chart_palette();
-    palette[index % palette.len()]
+    CHART_PALETTE[index % CHART_PALETTE.len()]
 }

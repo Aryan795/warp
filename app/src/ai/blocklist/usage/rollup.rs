@@ -72,6 +72,26 @@ pub struct OrchestrationCreditRollup {
     pub per_agent: Vec<PerAgentCreditEntry>,
 }
 
+/// Maximum number of per-agent rows rendered before the remainder is hidden
+/// behind a "Show N more" affordance.
+pub const ROLLUP_TRUNCATION_CAP: usize = 5;
+
+/// Splits the per-agent list into the rows to render now and the count still
+/// hidden, honoring [`ROLLUP_TRUNCATION_CAP`] and the caller's "show all" state.
+pub fn truncate_rollup_rows(
+    entries: &[PerAgentCreditEntry],
+    show_all: bool,
+) -> (&[PerAgentCreditEntry], usize) {
+    if show_all || entries.len() <= ROLLUP_TRUNCATION_CAP {
+        (entries, 0)
+    } else {
+        (
+            &entries[..ROLLUP_TRUNCATION_CAP],
+            entries.len() - ROLLUP_TRUNCATION_CAP,
+        )
+    }
+}
+
 /// Folds one more conversation's optional dollar cost into a running total,
 /// propagating `None` permanently once any contributor lacks a known
 /// baseline (see `OrchestrationCreditRollup::total_cost_in_cents`).

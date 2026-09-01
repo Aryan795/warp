@@ -52,7 +52,6 @@ pub(crate) use self::environment_selector::{
     EnvironmentSelector, EnvironmentSelectorEvent, EnvironmentSelectorTarget,
 };
 use crate::ai::AIRequestUsageModel;
-use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::blocklist::BlocklistAIInputModel;
 use crate::ai::blocklist::agent_view::is_in_cloud_context;
 use crate::ai::blocklist::history_model::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
@@ -138,8 +137,8 @@ const NEW_CLOUD_VM_INDICATOR_TOOLTIP: &str = "Not connected to cloud agent. Your
 
 const CLOUD_MODE_V2_FOOTER_GAP: f32 = 4.;
 
-/// `SavePosition` id for the usage popover's trigger button (Surface 1), used to anchor
-/// the popover overlay (Surfaces 2/4/6) to it.
+/// `SavePosition` id for the usage popover's trigger button, used to anchor the popover
+/// overlay to it.
 const USAGE_BUTTON_SAVE_POSITION_ID: &str = "agent_input_footer::usage_button";
 
 /// How long to wait after session creation before showing the install chip.
@@ -717,10 +716,9 @@ impl AgentInputFooter {
         });
 
         // Constructed up front, mirroring `agent_todos_popup` and every other lazily-shown
-        // footer popup. The placeholder conversation id is replaced via
-        // `reset_for_conversation` each time the popover opens; until then it renders empty.
-        let usage_popover =
-            ctx.add_typed_action_view(|_ctx| UsagePopoverView::new(AIConversationId::new()));
+        // footer popup. Pointed at a conversation via `reset_for_conversation` each time the
+        // popover opens; until then it renders empty.
+        let usage_popover = ctx.add_typed_action_view(|_ctx| UsagePopoverView::new(None));
         ctx.subscribe_to_view(&usage_popover, |me, _, event, ctx| match event {
             UsagePopoverEvent::Close => {
                 me.usage_popover_open = false;
@@ -2305,6 +2303,12 @@ impl AgentInputFooter {
                 })
             }
             AgentToolbarItemKind::UsageSummary => {
+                // A persisted custom toolbar layout is replayed verbatim at render time, so
+                // the flag has to be checked here rather than only in `default_right` /
+                // `all_available` / `is_available`, none of which the render path consults.
+                if !FeatureFlag::PricingTransparency.is_enabled() {
+                    return None;
+                }
                 let conversation = BlocklistAIHistoryModel::as_ref(app)
                     .active_conversation(self.terminal_view_id)?;
                 if !conversation.usage_totals().has_usage {
@@ -2587,7 +2591,6 @@ pub enum AgentInputFooterAction {
     ShowContextMenu {
         position: Vector2F,
     },
-    /// User clicked the usage popover trigger button (Surface 1).
     ToggleUsagePopover,
 }
 
@@ -2798,8 +2801,6 @@ impl TypedActionView for AgentInputFooter {
             AgentInputFooterAction::ToggleUsagePopover => {
                 self.usage_popover_open = !self.usage_popover_open;
                 if self.usage_popover_open {
-                    // Resolved to a plain `Copy` id before touching `self`/`ctx` again so the
-                    // history borrow ends before the popover update.
                     let conversation_id = BlocklistAIHistoryModel::as_ref(ctx)
                         .active_conversation(self.terminal_view_id)
                         .map(|conversation| conversation.id());

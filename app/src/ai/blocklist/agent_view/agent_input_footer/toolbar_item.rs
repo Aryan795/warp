@@ -185,9 +185,8 @@ impl AgentToolbarItemKind {
     pub fn is_available(&self, app: &warpui::AppContext) -> bool {
         match self {
             Self::HandoffToCloud => AISettings::as_ref(app).is_cloud_handoff_enabled(app),
-            // Also checked here, not just in `default_right`/`all_available`: a
-            // toolbar config persisted while the flag was on must not keep
-            // surfacing the item after it goes off.
+            // Drops the item from the toolbar editor once the flag goes off. The render
+            // path does not consult this method, so it repeats the check itself.
             Self::UsageSummary => FeatureFlag::PricingTransparency.is_enabled(),
             // Matches the gating on every other project explorer entry point, so the chip
             // cannot open a tool view the rest of the app hides. See
