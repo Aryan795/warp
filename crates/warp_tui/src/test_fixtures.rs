@@ -22,6 +22,28 @@ use crate::resume::TuiExitSummaryHandle;
 use crate::terminal_session_view::TuiTerminalSessionView;
 use crate::zero_state_animation::ZeroStateAnimationConfig;
 
+macro_rules! assert_eventually {
+    ($cond:expr_2021, $($arg:tt)+) => {
+        $crate::test_fixtures::assert_eventually!(20 => $cond, $($arg)+);
+    };
+    // Run the condition up to ticks times, yielding to the executor in between. If it does not
+    // become true, this panics with the provided format string + args.
+    ($ticks:literal => $cond:expr_2021, $($arg:tt)+) => {{
+        let mut pass = false;
+        for _ in 0..$ticks {
+            if $cond {
+                pass = true;
+                break;
+            }
+            warpui_core::r#async::Timer::after(std::time::Duration::from_millis(5)).await;
+        }
+        if !pass {
+            panic!("{}", format_args!($($arg)+));
+        }
+    }};
+}
+pub(crate) use assert_eventually;
+
 struct TestTerminalManager(Arc<FairMutex<TerminalModel>>);
 
 impl TerminalManagerTrait for TestTerminalManager {

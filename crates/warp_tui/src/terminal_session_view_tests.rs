@@ -42,7 +42,6 @@ use warpui::platform::WindowStyle;
 use warpui::{
     AddWindowOptions, EntityIdMap, ModelHandle, ReadModel, SingletonEntity, UpdateModel, ViewHandle,
 };
-use warpui_core::r#async::Timer;
 use warpui_core::elements::tui::{
     Color, TuiBuffer, TuiBufferExt, TuiConstrainedBox, TuiConstraint, TuiContainer, TuiElement,
     TuiEvent, TuiEventContext, TuiFlex, TuiLayoutContext, TuiPaintContext, TuiPaintSurface,
@@ -112,7 +111,7 @@ use crate::terminal_use::TuiInputTarget;
 use crate::test_fixtures::{
     add_test_semantic_selection, add_test_terminal_session,
     add_test_terminal_session_with_first_run_onboarding,
-    add_test_terminal_session_with_settings_file_error,
+    add_test_terminal_session_with_settings_file_error, assert_eventually,
 };
 use crate::transcript_view::TRANSCRIPT_BLOCK_SPACING;
 use crate::transient_hint::TransientHintTone;
@@ -1053,10 +1052,10 @@ fn shell_completion_source_warmup_loads_path_executables() {
             view.warm_shell_completion_sources(session.clone(), ctx);
         });
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !session.has_loaded_external_commands() && Instant::now() < deadline {
-            Timer::after(Duration::from_millis(10)).await;
-        }
+        assert_eventually!(
+            1000 => session.has_loaded_external_commands(),
+            "timed out after ~5s waiting for PATH executables to load"
+        );
 
         assert!(session.has_attempted_to_load_external_commands());
         assert!(session.has_loaded_external_commands());
@@ -3124,26 +3123,25 @@ fn nld_slash_command_toggles_and_reports_its_effects() {
             ))
         );
 
-        let deadline = Instant::now() + Duration::from_secs(5);
         let mut toggles = Vec::new();
-        while toggles.len() < 2 {
-            toggles.extend(
-                flush_events()
-                    .into_iter()
-                    .filter_map(|event| match event.payload {
-                        EventPayload::NamedEvent {
-                            name,
-                            value: Some(value),
-                            ..
-                        } if name == "AgentMode.ToggleAutoDetectionSetting" => Some(value),
-                        _ => None,
-                    }),
-            );
-            if toggles.len() >= 2 || Instant::now() >= deadline {
-                break;
-            }
-            Timer::after(Duration::from_millis(10)).await;
-        }
+        assert_eventually!(
+            1000 => {
+                toggles.extend(
+                    flush_events()
+                        .into_iter()
+                        .filter_map(|event| match event.payload {
+                            EventPayload::NamedEvent {
+                                name,
+                                value: Some(value),
+                                ..
+                            } if name == "AgentMode.ToggleAutoDetectionSetting" => Some(value),
+                            _ => None,
+                        }),
+                );
+                toggles.len() >= 2
+            },
+            "timed out after ~5s waiting for two AgentMode.ToggleAutoDetectionSetting events"
+        );
         assert_eq!(toggles.len(), 2);
         assert_eq!(
             toggles[0],
