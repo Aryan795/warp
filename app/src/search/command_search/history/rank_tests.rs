@@ -22,6 +22,9 @@ struct Scenario {
     start_ts: Option<DateTime<Local>>,
     session_id: Option<SessionId>,
     exit_ok: bool,
+    total_execution_count: u32,
+    cwd_execution_count: u32,
+    pwd_known_execution_count: u32,
 }
 
 impl Scenario {
@@ -32,6 +35,9 @@ impl Scenario {
             start_ts: None,
             session_id: None,
             exit_ok: true,
+            total_execution_count: 0,
+            cwd_execution_count: 0,
+            pwd_known_execution_count: 0,
         }
     }
 
@@ -50,6 +56,17 @@ impl Scenario {
         self
     }
 
+    fn executed(mut self, total_execution_count: u32) -> Self {
+        self.total_execution_count = total_execution_count;
+        self
+    }
+
+    fn cwd_counts(mut self, cwd_execution_count: u32, pwd_known_execution_count: u32) -> Self {
+        self.cwd_execution_count = cwd_execution_count;
+        self.pwd_known_execution_count = pwd_known_execution_count;
+        self
+    }
+
     fn rank(&self, current_session_id: SessionId) -> OrderedFloat<f64> {
         let tokens = tokenize_query(self.query);
         let (_, match_quality) = match_history_command(self.command, &tokens)
@@ -65,6 +82,9 @@ impl Scenario {
             match_quality,
             now: now(),
             current_session_id,
+            total_execution_count: self.total_execution_count,
+            cwd_execution_count: self.cwd_execution_count,
+            pwd_known_execution_count: self.pwd_known_execution_count,
             is_blank_query: false,
         })
         .expect("scenario match quality should clear the score floor")
@@ -192,6 +212,9 @@ fn match_score_floor_filters_out_low_quality_matches() {
         match_quality: low_quality,
         now: now(),
         current_session_id: SessionId::from(1),
+        total_execution_count: 0,
+        cwd_execution_count: 0,
+        pwd_known_execution_count: 0,
         is_blank_query: false,
     });
 
@@ -223,6 +246,9 @@ fn blank_query_ignores_priors_and_yields_a_result() {
             match_quality: zero_quality,
             now: now(),
             current_session_id: SessionId::from(1),
+            total_execution_count: 0,
+            cwd_execution_count: 0,
+            pwd_known_execution_count: 0,
             is_blank_query: true,
         })
     };
