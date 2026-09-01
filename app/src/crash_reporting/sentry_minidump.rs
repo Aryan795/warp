@@ -364,6 +364,37 @@ impl Drop for MinidumpGuard {
         if let Err(err) = self.child.kill() {
             log::warn!("Unable to kill minidump child process: {err:#}");
         }
+
+        // `Child::kill` only sends the signal; it does not reap the process. Without an
+        // explicit wait, a killed-but-unreaped child becomes a zombie until some ancestor
+        // waits on it. Since this process may itself exit shortly after this Drop runs (e.g.
+        // on a failed run), an unreaped zombie here can be orphaned to PID 1 and never
+        // reaped, which is exactly the kind of leaked zombie that can wedge a container's
+        // shutdown wait. Wait with a short bound so a wedged child can't hang our own exit.
+        match wait_with_timeout(&mut self.child, Duration::from_secs(5)) {
+            Ok(true) => {}
+            Ok(false) => {
+                log::warn!("Timed out waiting to reap minidump child process after kill");
+            }
+            Err(err) => {
+                log::warn!("Unable to reap minidump child process: {err:#}");
+            }
+        }
+    }
+}
+
+/// Poll `child` for exit, up to `timeout`, so it gets reaped instead of left as a zombie.
+/// Returns `Ok(true)` once the child has been reaped, `Ok(false)` on timeout.
+fn wait_with_timeout(child: &mut process::Child, timeout: Duration) -> io::Result<bool> {
+    let deadline = instant::Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(true);
+        }
+        if instant::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
