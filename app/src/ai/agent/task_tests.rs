@@ -54,7 +54,12 @@ fn run_agents_message(
     }
 }
 
-fn assert_live_owner_server_result_hydration(enabled: bool) {
+struct ServerResultHydrationObservation {
+    action_count: usize,
+    action_result: Option<crate::ai::agent::AIAgentActionResult>,
+}
+
+fn observe_live_owner_server_result_hydration(enabled: bool) -> ServerResultHydrationObservation {
     let _flag = FeatureFlag::ServerSynthesizedClientToolResults.override_enabled(enabled);
     let task_id = "task";
     let tool_call_id = "run-agents";
@@ -104,39 +109,48 @@ fn assert_live_owner_server_result_hydration(enabled: bool) {
         .expect("paired result should be ingested");
 
     let exchange = task.exchange(exchange_id).expect("exchange exists");
-    assert_eq!(
-        exchange
-            .output_status
-            .output()
-            .expect("output exists")
-            .get()
-            .actions()
-            .count(),
-        1
-    );
-    let action_result = exchange.input.iter().find_map(AIAgentInput::action_result);
-    if enabled {
-        let action_result = action_result.expect("server result should be hydrated");
-        assert_eq!(action_result.id.to_string(), tool_call_id);
-        assert!(matches!(
-            &action_result.result,
-            crate::ai::agent::AIAgentActionResultType::RunAgents(RunAgentsResult::Failure {
-                error
-            }) if error == "invalid configuration"
-        ));
-    } else {
-        assert!(action_result.is_none());
+    let action_count = exchange
+        .output_status
+        .output()
+        .expect("output exists")
+        .get()
+        .actions()
+        .count();
+    let action_result = exchange
+        .input
+        .iter()
+        .find_map(AIAgentInput::action_result)
+        .cloned();
+
+    ServerResultHydrationObservation {
+        action_count,
+        action_result,
     }
 }
 
 #[test]
 fn live_owner_hydrates_a_server_synthesized_run_agents_failure_when_enabled() {
-    assert_live_owner_server_result_hydration(true);
+    let observation = observe_live_owner_server_result_hydration(true);
+
+    assert_eq!(observation.action_count, 1);
+    let action_result = observation
+        .action_result
+        .expect("server result should be hydrated");
+    assert_eq!(action_result.id.to_string(), "run-agents");
+    assert!(matches!(
+        action_result.result,
+        crate::ai::agent::AIAgentActionResultType::RunAgents(RunAgentsResult::Failure {
+            error
+        }) if error == "invalid configuration"
+    ));
 }
 
 #[test]
 fn live_owner_ignores_a_server_synthesized_run_agents_failure_when_disabled() {
-    assert_live_owner_server_result_hydration(false);
+    let observation = observe_live_owner_server_result_hydration(false);
+
+    assert_eq!(observation.action_count, 1);
+    assert_eq!(observation.action_result, None);
 }
 
 // =============================================================================

@@ -16,8 +16,9 @@ use super::response_stream::{PendingResume, RecoveryBudget};
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
-    AIAgentActionId, AIAgentActionResultType, AIAgentAttachment, AIAgentContext, AIAgentInput,
-    CancellationReason, ImageContext, PassiveSuggestionTrigger, RunAgentsResult, UserQueryMode,
+    AIAgentActionId, AIAgentActionResult, AIAgentActionResultType, AIAgentAttachment,
+    AIAgentContext, AIAgentInput, CancellationReason, ImageContext, PassiveSuggestionTrigger,
+    RunAgentsResult, UserQueryMode,
 };
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::blocklist::orchestration_events::{
@@ -68,10 +69,21 @@ fn file_attachment(file_name: &str) -> PendingAttachment {
     })
 }
 
-fn assert_server_result_stream_completion_behavior(
+struct ServerResultStreamCompletionObservation {
+    output_action_ids: Vec<String>,
+    hydrated_result_ids: Vec<String>,
+    resolved_status: Option<AIActionStatus>,
+    recorded_result: Option<AIAgentActionResult>,
+    pending_action_ids: Vec<String>,
+    resolved_execution_pending: bool,
+    sent_request_count: usize,
+    start_agent_request_count: usize,
+}
+
+fn observe_server_result_stream_completion(
     hydration_enabled: bool,
     completion_enabled: bool,
-) {
+) -> ServerResultStreamCompletionObservation {
     App::test((), |mut app| async move {
         let hydration_flag =
             FeatureFlag::ServerSynthesizedClientToolResults.override_enabled(hydration_enabled);
@@ -264,112 +276,147 @@ fn assert_server_result_stream_completion_behavior(
                 ctx,
             );
         });
-        BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
-            let exchange = history
-                .conversation(&conversation_id)
-                .and_then(|conversation| conversation.latest_exchange())
-                .expect("finished exchange should exist");
-            assert_eq!(
-                exchange
-                    .output_status
-                    .output()
-                    .expect("finished output should exist")
-                    .get()
-                    .actions()
-                    .map(|action| action.id.to_string())
-                    .collect::<Vec<_>>(),
-                vec![resolved_id, unresolved_id]
-            );
-            assert_eq!(
-                exchange
-                    .input
-                    .iter()
-                    .filter_map(AIAgentInput::action_result)
-                    .map(|result| result.id.to_string())
-                    .collect::<Vec<_>>(),
-                if hydration_enabled {
-                    vec![resolved_id]
-                } else {
-                    vec![]
-                }
-            );
-        });
+        let (output_action_ids, hydrated_result_ids) =
+            BlocklistAIHistoryModel::handle(&app).read(&app, |history, _| {
+                let exchange = history
+                    .conversation(&conversation_id)
+                    .and_then(|conversation| conversation.latest_exchange())
+                    .expect("finished exchange should exist");
+                (
+                    exchange
+                        .output_status
+                        .output()
+                        .expect("finished output should exist")
+                        .get()
+                        .actions()
+                        .map(|action| action.id.to_string())
+                        .collect::<Vec<_>>(),
+                    exchange
+                        .input
+                        .iter()
+                        .filter_map(AIAgentInput::action_result)
+                        .map(|result| result.id.to_string())
+                        .collect::<Vec<_>>(),
+                )
+            });
         drop(hydration_flag);
         let _completion_flag =
             FeatureFlag::ServerSynthesizedClientToolResults.override_enabled(completion_enabled);
         stream.update(&mut app, |stream, ctx| {
             stream.emit_after_stream_finished_for_test(ctx);
         });
-        for _ in 0..3 {
-            futures_lite::future::yield_now().await;
-        }
+        crate::test_util::assert_eventually!(
+            action_model.read(&app, |action_model, _| {
+                action_model
+                    .get_pending_actions_for_conversation(&conversation_id)
+                    .next()
+                    .is_some()
+            }),
+            "stream completion did not queue its unresolved actions"
+        );
 
-        action_model.read(&app, |action_model, ctx| {
-            let resolved_id = AIAgentActionId::from(resolved_id.to_owned());
-            let unresolved_id = AIAgentActionId::from(unresolved_id.to_owned());
-            if hydration_enabled && completion_enabled {
-                assert!(matches!(
-                    action_model
-                        .get_action_status(&resolved_id)
-                        .expect("server result should make the action renderable as finished"),
-                    AIActionStatus::Finished(_)
-                ));
-                assert!(matches!(
-                    &action_model
-                        .get_action_result(&resolved_id)
-                        .expect("server result should be recorded")
-                        .result,
-                    AIAgentActionResultType::RunAgents(RunAgentsResult::Failure { error })
-                        if error == "invalid configuration"
-                ));
-                assert_eq!(
+        let (resolved_status, recorded_result, pending_action_ids, resolved_execution_pending) =
+            action_model.read(&app, |action_model, ctx| {
+                let resolved_id = AIAgentActionId::from(resolved_id.to_owned());
+                let resolved_status = action_model.get_action_status(&resolved_id);
+                let recorded_result = action_model
+                    .get_action_result(&resolved_id)
+                    .map(|result| result.as_ref().clone());
+                (
+                    resolved_status,
+                    recorded_result,
                     action_model
                         .get_pending_actions_for_conversation(&conversation_id)
-                        .map(|action| action.id.clone())
-                        .collect::<Vec<_>>(),
-                    vec![unresolved_id]
-                );
-                assert!(
-                    !action_model
+                        .map(|action| action.id.to_string())
+                        .collect(),
+                    action_model
                         .run_agents_executor(ctx)
                         .as_ref(ctx)
-                        .is_pending(&resolved_id)
-                );
-            } else {
-                assert!(action_model.get_action_result(&resolved_id).is_none());
-                assert_eq!(
-                    action_model
-                        .get_pending_actions_for_conversation(&conversation_id)
-                        .map(|action| action.id.clone())
-                        .collect::<Vec<_>>(),
-                    vec![resolved_id.clone(), unresolved_id]
-                );
-                assert!(matches!(
-                    action_model
-                        .get_action_status(&resolved_id)
-                        .expect("legacy path should queue the action"),
-                    AIActionStatus::Blocked | AIActionStatus::Queued
-                ));
-            }
-        });
-        assert_eq!(*sent_request_count.lock().unwrap(), 0);
-        assert_eq!(*start_agent_request_count.lock().unwrap(), 0);
-    });
+                        .is_pending(&resolved_id),
+                )
+            });
+
+        ServerResultStreamCompletionObservation {
+            output_action_ids,
+            hydrated_result_ids,
+            resolved_status,
+            recorded_result,
+            pending_action_ids,
+            resolved_execution_pending,
+            sent_request_count: *sent_request_count.lock().unwrap(),
+            start_agent_request_count: *start_agent_request_count.lock().unwrap(),
+        }
+    })
 }
 
 #[test]
 fn stream_completion_consumes_server_results_when_capability_enabled() {
-    assert_server_result_stream_completion_behavior(true, true);
+    let observation = observe_server_result_stream_completion(true, true);
+
+    assert_eq!(
+        observation.output_action_ids,
+        vec!["server-resolved", "client-pending"]
+    );
+    assert_eq!(observation.hydrated_result_ids, vec!["server-resolved"]);
+    assert!(matches!(
+        observation.resolved_status,
+        Some(AIActionStatus::Finished(_))
+    ));
+    assert!(matches!(
+        observation.recorded_result,
+        Some(AIAgentActionResult {
+            result: AIAgentActionResultType::RunAgents(RunAgentsResult::Failure { error }),
+            ..
+        }) if error == "invalid configuration"
+    ));
+    assert_eq!(observation.pending_action_ids, vec!["client-pending"]);
+    assert!(!observation.resolved_execution_pending);
+    assert_eq!(observation.sent_request_count, 0);
+    assert_eq!(observation.start_agent_request_count, 0);
 }
 
 #[test]
 fn stream_completion_queues_server_resolved_actions_when_capability_disabled() {
-    assert_server_result_stream_completion_behavior(false, false);
+    let observation = observe_server_result_stream_completion(false, false);
+
+    assert_eq!(
+        observation.output_action_ids,
+        vec!["server-resolved", "client-pending"]
+    );
+    assert!(observation.hydrated_result_ids.is_empty());
+    assert!(matches!(
+        observation.resolved_status,
+        Some(AIActionStatus::Blocked | AIActionStatus::Queued)
+    ));
+    assert_eq!(observation.recorded_result, None);
+    assert_eq!(
+        observation.pending_action_ids,
+        vec!["server-resolved", "client-pending"]
+    );
+    assert_eq!(observation.sent_request_count, 0);
+    assert_eq!(observation.start_agent_request_count, 0);
 }
 
 #[test]
 fn stream_completion_does_not_suppress_results_if_capability_is_disabled_before_completion() {
-    assert_server_result_stream_completion_behavior(true, false);
+    let observation = observe_server_result_stream_completion(true, false);
+
+    assert_eq!(
+        observation.output_action_ids,
+        vec!["server-resolved", "client-pending"]
+    );
+    assert_eq!(observation.hydrated_result_ids, vec!["server-resolved"]);
+    assert!(matches!(
+        observation.resolved_status,
+        Some(AIActionStatus::Blocked | AIActionStatus::Queued)
+    ));
+    assert_eq!(observation.recorded_result, None);
+    assert_eq!(
+        observation.pending_action_ids,
+        vec!["server-resolved", "client-pending"]
+    );
+    assert_eq!(observation.sent_request_count, 0);
+    assert_eq!(observation.start_agent_request_count, 0);
 }
 #[test]
 fn passive_suggestions_request_params_omit_ambient_agent_task_id() {
