@@ -10,6 +10,7 @@ use crate::ai::agent::{
     RunAgentsResult, Shared,
 };
 use crate::ai::llms::LLMId;
+use crate::features::FeatureFlag;
 use crate::test_util::ai_agent_tasks::{
     create_api_subtask, create_api_task, create_message, create_subagent_tool_call_message,
 };
@@ -53,8 +54,8 @@ fn run_agents_message(
     }
 }
 
-#[test]
-fn live_owner_hydrates_a_server_synthesized_run_agents_failure() {
+fn assert_live_owner_server_result_hydration(enabled: bool) {
+    let _flag = FeatureFlag::ServerSynthesizedClientToolResults.override_enabled(enabled);
     let task_id = "task";
     let tool_call_id = "run-agents";
     let exchange = streaming_exchange();
@@ -113,18 +114,29 @@ fn live_owner_hydrates_a_server_synthesized_run_agents_failure() {
             .count(),
         1
     );
-    let action_result = exchange
-        .input
-        .iter()
-        .find_map(AIAgentInput::action_result)
-        .expect("server result should be hydrated");
-    assert_eq!(action_result.id.to_string(), tool_call_id);
-    assert!(matches!(
-        &action_result.result,
-        crate::ai::agent::AIAgentActionResultType::RunAgents(RunAgentsResult::Failure {
-            error
-        }) if error == "invalid configuration"
-    ));
+    let action_result = exchange.input.iter().find_map(AIAgentInput::action_result);
+    if enabled {
+        let action_result = action_result.expect("server result should be hydrated");
+        assert_eq!(action_result.id.to_string(), tool_call_id);
+        assert!(matches!(
+            &action_result.result,
+            crate::ai::agent::AIAgentActionResultType::RunAgents(RunAgentsResult::Failure {
+                error
+            }) if error == "invalid configuration"
+        ));
+    } else {
+        assert!(action_result.is_none());
+    }
+}
+
+#[test]
+fn live_owner_hydrates_a_server_synthesized_run_agents_failure_when_enabled() {
+    assert_live_owner_server_result_hydration(true);
+}
+
+#[test]
+fn live_owner_ignores_a_server_synthesized_run_agents_failure_when_disabled() {
+    assert_live_owner_server_result_hydration(false);
 }
 
 // =============================================================================

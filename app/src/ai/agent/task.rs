@@ -29,6 +29,7 @@ use super::{
 };
 use crate::AIAgentTodoList;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};
+use crate::features::FeatureFlag;
 use crate::terminal::model::block::BlockId;
 
 #[derive(Debug, thiserror::Error)]
@@ -952,34 +953,36 @@ impl Task {
                     .tool_call()
                     .map(|tool_call| tool_call.tool_call_id.clone().into())
             }));
-            let mut document_versions = HashMap::new();
-            for tool_call_result in messages
-                .iter()
-                .filter_map(|message| message.tool_call_result())
-            {
-                let action_id = tool_call_result.tool_call_id.clone().into();
-                if !output_action_ids.contains(&action_id) {
-                    continue;
-                }
-                if let Some(input) = convert_tool_call_result_to_input(
-                    &task_id,
-                    tool_call_result,
-                    &tool_call_map,
-                    &mut document_versions,
-                ) {
-                    if let Some(action_result) = input.action_result()
-                        && let Some(existing_result) =
-                            exchange.input.iter_mut().find(|existing_input| {
-                                existing_input
-                                    .action_result()
-                                    .is_some_and(|existing_result| {
-                                        existing_result.id == action_result.id
-                                    })
-                            })
-                    {
-                        *existing_result = input;
-                    } else {
-                        exchange.input.push(input);
+            if FeatureFlag::ServerSynthesizedClientToolResults.is_enabled() {
+                let mut document_versions = HashMap::new();
+                for tool_call_result in messages
+                    .iter()
+                    .filter_map(|message| message.tool_call_result())
+                {
+                    let action_id = tool_call_result.tool_call_id.clone().into();
+                    if !output_action_ids.contains(&action_id) {
+                        continue;
+                    }
+                    if let Some(input) = convert_tool_call_result_to_input(
+                        &task_id,
+                        tool_call_result,
+                        &tool_call_map,
+                        &mut document_versions,
+                    ) {
+                        if let Some(action_result) = input.action_result()
+                            && let Some(existing_result) =
+                                exchange.input.iter_mut().find(|existing_input| {
+                                    existing_input
+                                        .action_result()
+                                        .is_some_and(|existing_result| {
+                                            existing_result.id == action_result.id
+                                        })
+                                })
+                        {
+                            *existing_result = input;
+                        } else {
+                            exchange.input.push(input);
+                        }
                     }
                 }
             }

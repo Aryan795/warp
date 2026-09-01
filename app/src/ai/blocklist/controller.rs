@@ -3186,10 +3186,17 @@ impl BlocklistAIController {
                         ..
                     } = &exchange.output_status
                     {
-                        let (unresolved_actions, action_results) =
-                            partition_actions_with_server_results(&output.get(), &exchange.input);
-                        actions_to_queue.extend(unresolved_actions);
-                        server_synthesized_action_results.extend(action_results);
+                        if FeatureFlag::ServerSynthesizedClientToolResults.is_enabled() {
+                            let (unresolved_actions, action_results) =
+                                partition_actions_with_server_results(
+                                    &output.get(),
+                                    &exchange.input,
+                                );
+                            actions_to_queue.extend(unresolved_actions);
+                            server_synthesized_action_results.extend(action_results);
+                        } else {
+                            actions_to_queue.extend(output.get().actions().cloned());
+                        }
                     }
                 }
 

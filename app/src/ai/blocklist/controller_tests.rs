@@ -68,9 +68,13 @@ fn file_attachment(file_name: &str) -> PendingAttachment {
     })
 }
 
-#[test]
-fn stream_completion_records_server_results_and_queues_only_unresolved_actions() {
+fn assert_server_result_stream_completion_behavior(
+    hydration_enabled: bool,
+    completion_enabled: bool,
+) {
     App::test((), |mut app| async move {
+        let hydration_flag =
+            FeatureFlag::ServerSynthesizedClientToolResults.override_enabled(hydration_enabled);
         initialize_app_for_terminal_view(&mut app);
         app.add_singleton_model(|ctx| ServerExperiments::new_from_cache(vec![], ctx));
         let terminal = add_window_with_terminal(&mut app, None);
@@ -283,9 +287,16 @@ fn stream_completion_records_server_results_and_queues_only_unresolved_actions()
                     .filter_map(AIAgentInput::action_result)
                     .map(|result| result.id.to_string())
                     .collect::<Vec<_>>(),
-                vec![resolved_id]
+                if hydration_enabled {
+                    vec![resolved_id]
+                } else {
+                    vec![]
+                }
             );
         });
+        drop(hydration_flag);
+        let _completion_flag =
+            FeatureFlag::ServerSynthesizedClientToolResults.override_enabled(completion_enabled);
         stream.update(&mut app, |stream, ctx| {
             stream.emit_after_stream_finished_for_test(ctx);
         });
@@ -296,37 +307,69 @@ fn stream_completion_records_server_results_and_queues_only_unresolved_actions()
         action_model.read(&app, |action_model, ctx| {
             let resolved_id = AIAgentActionId::from(resolved_id.to_owned());
             let unresolved_id = AIAgentActionId::from(unresolved_id.to_owned());
-            assert!(matches!(
-                action_model
-                    .get_action_status(&resolved_id)
-                    .expect("server result should make the action renderable as finished"),
-                AIActionStatus::Finished(_)
-            ));
-            assert!(matches!(
-                &action_model
-                    .get_action_result(&resolved_id)
-                    .expect("server result should be recorded")
-                    .result,
-                AIAgentActionResultType::RunAgents(RunAgentsResult::Failure { error })
-                    if error == "invalid configuration"
-            ));
-            assert_eq!(
-                action_model
-                    .get_pending_actions_for_conversation(&conversation_id)
-                    .map(|action| action.id.clone())
-                    .collect::<Vec<_>>(),
-                vec![unresolved_id]
-            );
-            assert!(
-                !action_model
-                    .run_agents_executor(ctx)
-                    .as_ref(ctx)
-                    .is_pending(&resolved_id)
-            );
+            if hydration_enabled && completion_enabled {
+                assert!(matches!(
+                    action_model
+                        .get_action_status(&resolved_id)
+                        .expect("server result should make the action renderable as finished"),
+                    AIActionStatus::Finished(_)
+                ));
+                assert!(matches!(
+                    &action_model
+                        .get_action_result(&resolved_id)
+                        .expect("server result should be recorded")
+                        .result,
+                    AIAgentActionResultType::RunAgents(RunAgentsResult::Failure { error })
+                        if error == "invalid configuration"
+                ));
+                assert_eq!(
+                    action_model
+                        .get_pending_actions_for_conversation(&conversation_id)
+                        .map(|action| action.id.clone())
+                        .collect::<Vec<_>>(),
+                    vec![unresolved_id]
+                );
+                assert!(
+                    !action_model
+                        .run_agents_executor(ctx)
+                        .as_ref(ctx)
+                        .is_pending(&resolved_id)
+                );
+            } else {
+                assert!(action_model.get_action_result(&resolved_id).is_none());
+                assert_eq!(
+                    action_model
+                        .get_pending_actions_for_conversation(&conversation_id)
+                        .map(|action| action.id.clone())
+                        .collect::<Vec<_>>(),
+                    vec![resolved_id.clone(), unresolved_id]
+                );
+                assert!(matches!(
+                    action_model
+                        .get_action_status(&resolved_id)
+                        .expect("legacy path should queue the action"),
+                    AIActionStatus::Blocked | AIActionStatus::Queued
+                ));
+            }
         });
         assert_eq!(*sent_request_count.lock().unwrap(), 0);
         assert_eq!(*start_agent_request_count.lock().unwrap(), 0);
     });
+}
+
+#[test]
+fn stream_completion_consumes_server_results_when_capability_enabled() {
+    assert_server_result_stream_completion_behavior(true, true);
+}
+
+#[test]
+fn stream_completion_queues_server_resolved_actions_when_capability_disabled() {
+    assert_server_result_stream_completion_behavior(false, false);
+}
+
+#[test]
+fn stream_completion_does_not_suppress_results_if_capability_is_disabled_before_completion() {
+    assert_server_result_stream_completion_behavior(true, false);
 }
 #[test]
 fn passive_suggestions_request_params_omit_ambient_agent_task_id() {
