@@ -2331,11 +2331,11 @@ impl AgentDriver {
         rx
     }
 
-    /// Whether `uuid` still needs to be awaited by [`Self::wait_for_file_based_mcps_running`]:
-    /// it must still be tracked by [`FileBasedMCPManager`] (i.e. its config has not been
-    /// removed) and not yet have reached a terminal state (`Running`, `FailedToStart`, or
-    /// `NotRunning`). A config removed before or during the wait despawns its installation and
-    /// reports `NotRunning`, which settles the wait rather than blocking it.
+    /// Whether `uuid` is still pending: it must still be tracked by [`FileBasedMCPManager`]
+    /// (i.e. its config has not been removed) and not yet have reached a terminal state
+    /// (`Running`, `FailedToStart`, or `NotRunning`). A config removed before or during the
+    /// wait despawns its installation and reports `NotRunning`, which settles the wait rather
+    /// than blocking it.
     fn is_file_based_mcp_pending(
         templatable_manager: &TemplatableMCPServerManager,
         file_based_manager: &FileBasedMCPManager,

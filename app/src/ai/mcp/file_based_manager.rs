@@ -174,9 +174,9 @@ impl FileBasedMCPManager {
     /// Returns the frozen initial-global-scan wait set once the scan has completed, or `None`
     /// while it is still pending.
     ///
-    /// `AgentDriver` checks this before subscribing for the transient completion event:
-    /// application model initialization schedules and often finishes this scan long before any
-    /// particular run's driver exists, so relying only on the event would miss it.
+    /// Application model initialization schedules this scan, so it can already be complete
+    /// well before anything checks this — often long before the scan's completion event would
+    /// otherwise be observed.
     pub fn initial_global_scan_result(&self) -> Option<Vec<Uuid>> {
         match &self.initial_global_scan_state {
             InitialGlobalMcpScanState::Complete(uuids) => Some(uuids.clone()),
@@ -831,9 +831,8 @@ pub enum FileBasedMCPManagerEvent {
         detected_servers: Vec<CloudEnvMcpScanServer>,
         wait_server_uuids: Vec<Uuid>,
     },
-    /// The one-time initial global home-config scan settled. `AgentDriver` awaits
-    /// [`FileBasedMCPManager::initial_global_scan_result`] instead of only listening for
-    /// this event, since it can fire long before a given run's driver ever subscribes.
+    /// The one-time initial global home-config scan settled. Fires exactly once, as soon as
+    /// the scan finishes, which can be well before any particular subscriber attaches.
     InitialGlobalMcpScanComplete {
         wait_server_uuids: Vec<Uuid>,
     },
