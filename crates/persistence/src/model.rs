@@ -1797,13 +1797,9 @@ pub struct ConversationUsageMetadata {
     #[serde(default)]
     pub cumulative_token_cost_by_model: HashMap<String, PersistedModelTokenCost>,
     /// Archived per-turn usage snapshots, keyed by the string form of the id
-    /// of the most recent exchange updated by that turn's requests as of
-    /// the snapshot. Powers the docked "Turn" panel: a panel opened for an
-    /// older response must show that response's own turn data, not
-    /// whatever the conversation's current "last block" happens to be by
-    /// the time the panel is opened. See [`TurnUsageSnapshot`]. Only
-    /// populated when `FeatureFlag::PricingTransparency` is enabled, and
-    /// capped to the most recent entries (see `MAX_TURN_USAGE_SNAPSHOTS`).
+    /// of the most recent exchange updated by that turn's requests. See
+    /// [`TurnUsageSnapshot`]. Gated behind `FeatureFlag::PricingTransparency`
+    /// and capped to the most recent entries (see `MAX_TURN_USAGE_SNAPSHOTS`).
     #[serde(default)]
     pub turn_usage_by_exchange: HashMap<String, TurnUsageSnapshot>,
 }
@@ -1814,16 +1810,26 @@ impl ConversationUsageMetadata {
     }
 }
 
-/// A point-in-time snapshot of a single turn's usage, captured at the end of
-/// each request that contributes to it. See
-/// [`ConversationUsageMetadata::turn_usage_by_exchange`].
-#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
-pub struct TurnUsageSnapshot {
+/// The tool-call/diff/command counters shared by [`TurnUsageSnapshot`] and
+/// [`TurnUsageBaseline`]. Flattened into both via `#[serde(flatten)]` so the
+/// persisted JSON shape (five top-level fields) is unchanged from before
+/// this struct existed.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq)]
+pub struct TurnCounters {
     pub tool_calls: i32,
     pub files_changed: i32,
     pub lines_added: i32,
     pub lines_removed: i32,
     pub commands_executed: i32,
+}
+
+/// A point-in-time snapshot of a single turn's usage, captured at the end of
+/// each request that contributes to it. See
+/// [`ConversationUsageMetadata::turn_usage_by_exchange`].
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+pub struct TurnUsageSnapshot {
+    #[serde(flatten)]
+    pub counters: TurnCounters,
     /// Per-model token/cost usage for this turn, keyed by the model's
     /// display label. See
     /// [`ConversationUsageMetadata::cumulative_token_cost_by_model`].
@@ -1952,11 +1958,8 @@ impl PersistedModelTokenCost {
 /// See [`ConversationUsageMetadata::turn_usage_baseline`].
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct TurnUsageBaseline {
-    pub tool_calls: i32,
-    pub files_changed: i32,
-    pub lines_added: i32,
-    pub lines_removed: i32,
-    pub commands_executed: i32,
+    #[serde(flatten)]
+    pub counters: TurnCounters,
     /// Per-model token/cost baseline as of the start of the block, keyed by
     /// the same model display label used in
     /// [`ConversationUsageMetadata::cumulative_token_cost_by_model`].

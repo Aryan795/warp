@@ -1424,22 +1424,8 @@ fn create_server_metadata(
 
     // Create ConversationUsageMetadata from persistence model
     let usage = ConversationUsageMetadata {
-        was_summarized: false,
-        context_window_usage: 0.0,
         credits_spent,
-        platform_credits_spent: 0.0,
-        total_provider_cost_in_cents: None,
-        credits_spent_for_last_block: None,
-        platform_credits_spent_for_last_block: None,
-        platform_usage_in_cents_for_last_block: None,
-        charged_usage_for_last_block: None,
-        total_charged_usage: None,
-        token_usage: vec![],
-        tool_usage_metadata: Default::default(),
-        context_window_segments: Vec::new(),
-        turn_usage_baseline: None,
-        cumulative_token_cost_by_model: Default::default(),
-        turn_usage_by_exchange: Default::default(),
+        ..Default::default()
     };
 
     ServerAIConversationMetadata {
@@ -3813,12 +3799,8 @@ fn test_fork_then_bind_handoff_token_persists_to_restored_conversation() {
     });
 }
 
-/// A request completion that only carries `RequestCharges` (no `RequestCost`,
-/// no `ConversationUsageMetadata`, no `TokenUsage`) still changes the
-/// per-model and platform-usage totals derived from those charges, so it
-/// must still emit `ConversationUsageMetadataUpdated` -- otherwise
-/// subscribers (e.g. the Turn panel, orchestration credit rollup) would
-/// persist stale data without being notified to refresh.
+/// A request completion carrying only `RequestCharges` must still emit
+/// `ConversationUsageMetadataUpdated`, so subscribers refresh.
 #[test]
 fn charges_only_completion_emits_conversation_usage_metadata_updated_event() {
     App::test((), |mut app| async move {

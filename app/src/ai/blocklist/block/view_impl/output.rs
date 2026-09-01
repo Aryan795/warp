@@ -115,7 +115,8 @@ use crate::ai::skills::{
 use crate::appearance::Appearance;
 use crate::code::diff_viewer::DisplayMode;
 use crate::code::editor_management::CodeSource;
-use crate::settings::AISettings;
+use crate::persistence::model::TurnUsageSnapshot;
+use crate::settings::{AISettings, UsageDisplayUnit};
 use crate::settings_view::SettingsSection;
 use crate::terminal::ShellLaunchData;
 #[cfg(not(target_family = "wasm"))]
@@ -3639,18 +3640,28 @@ fn render_response_footer(props: Props, app: &AppContext) -> Option<Box<dyn Elem
     // and there's an archived turn-usage snapshot for *this block's own exchange* (not just
     // the conversation's current turn), its pie-chart trigger icon replaces the legacy
     // credit-count button rather than sitting alongside it.
-    let turn_panel_trigger_visible = FeatureFlag::PricingTransparency.is_enabled()
-        && props
-            .model
-            .exchange_id(app)
-            .zip(props.model.conversation(app))
-            .is_some_and(|(exchange_id, conversation)| {
-                conversation
-                    .turn_usage_snapshot_for_exchange(exchange_id)
-                    .is_some()
-            });
-    if turn_panel_trigger_visible {
-        flex.add_child(render_turn_panel_button(props, app));
+    let turn_usage_snapshot = FeatureFlag::PricingTransparency
+        .is_enabled()
+        .then(|| {
+            props
+                .model
+                .exchange_id(app)
+                .zip(props.model.conversation(app))
+        })
+        .flatten()
+        .and_then(|(exchange_id, conversation)| {
+            conversation
+                .turn_usage_snapshot_for_exchange(exchange_id)
+                .cloned()
+        });
+    if let Some(turn_usage) = turn_usage_snapshot {
+        flex.add_child(render_turn_panel_button(
+            props,
+            turn_usage,
+            style_override,
+            style_override_with_background,
+            app,
+        ));
     } else {
         flex.add_child(render_usage_button(props, app));
     }
@@ -3865,20 +3876,13 @@ fn render_usage_button(props: Props, app: &AppContext) -> Box<dyn Element> {
 /// panel. Uses the same hover-tooltip/click-to-open pattern as the usage
 /// button above, but is otherwise an independent trigger with no
 /// cross-navigation to the usage footer / "Conversation" popover.
-fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> {
-    let Some(conversation) = props.model.conversation(app) else {
-        return Empty::new().finish();
-    };
-    // Visibility is already gated on this block's own exchange having turn
-    // data (see `turn_panel_trigger_visible`), so this only needs to fetch
-    // that same data for the tooltip.
-    let Some(exchange_id) = props.model.exchange_id(app) else {
-        return Empty::new().finish();
-    };
-    let Some(turn_usage) = conversation.turn_usage_for_exchange(exchange_id) else {
-        return Empty::new().finish();
-    };
-
+fn render_turn_panel_button(
+    props: Props,
+    turn_usage: TurnUsageSnapshot,
+    style_override: UiComponentStyles,
+    style_override_with_background: UiComponentStyles,
+    app: &AppContext,
+) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
     let ui_builder = appearance.ui_builder().clone();
     // Sum turn-scoped per-model cost for the tooltip, so it reads as the
@@ -3888,45 +3892,30 @@ fn render_turn_panel_button(props: Props, app: &AppContext) -> Box<dyn Element> 
         .iter()
         .map(|(_, model_usage)| model_usage.cost_in_cents())
         .sum();
-    // The tooltip is the one place the Turn panel respects the Credits/
-    // Dollars display-unit toggle: `format_usage` shows dollars when the
-    // unit is Dollars and a cost is known, else falls back to credits.
-    // There's no per-model credits breakdown (only an aggregate turn-level
-    // credits figure), so the panel itself always shows dollars; see the
-    // panel's own "CREDITS" section for the credits-mode total. Tokens are
-    // omitted here (unlike `format_usage`'s other call sites) since the
-    // tooltip is meant to be a quick dollars/credits readout, not a full
-    // usage summary.
     let usage_display_unit = AISettings::as_ref(app).usage_display_unit;
-    let credits_spent_for_last_block = turn_usage.inference_credits_spent.unwrap_or(0.0)
-        + turn_usage.platform_credits_spent.unwrap_or(0.0);
-    let tooltip_text = format!(
-        "Turn: {}",
-        format_usage(
-            credits_spent_for_last_block,
-            None,
-            Some(turn_cost_in_cents).filter(|&cost| cost > 0.0),
-            usage_display_unit,
-        )
-    );
-
-    // Matches the sizing/hover-background/corner-radius of the sibling
-    // action-row buttons (thumbs up/down, continue, fork) below, so the
-    // pie-chart trigger reads as part of the same button group.
-    let style_override = UiComponentStyles {
-        font_color: Some(
-            appearance
-                .theme()
-                .sub_text_color(appearance.theme().background())
-                .into(),
-        ),
-        width: Some(icon_size(app) + 4.),
-        height: Some(icon_size(app) + 4.),
-        ..Default::default()
+    let turn_cost = Some(turn_cost_in_cents).filter(|&cost| cost > 0.0);
+    // `inference_credits_spent`/`platform_credits_spent` are only both
+    // `Some` once the platform/inference split is known; a missing split
+    // must not be treated as zero (see `AIConversation::inference_credits_spent_for_last_block`).
+    let credits_spent_for_last_block = match (
+        turn_usage.inference_credits_spent,
+        turn_usage.platform_credits_spent,
+    ) {
+        (Some(inference), Some(platform)) => Some(inference + platform),
+        _ => None,
     };
-    let style_override_with_background = UiComponentStyles {
-        background: Some(blended_colors::neutral_4(appearance.theme()).into()),
-        ..style_override
+    let tooltip_text = match (credits_spent_for_last_block, turn_cost) {
+        (Some(credits), _) => format!(
+            "Turn: {}",
+            format_usage(credits, None, turn_cost, usage_display_unit)
+        ),
+        // The credits split is unknown, but a dollar cost is known and the
+        // user prefers dollars -- show that rather than a fabricated
+        // combined credits total.
+        (None, Some(cost)) if usage_display_unit == UsageDisplayUnit::Dollars => {
+            format!("Turn: ${:.2}", cost / 100.0)
+        }
+        (None, _) => "Turn".to_string(),
     };
 
     icon_button(

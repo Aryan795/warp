@@ -4,7 +4,8 @@ use warp_multi_agent_api as api;
 
 use super::{
     AgentConversation, AgentConversationData, AgentConversationSummary, ChargedUsageTotals,
-    ConversationUsageMetadata, ModelTokenUsage, PersistedModelTokenCost, TurnUsageBaseline,
+    ConversationUsageMetadata, ModelTokenUsage, PersistedModelTokenCost, TurnCounters,
+    TurnUsageBaseline,
 };
 
 fn parentless_task(id: &str, message_count: usize) -> api::Task {
@@ -178,7 +179,10 @@ fn conversation_usage_metadata_round_trips_per_model_token_cost() {
             },
         )]),
         turn_usage_baseline: Some(TurnUsageBaseline {
-            tool_calls: 2,
+            counters: TurnCounters {
+                tool_calls: 2,
+                ..Default::default()
+            },
             per_model: HashMap::from([(
                 "claude-sonnet".to_string(),
                 PersistedModelTokenCost {
@@ -194,7 +198,6 @@ fn conversation_usage_metadata_round_trips_per_model_token_cost() {
                     web_search_cost_in_cents: 0.2,
                 },
             )]),
-            ..Default::default()
         }),
         ..Default::default()
     };
@@ -212,6 +215,88 @@ fn conversation_usage_metadata_round_trips_per_model_token_cost() {
     assert_eq!(
         deserialized.turn_usage_baseline,
         metadata.turn_usage_baseline
+    );
+}
+
+/// When the baseline exceeds the current snapshot on every field (e.g. a
+/// restored conversation whose baseline predates a counter reset), every
+/// output field must clamp to zero rather than go negative.
+#[test]
+fn persisted_model_token_cost_saturating_sub_clamps_when_baseline_is_larger() {
+    let current = PersistedModelTokenCost {
+        total_input: 10,
+        output: 5,
+        input_cache_read: 1,
+        input_cache_write: 1,
+        input_cost_in_cents: 1.0,
+        output_cost_in_cents: 1.0,
+        input_cache_read_cost_in_cents: 1.0,
+        input_cache_write_cost_in_cents: 1.0,
+        web_search_count: 1,
+        web_search_cost_in_cents: 1.0,
+    };
+    let baseline = PersistedModelTokenCost {
+        total_input: 100,
+        output: 50,
+        input_cache_read: 10,
+        input_cache_write: 10,
+        input_cost_in_cents: 10.0,
+        output_cost_in_cents: 10.0,
+        input_cache_read_cost_in_cents: 10.0,
+        input_cache_write_cost_in_cents: 10.0,
+        web_search_count: 10,
+        web_search_cost_in_cents: 10.0,
+    };
+
+    let delta = current.saturating_sub(&baseline);
+
+    assert_eq!(delta, PersistedModelTokenCost::default());
+}
+
+/// Normal case: every field's delta is the straightforward difference.
+#[test]
+fn persisted_model_token_cost_saturating_sub_computes_normal_delta() {
+    let current = PersistedModelTokenCost {
+        total_input: 150,
+        output: 60,
+        input_cache_read: 15,
+        input_cache_write: 12,
+        input_cost_in_cents: 30.0,
+        output_cost_in_cents: 12.0,
+        input_cache_read_cost_in_cents: 3.0,
+        input_cache_write_cost_in_cents: 2.4,
+        web_search_count: 5,
+        web_search_cost_in_cents: 2.5,
+    };
+    let baseline = PersistedModelTokenCost {
+        total_input: 100,
+        output: 20,
+        input_cache_read: 5,
+        input_cache_write: 2,
+        input_cost_in_cents: 20.0,
+        output_cost_in_cents: 4.0,
+        input_cache_read_cost_in_cents: 1.0,
+        input_cache_write_cost_in_cents: 0.4,
+        web_search_count: 2,
+        web_search_cost_in_cents: 1.0,
+    };
+
+    let delta = current.saturating_sub(&baseline);
+
+    assert_eq!(
+        delta,
+        PersistedModelTokenCost {
+            total_input: 50,
+            output: 40,
+            input_cache_read: 10,
+            input_cache_write: 10,
+            input_cost_in_cents: 10.0,
+            output_cost_in_cents: 8.0,
+            input_cache_read_cost_in_cents: 2.0,
+            input_cache_write_cost_in_cents: 2.0,
+            web_search_count: 3,
+            web_search_cost_in_cents: 1.5,
+        }
     );
 }
 

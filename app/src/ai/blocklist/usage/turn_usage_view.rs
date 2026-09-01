@@ -27,6 +27,7 @@ use super::conversation_usage_view::TimingInfo;
 use super::render_context_window_usage_icon;
 use crate::ai::blocklist::view_util::format_credits;
 use crate::appearance::Appearance;
+use crate::persistence::model::PersistedModelTokenCost;
 use crate::settings::{AISettings, AISettingsChangedEvent, UsageDisplayUnit};
 use crate::ui_components::blended_colors;
 use crate::ui_components::icons::Icon;
@@ -44,49 +45,8 @@ type LabelValueColumns = (Vec<Box<dyn Element>>, Vec<Box<dyn Element>>);
 pub struct TurnModelUsage {
     /// The model's display identifier (e.g. `auto (cost-efficient)`).
     pub model_id: String,
-    /// Non-cached input tokens spent on this model during this turn.
-    pub total_input: u64,
-    /// Output tokens spent on this model during this turn.
-    pub output: u64,
-    /// Cache-read input tokens spent on this model during this turn. Only
-    /// populated for providers (e.g. Anthropic) that report granular cache
-    /// usage.
-    pub input_cache_read: u64,
-    /// Cache-write input tokens spent on this model during this turn. Only
-    /// populated for providers (e.g. Anthropic) that report granular cache
-    /// usage.
-    pub input_cache_write: u64,
-    /// Provider cost incurred on this model during this turn, in US cents.
-    /// `None` when a turn-scoped cost cannot be derived, in which case the
-    /// cost is omitted from the row rather than rendered as `$0.00`.
-    pub cost_in_cents: Option<f32>,
-    /// Per-field cost breakdown (input/output/cache) plus web search count
-    /// and cost, sourced from the server's `RequestCharges`. `None` when no
-    /// request with charge data has completed yet this turn, in which case
-    /// the expanded breakdown shows token counts only (no dollar values or
-    /// web search row).
-    pub inference_breakdown: Option<TurnModelInferenceBreakdown>,
-}
-
-impl TurnModelUsage {
-    /// Total tokens (input + output) spent on this model during this turn.
-    /// Cache-read/write tokens are shown separately in the row's expanded
-    /// breakdown and are not double-counted here.
-    pub fn tokens(&self) -> u64 {
-        self.total_input + self.output
-    }
-}
-
-/// Per-field cost breakdown for a single model's expanded row. See
-/// [`TurnModelUsage::inference_breakdown`].
-#[derive(Debug, Clone, Copy)]
-pub struct TurnModelInferenceBreakdown {
-    pub input_cost_in_cents: f32,
-    pub output_cost_in_cents: f32,
-    pub input_cache_read_cost_in_cents: f32,
-    pub input_cache_write_cost_in_cents: f32,
-    pub web_search_count: u64,
-    pub web_search_cost_in_cents: f32,
+    /// Token/cost usage accrued by this model during this turn.
+    pub usage: PersistedModelTokenCost,
 }
 
 /// Turn-scoped usage data backing the "INFERENCE USAGE" section. All fields
@@ -101,10 +61,8 @@ pub struct TurnUsageInfo {
     /// value (the conversation's running total as of this turn) rather than
     /// a per-turn delta.
     pub context_window_usage: f32,
-    /// Platform usage charged (in US cents) over this turn, rendered as its
-    /// own "PLATFORM USAGE" section. `None` when no request with charge
-    /// data has completed yet; also omitted when the charge is truly zero,
-    /// rather than rendered as a noisy `$0.00` section.
+    /// Platform usage charged (in US cents) over this turn. Rendered as its
+    /// own "PLATFORM USAGE" section by [`TurnUsageView::platform_usage_rows`].
     pub platform_usage_in_cents: Option<f32>,
     /// Inference-only credits spent over this turn (the combined
     /// inference + platform legacy credits total, minus the platform
@@ -142,17 +100,21 @@ pub enum TurnUsageViewEvent {
     CloseRequested,
 }
 
+/// Hover/click state and expanded-breakdown flag for a single row in
+/// [`TurnUsageInfo::models`], indexed in lockstep with it so there is
+/// structurally only one length to keep in sync.
+struct ModelRowState {
+    mouse: MouseStateHandle,
+    expanded: bool,
+}
+
 /// The docked "Turn" panel view. See module docs for scope/behavior.
 pub struct TurnUsageView {
-    pub usage_info: TurnUsageInfo,
+    usage_info: TurnUsageInfo,
     pub timing_info: Option<TimingInfo>,
     close_button_mouse_state: MouseStateHandle,
-    /// One mouse state per row in `usage_info.models`, used to make each
-    /// model's label row clickable to expand/collapse its token breakdown.
-    model_row_mouse_states: Vec<MouseStateHandle>,
-    /// Whether each model row (by index into `usage_info.models`) is
-    /// currently expanded to show its input/output/cache breakdown.
-    model_row_expanded: Vec<bool>,
+    /// Per-model row UI state, indexed in lockstep with `usage_info.models`.
+    model_rows: Vec<ModelRowState>,
 }
 
 impl TurnUsageView {
@@ -171,18 +133,19 @@ impl TurnUsageView {
             }
         });
 
-        let model_row_mouse_states = usage_info
+        let model_rows = usage_info
             .models
             .iter()
-            .map(|_| MouseStateHandle::default())
+            .map(|_| ModelRowState {
+                mouse: MouseStateHandle::default(),
+                expanded: false,
+            })
             .collect();
-        let model_row_expanded = vec![false; usage_info.models.len()];
         Self {
             usage_info,
             timing_info,
             close_button_mouse_state: MouseStateHandle::default(),
-            model_row_mouse_states,
-            model_row_expanded,
+            model_rows,
         }
     }
 
@@ -262,14 +225,11 @@ impl TurnUsageView {
         let theme = appearance.theme();
         let background = theme.surface_2();
         let text_color = blended_colors::text_main(theme, background);
-        let expanded = self.model_row_expanded.get(index).copied().unwrap_or(false);
+        let row_state = &self.model_rows[index];
+        let expanded = row_state.expanded;
 
-        let mut value_parts = vec![format_tokens(model.tokens())];
-        if let Some(cost_in_cents) = model.cost_in_cents {
-            value_parts.push(format_dollars(cost_in_cents));
-        }
         let value = Text::new(
-            value_parts.join("  /  "),
+            format_tokens_with_cost(model.usage.tokens(), model.usage.cost_in_cents()),
             appearance.ui_font_family(),
             font_size,
         )
@@ -285,7 +245,7 @@ impl TurnUsageView {
         } else {
             Icon::ChevronRight
         };
-        let label = Hoverable::new(self.model_row_mouse_states[index].clone(), move |_state| {
+        let label = Hoverable::new(row_state.mouse.clone(), move |_state| {
             let text_element = Text::new(model_name.clone(), font_family, font_size)
                 .with_style(warpui::fonts::Properties {
                     weight: warpui::fonts::Weight::Medium,
@@ -314,18 +274,15 @@ impl TurnUsageView {
 
         let mut rows = vec![(label, value)];
         if expanded {
-            // Smaller than the rest of the panel's body text, per feedback,
-            // to visually distinguish the breakdown as a nested detail.
+            // Smaller than the rest of the panel's body text, to visually
+            // distinguish the breakdown as a nested detail.
             let breakdown_font_size = appearance.ui_font_size() - 1.;
-            let breakdown = model.inference_breakdown.as_ref();
+            let usage = &model.usage;
 
             rows.push((
                 render_indented_label_text("Input", breakdown_font_size, appearance),
                 render_value_text(
-                    format_tokens_with_optional_cost(
-                        model.total_input,
-                        breakdown.map(|b| b.input_cost_in_cents),
-                    ),
+                    format_tokens_with_cost(usage.total_input, usage.input_cost_in_cents),
                     breakdown_font_size,
                     appearance,
                 ),
@@ -333,48 +290,45 @@ impl TurnUsageView {
             rows.push((
                 render_indented_label_text("Output", breakdown_font_size, appearance),
                 render_value_text(
-                    format_tokens_with_optional_cost(
-                        model.output,
-                        breakdown.map(|b| b.output_cost_in_cents),
-                    ),
+                    format_tokens_with_cost(usage.output, usage.output_cost_in_cents),
                     breakdown_font_size,
                     appearance,
                 ),
             ));
-            if model.input_cache_read > 0 {
+            if usage.input_cache_read > 0 {
                 rows.push((
                     render_indented_label_text("Cache read", breakdown_font_size, appearance),
                     render_value_text(
-                        format_tokens_with_optional_cost(
-                            model.input_cache_read,
-                            breakdown.map(|b| b.input_cache_read_cost_in_cents),
+                        format_tokens_with_cost(
+                            usage.input_cache_read,
+                            usage.input_cache_read_cost_in_cents,
                         ),
                         breakdown_font_size,
                         appearance,
                     ),
                 ));
             }
-            if model.input_cache_write > 0 {
+            if usage.input_cache_write > 0 {
                 rows.push((
                     render_indented_label_text("Cache write", breakdown_font_size, appearance),
                     render_value_text(
-                        format_tokens_with_optional_cost(
-                            model.input_cache_write,
-                            breakdown.map(|b| b.input_cache_write_cost_in_cents),
+                        format_tokens_with_cost(
+                            usage.input_cache_write,
+                            usage.input_cache_write_cost_in_cents,
                         ),
                         breakdown_font_size,
                         appearance,
                     ),
                 ));
             }
-            if let Some(breakdown) = breakdown.filter(|b| b.web_search_count > 0) {
+            if usage.web_search_count > 0 {
                 rows.push((
                     render_indented_label_text("Web search", breakdown_font_size, appearance),
                     render_value_text(
                         format!(
                             "{}  /  {}",
-                            format_web_searches(breakdown.web_search_count),
-                            format_dollars(breakdown.web_search_cost_in_cents)
+                            format_web_searches(usage.web_search_count),
+                            format_dollars(usage.web_search_cost_in_cents)
                         ),
                         breakdown_font_size,
                         appearance,
@@ -415,29 +369,25 @@ impl TurnUsageView {
     }
 
     /// The "INFERENCE USAGE" section header, with the turn's total tokens
-    /// (and cost, when known) in the value column instead of an empty
-    /// placeholder, so the total lines up with the other numeric amounts in
-    /// the value column. The cost is omitted when no model reports one,
-    /// matching how per-model rows omit an unknown cost rather than
-    /// showing `$0.00`.
+    /// and cost in the value column instead of an empty placeholder, so the
+    /// total lines up with the other numeric amounts in the value column.
     fn inference_usage_header_row(&self, appearance: &Appearance) -> LabelValueRow {
         let header_font_size = appearance.overline_font_size() + 3.;
-        let total_tokens: u64 = self.usage_info.models.iter().map(|m| m.tokens()).sum();
-        let total_cost_in_cents = self
+        let total_tokens: u64 = self
             .usage_info
             .models
             .iter()
-            .any(|m| m.cost_in_cents.is_some())
-            .then(|| {
-                self.usage_info
-                    .models
-                    .iter()
-                    .filter_map(|m| m.cost_in_cents)
-                    .sum()
-            });
+            .map(|m| m.usage.tokens())
+            .sum();
+        let total_cost_in_cents: f32 = self
+            .usage_info
+            .models
+            .iter()
+            .map(|m| m.usage.cost_in_cents())
+            .sum();
         let theme = appearance.theme();
         let value = Text::new(
-            format_tokens_with_optional_cost(total_tokens, total_cost_in_cents),
+            format_tokens_with_cost(total_tokens, total_cost_in_cents),
             appearance.ui_font_family(),
             header_font_size,
         )
@@ -501,11 +451,10 @@ impl TurnUsageView {
     }
 
     /// The "PLATFORM USAGE" section: a section-header row with the dollar
-    /// amount in the value column instead of an empty placeholder, plus
-    /// (in Credits mode, if any) a trailing normal "Credits" row for the
-    /// turn's platform-only credit total. `None` when there's no charge
-    /// data yet, or the charge is truly zero -- a `$0.00` platform usage
-    /// section would just be noise.
+    /// amount in the value column, plus (in Credits mode, if any) a
+    /// trailing "Credits" row for the turn's platform-only credit total.
+    /// `None` when there's no charge data yet or the charge is truly zero
+    /// (to avoid a noisy `$0.00` section).
     fn platform_usage_rows(
         &self,
         appearance: &Appearance,
@@ -638,15 +587,13 @@ impl TurnUsageView {
 impl TurnUsageView {
     /// Builds the panel's two shared label/value columns as flat, parallel
     /// vectors (row `i` in `labels` always corresponds to row `i` in
-    /// `values`). Extracted from `render()` so tests can verify row-by-row
-    /// alignment without needing a full GUI layout pass.
+    /// `values`).
     ///
     /// Section headers pair with a value-column companion built via the
     /// same [`Self::render_section_header`] helper (passed an empty label)
     /// rather than an `Empty` placeholder, since `Empty` has zero layout
     /// height and would shift every later value row out of alignment with
-    /// its label -- matching `ConversationUsageView::render_section_header`'s
-    /// existing pattern.
+    /// its label.
     fn build_label_value_columns(
         &self,
         appearance: &Appearance,
@@ -782,8 +729,8 @@ impl TypedActionView for TurnUsageView {
                 ctx.emit(TurnUsageViewEvent::CloseRequested);
             }
             TurnUsageViewAction::ToggleModelExpanded(index) => {
-                if let Some(expanded) = self.model_row_expanded.get_mut(*index) {
-                    *expanded = !*expanded;
+                if let Some(row) = self.model_rows.get_mut(*index) {
+                    row.expanded = !row.expanded;
                 }
                 ctx.notify();
             }
@@ -829,17 +776,13 @@ pub(crate) fn format_tokens(tokens: u64) -> String {
     format!("{tokens} token{}", if tokens == 1 { "" } else { "s" })
 }
 
-/// Formats a token count, appending the corresponding dollar cost (with a
-/// forward-slash separator) when known.
-fn format_tokens_with_optional_cost(tokens: u64, cost_in_cents: Option<f32>) -> String {
-    match cost_in_cents {
-        Some(cost_in_cents) => format!(
-            "{}  /  {}",
-            format_tokens(tokens),
-            format_dollars(cost_in_cents)
-        ),
-        None => format_tokens(tokens),
-    }
+/// Formats a token count together with its dollar cost.
+fn format_tokens_with_cost(tokens: u64, cost_in_cents: f32) -> String {
+    format!(
+        "{}  /  {}",
+        format_tokens(tokens),
+        format_dollars(cost_in_cents)
+    )
 }
 
 pub(crate) fn format_web_searches(count: u64) -> String {

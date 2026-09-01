@@ -5329,6 +5329,16 @@ impl AIBlock {
         }
     }
 
+    /// Notifies the terminal view of the turn panel's current expansion
+    /// state, using this block's own conversation/exchange ids.
+    fn emit_turn_panel_toggled(&self, ctx: &mut ViewContext<Self>) {
+        ctx.emit(AIBlockEvent::TurnPanelToggled {
+            conversation_id: self.client_ids.conversation_id,
+            exchange_id: self.client_ids.client_exchange_id,
+            is_expanded: self.is_turn_panel_expanded,
+        });
+    }
+
     fn open_link(
         &self,
         location: &TextLocation,
@@ -6699,19 +6709,11 @@ impl TypedActionView for AIBlock {
             }
             AIBlockAction::ToggleIsTurnPanelExpanded => {
                 self.is_turn_panel_expanded = !self.is_turn_panel_expanded;
-                ctx.emit(AIBlockEvent::TurnPanelToggled {
-                    conversation_id: self.client_ids.conversation_id,
-                    exchange_id: self.client_ids.client_exchange_id,
-                    is_expanded: self.is_turn_panel_expanded,
-                });
+                self.emit_turn_panel_toggled(ctx);
             }
             AIBlockAction::SetIsTurnPanelExpanded(is_expanded) => {
                 self.is_turn_panel_expanded = *is_expanded;
-                ctx.emit(AIBlockEvent::TurnPanelToggled {
-                    conversation_id: self.client_ids.conversation_id,
-                    exchange_id: self.client_ids.client_exchange_id,
-                    is_expanded: self.is_turn_panel_expanded,
-                });
+                self.emit_turn_panel_toggled(ctx);
             }
             AIBlockAction::CommentExpanded { id } => {
                 let Some(comment) = self.comment_states.get_mut(id) else {

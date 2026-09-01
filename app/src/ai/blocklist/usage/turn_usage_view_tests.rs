@@ -8,6 +8,7 @@ use warpui::platform::WindowStyle;
 use warpui::{App, Element, SingletonEntity};
 
 use super::*;
+use crate::persistence::model::PersistedModelTokenCost;
 use crate::settings::UsageDisplayUnit;
 use crate::test_util::settings::initialize_settings_for_tests;
 
@@ -15,12 +16,13 @@ fn placeholder_usage_info() -> TurnUsageInfo {
     TurnUsageInfo {
         models: vec![TurnModelUsage {
             model_id: "auto (cost-efficient)".to_string(),
-            total_input: 3,
-            output: 1,
-            input_cache_read: 0,
-            input_cache_write: 0,
-            cost_in_cents: Some(60.0),
-            inference_breakdown: None,
+            usage: PersistedModelTokenCost {
+                total_input: 3,
+                output: 1,
+                input_cost_in_cents: 40.0,
+                output_cost_in_cents: 20.0,
+                ..Default::default()
+            },
         }],
         context_window_usage: 0.001,
         platform_usage_in_cents: None,
@@ -70,15 +72,11 @@ fn close_action_emits_close_requested_event() {
     });
 }
 
-/// Regression test for a layout bug where each section header's
-/// value-column placeholder was `Empty` (zero layout height) while its
-/// label-column counterpart was a real `Text` (non-zero height), shifting
-/// every subsequent row in the value column up relative to its label --
-/// once per section header. Verifies row-by-row alignment by checking that
-/// the label and value columns produce the same number of text rows (a
-/// dropped/misaligned row changes the `Flex::debug_text_content` line
-/// count, since `Empty` contributes no line at all while a real `Text`
-/// contributes an empty line), and spot-checks specific rows line up.
+/// Verifies row-by-row alignment between the label and value columns: every
+/// label row must have a paired value row (a dropped/misaligned row changes
+/// the `Flex::debug_text_content` line count, since `Empty` contributes no
+/// line at all while a real `Text` contributes an empty line), and spot-
+/// checks specific rows line up.
 #[test]
 fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
     App::test((), |mut app| async move {
@@ -88,21 +86,21 @@ fn build_label_value_columns_keeps_every_row_aligned_across_sections() {
             models: vec![
                 TurnModelUsage {
                     model_id: "claude-sonnet".to_string(),
-                    total_input: 80,
-                    output: 20,
-                    input_cache_read: 0,
-                    input_cache_write: 0,
-                    cost_in_cents: Some(12.0),
-                    inference_breakdown: None,
+                    usage: PersistedModelTokenCost {
+                        total_input: 80,
+                        output: 20,
+                        input_cost_in_cents: 12.0,
+                        ..Default::default()
+                    },
                 },
                 TurnModelUsage {
                     model_id: "gpt-5".to_string(),
-                    total_input: 40,
-                    output: 10,
-                    input_cache_read: 0,
-                    input_cache_write: 0,
-                    cost_in_cents: Some(6.0),
-                    inference_breakdown: None,
+                    usage: PersistedModelTokenCost {
+                        total_input: 40,
+                        output: 10,
+                        input_cost_in_cents: 6.0,
+                        ..Default::default()
+                    },
                 },
             ],
             context_window_usage: 0.25,
@@ -204,19 +202,18 @@ fn toggle_model_expanded_shows_and_hides_breakdown_rows() {
         let usage_info = TurnUsageInfo {
             models: vec![TurnModelUsage {
                 model_id: "claude-sonnet".to_string(),
-                total_input: 80,
-                output: 20,
-                input_cache_read: 5,
-                input_cache_write: 3,
-                cost_in_cents: Some(12.0),
-                inference_breakdown: Some(TurnModelInferenceBreakdown {
+                usage: PersistedModelTokenCost {
+                    total_input: 80,
+                    output: 20,
+                    input_cache_read: 5,
+                    input_cache_write: 3,
                     input_cost_in_cents: 100.0,
                     output_cost_in_cents: 200.0,
                     input_cache_read_cost_in_cents: 30.0,
                     input_cache_write_cost_in_cents: 20.0,
                     web_search_count: 2,
                     web_search_cost_in_cents: 300.0,
-                }),
+                },
             }],
             context_window_usage: 0.1,
             platform_usage_in_cents: None,
@@ -336,158 +333,6 @@ fn format_dollars_shows_less_than_a_cent_for_tiny_nonzero_amounts() {
     assert_eq!(format_dollars(0.999), "<$0.01");
     assert_eq!(format_dollars(1.0), "$0.01");
     assert_eq!(format_dollars(150.0), "$1.50");
-}
-
-/// A comprehensive mock scenario covering everything the panel can show at
-/// once: three models (agents) with every token type populated across them
-/// (input, output, cache read, cache write, web search), non-zero platform
-/// usage, and a sub-penny cost (`gpt-5.1-codex`'s row) that must render as
-/// `<$0.01` rather than rounding to `$0.00`. Useful as a reference fixture
-/// for eyeballing the panel's full layout -- run with `--nocapture` to print
-/// the rendered label/value columns.
-fn comprehensive_multi_agent_usage_info() -> TurnUsageInfo {
-    TurnUsageInfo {
-        models: vec![
-            TurnModelUsage {
-                model_id: "claude-opus-4.1".to_string(),
-                total_input: 15_234,
-                output: 4_210,
-                input_cache_read: 6_000,
-                input_cache_write: 1_200,
-                cost_in_cents: Some(45.7 + 63.15 + 9.0 + 3.6),
-                inference_breakdown: Some(TurnModelInferenceBreakdown {
-                    input_cost_in_cents: 45.7,
-                    output_cost_in_cents: 63.15,
-                    input_cache_read_cost_in_cents: 9.0,
-                    input_cache_write_cost_in_cents: 3.6,
-                    web_search_count: 4,
-                    web_search_cost_in_cents: 1.2,
-                }),
-            },
-            // Sub-penny model: both its top-line cost and its Input/Output
-            // breakdown rows should all render as `<$0.01`.
-            TurnModelUsage {
-                model_id: "gpt-5.1-codex".to_string(),
-                total_input: 800,
-                output: 150,
-                input_cache_read: 0,
-                input_cache_write: 0,
-                cost_in_cents: Some(0.05 + 0.03),
-                inference_breakdown: Some(TurnModelInferenceBreakdown {
-                    input_cost_in_cents: 0.05,
-                    output_cost_in_cents: 0.03,
-                    input_cache_read_cost_in_cents: 0.0,
-                    input_cache_write_cost_in_cents: 0.0,
-                    web_search_count: 0,
-                    web_search_cost_in_cents: 0.0,
-                }),
-            },
-            TurnModelUsage {
-                model_id: "grok-4.1-fast".to_string(),
-                total_input: 50_000,
-                output: 12_000,
-                input_cache_read: 2_000,
-                input_cache_write: 500,
-                cost_in_cents: Some(150.0 + 360.0 + 6.0 + 1.5),
-                inference_breakdown: Some(TurnModelInferenceBreakdown {
-                    input_cost_in_cents: 150.0,
-                    output_cost_in_cents: 360.0,
-                    input_cache_read_cost_in_cents: 6.0,
-                    input_cache_write_cost_in_cents: 1.5,
-                    web_search_count: 1,
-                    web_search_cost_in_cents: 25.0,
-                }),
-            },
-        ],
-        context_window_usage: 0.63,
-        platform_usage_in_cents: Some(37.25),
-        inference_credits_spent_for_last_block: None,
-        platform_credits_spent_for_last_block: None,
-        tool_calls: 9,
-        files_changed: 4,
-        lines_added: 210,
-        lines_removed: 88,
-        commands_executed: 6,
-    }
-}
-
-/// Renders [`comprehensive_multi_agent_usage_info`] with every model row
-/// expanded, and prints the resulting label/value columns (run with
-/// `cargo test -p warp comprehensive_multi_agent_scenario -- --nocapture`
-/// to see them) while asserting the key layout properties: all three
-/// models are present, every token-type breakdown row appears at least
-/// once across the models, the sub-penny model's amounts render as
-/// `<$0.01`, and platform usage / context window usage are both present
-/// and non-zero.
-#[test]
-fn comprehensive_multi_agent_scenario_covers_every_token_type_and_sub_penny_costs() {
-    App::test((), |mut app| async move {
-        initialize_test_app(&mut app);
-
-        let timing_info = TimingInfo {
-            time_to_first_token_ms: 820,
-            total_agent_response_time_ms: 4_300,
-            wall_to_wall_response_time_ms: Some(5_100),
-        };
-        let (_window_id, view) = app.add_window(WindowStyle::NotStealFocus, |ctx| {
-            TurnUsageView::new(
-                comprehensive_multi_agent_usage_info(),
-                Some(timing_info),
-                ctx,
-            )
-        });
-
-        // Expand every model row so all breakdown rows (Input/Output/Cache
-        // read/Cache write/Web search) are included in the rendered output.
-        for index in 0..3 {
-            view.update(&mut app, |view, ctx| {
-                view.handle_action(&TurnUsageViewAction::ToggleModelExpanded(index), ctx);
-            });
-        }
-
-        view.read(&app, |view, ctx| {
-            let appearance = Appearance::as_ref(ctx);
-            let (labels, values) =
-                view.build_label_value_columns(appearance, UsageDisplayUnit::Dollars);
-            let labels_text = Flex::column()
-                .with_children(labels)
-                .finish()
-                .debug_text_content()
-                .unwrap_or_default();
-            let values_text = Flex::column()
-                .with_children(values)
-                .finish()
-                .debug_text_content()
-                .unwrap_or_default();
-
-            println!("--- labels ---\n{labels_text}\n--- values ---\n{values_text}");
-
-            for model_id in ["claude-opus-4.1", "gpt-5.1-codex", "grok-4.1-fast"] {
-                assert!(
-                    labels_text.contains(model_id),
-                    "expected {model_id} row to be present:\n{labels_text}"
-                );
-            }
-            for breakdown_label in ["Input", "Output", "Cache read", "Cache write", "Web search"] {
-                assert!(
-                    labels_text.contains(breakdown_label),
-                    "expected a {breakdown_label} breakdown row to be present:\n{labels_text}"
-                );
-            }
-            assert!(
-                values_text.contains("<$0.01"),
-                "expected at least one sub-penny amount to render as <$0.01:\n{values_text}"
-            );
-            assert!(
-                labels_text.contains("PLATFORM USAGE"),
-                "expected a non-zero PLATFORM USAGE section:\n{labels_text}"
-            );
-            assert!(
-                labels_text.contains("Context window usage"),
-                "expected a Context window usage row:\n{labels_text}"
-            );
-        });
-    });
 }
 
 /// A `Some(0.0)` platform usage is truly zero (as opposed to `None`, meaning

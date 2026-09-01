@@ -207,13 +207,9 @@ impl From<&ConversationUsageMetadata> for persistence::model::ConversationUsageM
             token_usage: convert_token_usage(&gql.warp_token_usage, &gql.byok_token_usage),
             tool_usage_metadata: (&gql.tool_usage_metadata).into(),
             context_window_segments: gql.context_window_segments.iter().map(Into::into).collect(),
-            // No turn-scoped baseline is available from server-hydrated usage snapshots.
+            // Populated only client-side as requests complete, not from server-hydrated usage snapshots.
             turn_usage_baseline: None,
-            // The server doesn't report a per-model cost breakdown; this is
-            // only ever populated client-side as requests complete.
             cumulative_token_cost_by_model: Default::default(),
-            // Same as above: archived per-turn snapshots are only ever
-            // populated client-side.
             turn_usage_by_exchange: Default::default(),
         }
     }
