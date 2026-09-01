@@ -292,6 +292,20 @@ impl FileMCPWatcher {
         watcher
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_inert() -> Self {
+        Self {
+            file_mcp_tx: async_channel::unbounded().0,
+            in_flight_parses: HashMap::new(),
+            next_parse_generation: 0,
+            home_provider_watchers: HashMap::new(),
+            project_repo_watchers: HashSet::new(),
+            cloud_env_pending: HashMap::new(),
+            initial_global_scan_pending: HashSet::new(),
+            initial_global_scan_emitted: false,
+        }
+    }
+
     /// Emits `InitialGlobalMcpScanComplete` exactly once, as soon as every source scheduled at
     /// startup has settled.
     fn maybe_emit_initial_global_scan_complete(&mut self, ctx: &mut ModelContext<Self>) {

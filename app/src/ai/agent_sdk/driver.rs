@@ -2554,14 +2554,16 @@ impl AgentDriver {
     /// Checks [`FileBasedMCPManager::initial_global_scan_result`] first so a driver constructed
     /// after application initialization still observes completion. Falls back to the transient
     /// completion event, bounded by `deadline`, only while the scan is pending.
+    /// Timeout and a dropped subscription become [`AgentDriverError::MCPStartupFailed`] so the
+    /// existing strict/degraded-start policy can run before the first query.
     fn wait_for_initial_global_file_based_mcp_scan(
         &self,
         deadline: Instant,
         ctx: &mut ModelContext<Self>,
-    ) -> impl Future<Output = Vec<Uuid>> + use<> {
+    ) -> impl Future<Output = Result<Vec<Uuid>, AgentDriverError>> + use<> {
         let manager = FileBasedMCPManager::handle(ctx);
         if let Some(wait_uuids) = manager.as_ref(ctx).initial_global_scan_result() {
-            return Either::Right(future::ready(wait_uuids));
+            return Either::Right(future::ready(Ok(wait_uuids)));
         }
 
         log::info!("Waiting for the initial global file-based MCP scan to complete...");
@@ -2579,24 +2581,33 @@ impl AgentDriver {
 
         if let Some(wait_uuids) = manager.as_ref(ctx).initial_global_scan_result() {
             ctx.unsubscribe_from_model(&manager);
-            return Either::Right(future::ready(wait_uuids));
+            return Either::Right(future::ready(Ok(wait_uuids)));
         }
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         Either::Left(async move {
             match rx.with_timeout(remaining).await {
-                Ok(Ok(uuids)) => uuids,
+                Ok(Ok(uuids)) => Ok(uuids),
                 Ok(Err(Canceled)) => {
                     log::warn!(
-                        "Initial global file-based MCP scan subscription dropped early; proceeding without"
+                        "Initial global file-based MCP scan subscription dropped before completion"
                     );
-                    vec![]
+                    Err(AgentDriverError::MCPStartupFailed {
+                        details: vec![
+                            "initial global file-based MCP scan subscription dropped".to_string(),
+                        ],
+                    })
                 }
                 Err(TimeoutError) => {
                     log::warn!(
-                        "Timed out waiting for the initial global file-based MCP scan to complete; proceeding without"
+                        "Timed out waiting for the initial global file-based MCP scan to complete"
                     );
-                    vec![]
+                    Err(AgentDriverError::MCPStartupFailed {
+                        details: vec![format!(
+                            "initial global file-based MCP scan did not complete within {}s",
+                            remaining.as_secs()
+                        )],
+                    })
                 }
             }
         })
@@ -3372,9 +3383,14 @@ impl AgentDriver {
                         )
                     })
                     .await?;
-                let initial_global_wait_uuids = setup_events
-                    .record_value(SetupStep::InitialGlobalMcpScan, initial_global_scan_wait)
+                let scan_result = setup_events
+                    .record_result(SetupStep::InitialGlobalMcpScan, initial_global_scan_wait)
                     .await;
+                let initial_global_wait_uuids = match &scan_result {
+                    Ok(uuids) => uuids.clone(),
+                    Err(_) => Vec::new(),
+                };
+                Self::handle_mcp_startup_result(scan_result.map(|_| ()), &foreground).await?;
                 if !initial_global_wait_uuids.is_empty() {
                     log::info!(
                         "Checking readiness for {} initial global file-based MCP server(s)",

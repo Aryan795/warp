@@ -28,7 +28,7 @@ fn setup_app(app: &mut App) -> warpui::ModelHandle<FileBasedMCPManager> {
     app.add_singleton_model(RepoMetadataModel::new);
     app.add_singleton_model(HomeDirectoryWatcher::new_for_test);
     app.add_singleton_model(WarpManagedPathsWatcher::new_for_testing);
-    app.add_singleton_model(FileMCPWatcher::new);
+    app.add_singleton_model(|_| FileMCPWatcher::new_inert());
     app.add_singleton_model(AISettings::new_with_defaults);
     app.add_singleton_model(|_| AuthStateProvider::new_for_test());
     app.add_singleton_model(UserWorkspaces::default_mock);
@@ -987,6 +987,57 @@ fn initial_global_scan_result_pending_until_watcher_signals_completion() {
                 m.initial_global_scan_result(),
                 Some(vec![spawned_uuid]),
                 "only the global-scoped auto-started UUID should be in the wait set"
+            );
+        });
+    });
+}
+
+#[test]
+fn initial_global_scan_keeps_auto_started_uuid_across_reparse_before_completion() {
+    let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
+    let Some(warp_mcp_config_path) = warp_managed_mcp_config_path() else {
+        return;
+    };
+    let global_root = warp_mcp_config_path.root_path;
+    let json = r#"{"global-warp": {"command": "npx", "args": ["warp"]}}"#;
+
+    App::test((), |mut app| async move {
+        let manager = setup_app(&mut app);
+        manager.update(&mut app, |m, ctx| {
+            m.handle_watcher_event(
+                &FileMCPWatcherEvent::ConfigParsed {
+                    config_path: global_root.join(".mcp.json"),
+                    root_path: global_root.clone(),
+                    provider: MCPProvider::Warp,
+                    servers: parse_mcp_json(json),
+                },
+                ctx,
+            );
+        });
+        let spawned_uuid = manager.update(&mut app, |m, _| {
+            m.global_warp_servers()
+                .into_iter()
+                .map(|s| s.uuid())
+                .next()
+                .expect("the global Warp server should have been auto-started")
+        });
+        manager.update(&mut app, |m, ctx| {
+            m.handle_watcher_event(
+                &FileMCPWatcherEvent::ConfigParsed {
+                    config_path: global_root.join(".mcp.json"),
+                    root_path: global_root.clone(),
+                    provider: MCPProvider::Warp,
+                    servers: parse_mcp_json(json),
+                },
+                ctx,
+            );
+            m.handle_watcher_event(&FileMCPWatcherEvent::InitialGlobalMcpScanComplete, ctx);
+        });
+        manager.update(&mut app, |m, _| {
+            assert_eq!(
+                m.initial_global_scan_result(),
+                Some(vec![spawned_uuid]),
+                "a reparse that starts no new servers must not drop the first auto-started UUID"
             );
         });
     });

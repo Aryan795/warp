@@ -50,6 +50,10 @@ pub struct FileBasedMCPManager {
     /// application model initialization can finish the scan well before the driver
     /// (constructed per-run, much later) ever subscribes.
     initial_global_scan_state: InitialGlobalMcpScanState,
+    /// Auto-start UUIDs recorded from global-scoped parses while the initial scan is
+    /// still pending. Unioned across reparses of the same source so a later parse that
+    /// finds no *new* spawn cannot drop a server that is still starting.
+    initial_global_auto_started_uuids: HashSet<Uuid>,
 }
 
 /// State of the one-time initial global home-config MCP scan.
@@ -93,19 +97,11 @@ impl FileBasedMCPManager {
             defer_global_warp_autostart,
             global_warp_servers_activated: !defer_global_warp_autostart,
             initial_global_scan_state,
+            initial_global_auto_started_uuids: HashSet::new(),
         }
     }
 
-    /// Handle an event from [`FileMCPWatcher`].
-    ///
-    /// `pub(crate)` (rather than private) so tests outside this module (e.g. `AgentDriver`'s)
-    /// can drive the initial-global-scan latch deterministically without needing a full
-    /// filesystem-backed `FileMCPWatcher` scan.
-    pub(crate) fn handle_watcher_event(
-        &mut self,
-        event: &FileMCPWatcherEvent,
-        ctx: &mut ModelContext<Self>,
-    ) {
+    fn handle_watcher_event(&mut self, event: &FileMCPWatcherEvent, ctx: &mut ModelContext<Self>) {
         match event {
             FileMCPWatcherEvent::ConfigParsed {
                 config_path,
@@ -150,9 +146,8 @@ impl FileBasedMCPManager {
         }
     }
 
-    /// Freezes the first-turn wait set by snapshotting auto-start UUIDs already
-    /// recorded for global-scoped `(root, provider)` entries. Idempotent: a second
-    /// call is a no-op rather than clobbering the frozen set.
+    /// Freezes the first-turn wait set from the unioned global auto-start accumulator.
+    /// Idempotent: a second call is a no-op rather than clobbering the frozen set.
     fn complete_initial_global_scan(&mut self, ctx: &mut ModelContext<Self>) {
         if matches!(
             self.initial_global_scan_state,
@@ -161,16 +156,8 @@ impl FileBasedMCPManager {
             return;
         }
         let wait_server_uuids: Vec<Uuid> = self
-            .pending_scan_auto_started_servers_by_root
+            .initial_global_auto_started_uuids
             .iter()
-            .flat_map(|(root_path, provider_map)| {
-                provider_map.iter().filter_map(|(provider, uuids)| {
-                    (Self::scope_for_source(root_path, *provider)
-                        == FileBasedMCPServerScope::Global)
-                        .then_some(uuids)
-                })
-            })
-            .flatten()
             .copied()
             .unique()
             .sorted_by_key(|uuid| uuid.to_string())
@@ -336,6 +323,14 @@ impl FileBasedMCPManager {
             .entry(root_path.clone())
             .or_default()
             .insert(provider, auto_started_uuids.iter().copied().collect());
+        if matches!(
+            self.initial_global_scan_state,
+            InitialGlobalMcpScanState::Pending,
+        ) && Self::scope_for_source(&root_path, provider) == FileBasedMCPServerScope::Global
+        {
+            self.initial_global_auto_started_uuids
+                .extend(auto_started_uuids.iter().copied());
+        }
 
         // Determine which servers have been removed.
         let servers_to_remove = previous_scanned_servers
