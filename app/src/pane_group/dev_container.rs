@@ -64,7 +64,7 @@ impl PaneGroup {
             pane_id,
         };
         let claim = DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, ctx| {
-            registry.claim(key, locator, operation_id, ctx)
+            registry.claim(key.clone(), locator, operation_id, ctx)
         });
         match claim {
             DevContainerBuildClaim::Existing { locator, .. } => {
@@ -72,6 +72,12 @@ impl PaneGroup {
                 self.focus_pane_by_id(locator.pane_id, ctx);
             }
             DevContainerBuildClaim::Claimed { .. } => {
+                if !self.has_pane(pane_id) {
+                    DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
+                        registry.remove(&key);
+                    });
+                    return;
+                }
                 terminal_view.update(ctx, |view, ctx| {
                     view.bind_dev_container_build(operation, ctx);
                 });

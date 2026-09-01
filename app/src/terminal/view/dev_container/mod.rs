@@ -192,8 +192,7 @@ impl TerminalView {
     /// proceeds directly, same as if there were only ever one supported config. With more than
     /// one, opens the inline Dev Container config selector and waits for a choice (see
     /// [`crate::terminal::input::Input::open_dev_container_config_selector`]); the eventual
-    /// selection re-enters this flow via [`Self::resolve_dev_container_cli_and_bring_up`]. Never
-    /// opens a pane itself: a pane only appears once the container is confirmed running.
+    /// selection re-enters this flow via [`Self::resolve_dev_container_cli_and_bring_up`].
     pub(crate) fn find_and_start_dev_container(&self, ctx: &mut ViewContext<Self>) {
         #[cfg(feature = "local_tty")]
         {
@@ -241,10 +240,8 @@ impl TerminalView {
         }
     }
 
-    /// Resolves the `devcontainer`/`docker` CLI paths and shows the "building" toast, then hands
-    /// off to [`Self::bring_up_dev_container`] for `config_path`. Shared by the single-config
-    /// path in [`Self::find_and_start_dev_container`] and by the config selector's `Selected`
-    /// event (routed here via `InputEvent::DevContainerConfigSelected`).
+    /// Canonicalizes the workspace and config paths, then asks the pane group to open or focus
+    /// the Dev Container build split.
     #[cfg(feature = "local_tty")]
     pub(crate) fn resolve_dev_container_cli_and_bring_up(
         &self,

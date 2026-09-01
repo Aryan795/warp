@@ -4272,6 +4272,113 @@ fn closing_devcontainer_build_cancels_process_group() {
 
 #[cfg(feature = "local_tty")]
 #[test]
+fn closing_devcontainer_build_drops_registry_and_ignores_late_replace() {
+    use crate::terminal::view::dev_container::registry::DevContainerBuildRegistry;
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        pane_group.update(&mut app, |panes, ctx| {
+            let (originating, build_pane) = start_mocked_dev_container_build(panes, ctx);
+            let build_view = panes
+                .terminal_view_from_pane_id(build_pane, ctx)
+                .expect("build view");
+            let key = build_view
+                .as_ref(ctx)
+                .dev_container_build_key(ctx)
+                .expect("registry key");
+            assert!(
+                DevContainerBuildRegistry::handle(ctx)
+                    .read(ctx, |registry, _| registry.get(&key).is_some())
+            );
+            panes.close_pane(build_pane, ctx);
+            assert!(
+                DevContainerBuildRegistry::handle(ctx)
+                    .read(ctx, |registry, _| registry.get(&key).is_none()),
+                "close must drop the registry entry so a late completion cannot revive the surface"
+            );
+            assert!(
+                !panes.replace_dev_container_build_pane_with_mock(build_pane, ctx),
+                "a late replace after close must not create a pane"
+            );
+            assert_eq!(panes.visible_pane_count(), 1);
+            assert_eq!(panes.focused_pane_id(ctx), originating);
+            assert!(!panes.has_pane(build_pane));
+        });
+    });
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
+fn retry_devcontainer_build_renders_new_streamed_output() {
+    use warp_terminal::model::ansi::Processor;
+    use warpui::View;
+    use warpui::units::Lines;
+
+    use crate::terminal::model::block::TranscriptScope;
+    use crate::terminal::view::dev_container::operation::DevContainerBuildPhase;
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+        pane_group.update(&mut app, |panes, ctx| {
+            let (_, build_pane) = start_mocked_dev_container_build(panes, ctx);
+            let build_view = panes
+                .terminal_view_from_pane_id(build_pane, ctx)
+                .expect("build view");
+            build_view.update(ctx, |view, _ctx| {
+                let mut model = view.model.lock();
+                let mut processor = Processor::new();
+                processor.parse_bytes(&mut *model, b"step-one\r\n", &mut std::io::sink());
+            });
+            build_view.update(ctx, |view, ctx| {
+                view.fail_dev_container_build_for_test(
+                    DevContainerBuildPhase::Build,
+                    "boom".to_owned(),
+                    ctx,
+                );
+                view.retry_dev_container_build(ctx);
+            });
+            assert!(
+                !build_view
+                    .as_ref(ctx)
+                    .dev_container_shows_retry_and_close(ctx)
+            );
+            build_view.update(ctx, |view, _ctx| {
+                let mut model = view.model.lock();
+                let mut processor = Processor::new();
+                processor.parse_bytes(&mut *model, b"step-two\r\n", &mut std::io::sink());
+                let visible_height = model.block_list().block_heights().summary().height;
+                assert!(
+                    visible_height > Lines::zero(),
+                    "retry must leave a visible commandless block, got {visible_height:?}"
+                );
+                assert!(
+                    model
+                        .block_list()
+                        .active_block()
+                        .is_visible(&TranscriptScope::Terminal)
+                );
+            });
+            let rendered_text = build_view
+                .as_ref(ctx)
+                .render(ctx)
+                .debug_text_content()
+                .unwrap_or_default();
+            assert!(
+                rendered_text.contains("step-two"),
+                "retry must render the new attempt's logs, got {rendered_text:?}"
+            );
+            assert!(
+                !rendered_text.contains("step-one"),
+                "retry must clear the prior attempt's logs, got {rendered_text:?}"
+            );
+        });
+    });
+}
+
+#[cfg(feature = "local_tty")]
+#[test]
 fn duplicate_devcontainer_invocation_focuses_existing_surface() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
