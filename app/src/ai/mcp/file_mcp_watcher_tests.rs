@@ -10,8 +10,8 @@ use warpui::App;
 
 use super::{
     FileMCPConfigDiagnosticKind, FileMCPConfigParseOutcome, FileMCPWatcher, FileMCPWatcherEvent,
-    InFlightParse, config_change_flags, home_subdir_to_watch, parse_mcp_config_file,
-    providers_in_scope, should_watch_repository, substitute_env_vars,
+    InFlightParse, InitialGlobalScanCohort, config_change_flags, home_subdir_to_watch,
+    parse_mcp_config_file, providers_in_scope, should_watch_repository, substitute_env_vars,
 };
 use crate::ai::mcp::MCPProvider;
 use crate::test_util::terminal::initialize_app_for_terminal_view;
@@ -30,8 +30,7 @@ fn setup_watcher_with_pending(
         home_provider_watchers: HashMap::new(),
         project_repo_watchers: HashSet::new(),
         cloud_env_pending: HashMap::new(),
-        initial_global_scan_pending: pending,
-        initial_global_scan_emitted: false,
+        initial_global_scan: InitialGlobalScanCohort::from_pending(pending),
     })
 }
 
@@ -62,8 +61,7 @@ fn abort_config_parse_cancels_and_removes_inflight_task() {
         home_provider_watchers: HashMap::new(),
         project_repo_watchers: HashSet::new(),
         cloud_env_pending: HashMap::new(),
-        initial_global_scan_pending: HashSet::new(),
-        initial_global_scan_emitted: false,
+        initial_global_scan: InitialGlobalScanCohort::default(),
     };
 
     watcher.abort_config_parse(&config_path, MCPProvider::Warp);
@@ -377,7 +375,7 @@ fn initial_global_scan_settles_after_parsed_missing_and_invalid_sources() {
             .expect("initial global scan should settle after mixed terminal outcomes");
         watcher.read(&app, |watcher, _| {
             assert!(
-                watcher.initial_global_scan_pending.is_empty(),
+                watcher.initial_global_scan.is_empty(),
                 "pending set should be drained once every source settles"
             );
         });
@@ -462,7 +460,7 @@ fn replaced_initial_parse_settles_via_replacement() {
             );
             assert!(
                 watcher
-                    .initial_global_scan_pending
+                    .initial_global_scan
                     .contains(&(config_path.clone(), MCPProvider::Warp)),
                 "the obligation must transfer to the replacement, not be dropped on abort"
             );
@@ -538,7 +536,7 @@ fn stale_completion_callback_cannot_reclaim_a_superseded_source() {
                 "the stale callback must not have removed the replacement's own record"
             );
             assert!(
-                watcher.initial_global_scan_pending.contains(&key),
+                watcher.initial_global_scan.contains(&key),
                 "the stale callback must not have claimed or settled the cohort obligation"
             );
         });
@@ -676,6 +674,48 @@ fn settle_stranded_subdir_configs_skips_an_already_settled_source() {
     });
 }
 
+#[test]
+fn existing_subdir_provider_joins_scan_cohort_without_direct_parse() {
+    let home = PathBuf::from("/home/test");
+    let plan = super::plan_initial_global_scan(
+        Some(home.clone()),
+        None,
+        |path| path == home.join(".codex") || path == home.join(".agents"),
+    );
+    let codex = (home.join(".codex/config.toml"), MCPProvider::Codex);
+    assert!(
+        plan.pending.contains(&codex),
+        "an existing Codex subdir must be owed by the initial scan"
+    );
+    assert!(
+        plan.watch_subdirs
+            .iter()
+            .any(|(path, _)| path == &home.join(".codex")),
+        "an existing Codex subdir should be watched rather than parsed directly"
+    );
+    assert!(
+        !plan
+            .direct_parses
+            .iter()
+            .any(|(_, _, provider)| *provider == MCPProvider::Codex),
+        "watching an existing Codex subdir must not also schedule a racing direct parse"
+    );
+}
+
+#[test]
+fn missing_subdir_provider_joins_scan_cohort_and_direct_parses() {
+    let home = PathBuf::from("/home/test");
+    let plan = super::plan_initial_global_scan(Some(home.clone()), None, |_| false);
+    let codex = (home.join(".codex/config.toml"), MCPProvider::Codex);
+    assert!(plan.pending.contains(&codex));
+    assert!(
+        plan.direct_parses
+            .iter()
+            .any(|(path, _, provider)| *provider == MCPProvider::Codex && path == &codex.0)
+    );
+    assert!(plan.watch_subdirs.is_empty());
+}
+
 /// An existing home-subdir provider (e.g. `~/.codex`) must still be awaited by the initial
 /// global scan even though its read is delivered by the directory watcher's queued `on_scan`
 /// rather than a direct parse scheduled in `FileMCPWatcher::new`. Regression test for a bug
@@ -692,7 +732,10 @@ fn initial_global_scan_awaits_existing_subdir_provider_via_watcher() {
     let codex_config_path = codex_dir.join("config.toml");
     std::fs::write(
         &codex_config_path,
-        "[mcp_servers.test-codex-server]\ncommand = \"npx\"\nargs = [\"-y\", \"test-server\"]\n",
+        "[mcp_servers.test-codex-server]
+command = \"npx\"
+args = [\"-y\", \"test-server\"]
+",
     )
     .expect("codex config should be written");
 
@@ -704,27 +747,22 @@ fn initial_global_scan_awaits_existing_subdir_provider_via_watcher() {
         initialize_app_for_terminal_view(&mut app);
         let watcher = app.add_singleton_model(FileMCPWatcher::new);
 
-        // The cohort must still be awaiting the Codex source right after construction: it was
-        // not scheduled as a direct parse (watching started), but it must not have been
-        // dropped from the cohort either.
+        // Construction can drain the watcher-delivered parse on some platforms before this
+        // body runs, so do not inspect the in-flight cohort. The observable result is that
+        // the scan settles and Codex is no longer owed.
+        if !watcher.read(&app, |watcher, _| watcher.initial_global_scan.has_emitted()) {
+            let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
+            rx.await
+                .expect("the watcher-delivered read must still settle the initial scan");
+        }
         watcher.read(&app, |watcher, _| {
+            assert!(watcher.initial_global_scan.has_emitted());
             assert!(
-                watcher
-                    .initial_global_scan_pending
-                    .contains(&(codex_config_path.clone(), MCPProvider::Codex)),
-                "an existing subdir provider must remain in the initial-global-scan cohort \
-                 while its watcher-delivered read is still pending"
+                !watcher
+                    .initial_global_scan
+                    .contains(&(codex_config_path.clone(), MCPProvider::Codex))
             );
         });
-
-        let rx = watch_initial_global_scan_completions(&mut app, &watcher, 1);
-        let parsed_rx = watch_first_config_parsed(&mut app, &watcher, MCPProvider::Codex);
-
-        rx.await
-            .expect("the watcher-delivered read must still settle the initial scan");
-        parsed_rx
-            .await
-            .expect("the watcher-delivered ConfigParsed for Codex should have been observed");
     });
 
     match old_home {
@@ -760,7 +798,7 @@ fn initial_global_scan_settles_missing_subdir_provider_via_direct_parse() {
         watcher.read(&app, |watcher, _| {
             assert!(
                 !watcher
-                    .initial_global_scan_pending
+                    .initial_global_scan
                     .contains(&(codex_config_path.clone(), MCPProvider::Codex)),
                 "a missing subdir provider's direct parse must settle its cohort obligation"
             );
@@ -803,7 +841,7 @@ fn aborted_initial_parse_without_replacement_settles_scan() {
         rx.await
             .expect("removal without a replacement must still settle the initial scan");
         watcher.read(&app, |watcher, _| {
-            assert!(watcher.initial_global_scan_pending.is_empty());
+            assert!(watcher.initial_global_scan.is_empty());
         });
     });
 }

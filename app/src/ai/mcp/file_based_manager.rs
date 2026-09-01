@@ -1,5 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use itertools::Itertools as _;
@@ -10,6 +11,7 @@ use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
 use super::file_mcp_watcher::FileMCPConfigDiagnostic;
+use super::initial_global_readiness::InitialGlobalMcpReadiness;
 use super::{FileMCPWatcher, FileMCPWatcherEvent, MCPProvider};
 use crate::ai::mcp::ParsedTemplatableMCPServerResult;
 use crate::ai::mcp::templatable_installation::TemplatableMCPServerInstallation;
@@ -45,24 +47,13 @@ pub struct FileBasedMCPManager {
     defer_global_warp_autostart: bool,
     /// Whether deferred global Warp servers may now be started.
     global_warp_servers_activated: bool,
-    /// Readiness latch for the one-time initial global home-config scan. `AgentDriver`
-    /// consults this instead of relying only on the transient completion event, since
-    /// application model initialization can finish the scan well before the driver
-    /// (constructed per-run, much later) ever subscribes.
-    initial_global_scan_state: InitialGlobalMcpScanState,
+    /// Late-subscriber-safe latch for the one-time initial global home-config scan.
+    /// Owns both scan completion and the frozen auto-start UUID wait set.
+    initial_global_readiness: InitialGlobalMcpReadiness,
     /// Auto-start UUIDs recorded from global-scoped parses while the initial scan is
     /// still pending. Unioned across reparses of the same source so a later parse that
     /// finds no *new* spawn cannot drop a server that is still starting.
-    initial_global_auto_started_uuids: HashSet<Uuid>,
-}
-
-/// State of the one-time initial global home-config MCP scan.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-enum InitialGlobalMcpScanState {
-    #[default]
-    Pending,
-    /// The scan settled; carries the UUIDs actually auto-start requested while it ran.
-    Complete(Vec<Uuid>),
+    pending_initial_global_auto_starts: HashSet<Uuid>,
 }
 
 impl FileBasedMCPManager {
@@ -82,11 +73,11 @@ impl FileBasedMCPManager {
 
         // When the feature is off, `FileMCPWatcher` events are never subscribed to above, so
         // no global server can ever be auto-start requested through this pipeline. Settle the
-        // latch immediately so `AgentDriver` never waits on a scan that can't produce a result.
-        let initial_global_scan_state = if FeatureFlag::FileBasedMcp.is_enabled() {
-            InitialGlobalMcpScanState::Pending
+        // latch immediately so nothing waits on a scan that can't produce a result.
+        let initial_global_readiness = if FeatureFlag::FileBasedMcp.is_enabled() {
+            InitialGlobalMcpReadiness::pending()
         } else {
-            InitialGlobalMcpScanState::Complete(Vec::new())
+            InitialGlobalMcpReadiness::complete_empty()
         };
 
         Self {
@@ -96,8 +87,8 @@ impl FileBasedMCPManager {
             config_diagnostics_by_path: Default::default(),
             defer_global_warp_autostart,
             global_warp_servers_activated: !defer_global_warp_autostart,
-            initial_global_scan_state,
-            initial_global_auto_started_uuids: HashSet::new(),
+            initial_global_readiness,
+            pending_initial_global_auto_starts: HashSet::new(),
         }
     }
 
@@ -149,14 +140,11 @@ impl FileBasedMCPManager {
     /// Freezes the first-turn wait set from the unioned global auto-start accumulator.
     /// Idempotent: a second call is a no-op rather than clobbering the frozen set.
     fn complete_initial_global_scan(&mut self, ctx: &mut ModelContext<Self>) {
-        if matches!(
-            self.initial_global_scan_state,
-            InitialGlobalMcpScanState::Complete(_)
-        ) {
+        if self.initial_global_readiness.is_complete() {
             return;
         }
         let wait_server_uuids: Vec<Uuid> = self
-            .initial_global_auto_started_uuids
+            .pending_initial_global_auto_starts
             .iter()
             .copied()
             .unique()
@@ -166,22 +154,21 @@ impl FileBasedMCPManager {
             "Initial global file-based MCP scan complete: {} auto-started server(s) to await before the first turn",
             wait_server_uuids.len()
         );
-        self.initial_global_scan_state =
-            InitialGlobalMcpScanState::Complete(wait_server_uuids.clone());
+        self.initial_global_readiness
+            .complete(wait_server_uuids.clone());
         ctx.emit(FileBasedMCPManagerEvent::InitialGlobalMcpScanComplete { wait_server_uuids });
     }
 
     /// Returns the frozen initial-global-scan wait set once the scan has completed, or `None`
     /// while it is still pending.
-    ///
-    /// Application model initialization schedules this scan, so it can already be complete
-    /// well before anything checks this — often long before the scan's completion event would
-    /// otherwise be observed.
     pub fn initial_global_scan_result(&self) -> Option<Vec<Uuid>> {
-        match &self.initial_global_scan_state {
-            InitialGlobalMcpScanState::Complete(uuids) => Some(uuids.clone()),
-            InitialGlobalMcpScanState::Pending => None,
-        }
+        self.initial_global_readiness.result()
+    }
+
+    /// Wait for the initial global scan to settle, returning the frozen auto-start UUID list.
+    /// Completes immediately if the scan has already finished.
+    pub fn wait_for_initial_global_scan(&self) -> impl Future<Output = Vec<Uuid>> + use<> {
+        self.initial_global_readiness.wait()
     }
 
     /// Get file-based MCP servers in scope for the given current working directory.
@@ -595,11 +582,8 @@ impl FileBasedMCPManager {
     }
 
     fn record_pending_initial_global_auto_starts(&mut self, uuids: impl IntoIterator<Item = Uuid>) {
-        if matches!(
-            self.initial_global_scan_state,
-            InitialGlobalMcpScanState::Pending,
-        ) {
-            self.initial_global_auto_started_uuids.extend(uuids);
+        if !self.initial_global_readiness.is_complete() {
+            self.pending_initial_global_auto_starts.extend(uuids);
         }
     }
 
