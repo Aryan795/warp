@@ -1194,8 +1194,10 @@ fn run_internal(mut launch_mode: LaunchMode) -> Result<()> {
                     initialization.shutdown();
                 }
 
+                // The whole process exits shortly after this callback returns, so block
+                // briefly to ensure the minidump child is reaped before we're gone.
                 #[cfg(feature = "crash_reporting")]
-                crash_reporting::uninit_sentry();
+                crash_reporting::uninit_sentry_before_exit();
             })),
             ..Default::default()
         }
@@ -2732,9 +2734,10 @@ pub(crate) fn app_callbacks(
             }
 
             // Tear down crash reporting as the last thing we do before the application
-            // terminates.
+            // terminates. The process exits shortly after this callback returns, so block
+            // briefly to ensure the minidump child is reaped before we're gone.
             #[cfg(feature = "crash_reporting")]
-            crash_reporting::uninit_sentry();
+            crash_reporting::uninit_sentry_before_exit();
         })),
         on_should_close_window: Some(Box::new(move |window_id, ctx| {
             let general_settings = GeneralSettings::as_ref(ctx);

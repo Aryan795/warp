@@ -419,7 +419,30 @@ pub(crate) fn is_initialized() -> bool {
 }
 
 /// Uninitializes sentry, effectively ending reporting on crashes and errors.
+///
+/// On Linux/Windows this reaps the minidump crash-reporter child process on a background
+/// thread rather than blocking, so this is safe to call from a live settings/preference
+/// toggle while the app keeps running. Use [`uninit_sentry_before_exit`] instead when the
+/// whole process is about to exit shortly after this call.
 pub fn uninit_sentry() {
+    uninit_sentry_impl(false);
+}
+
+/// Like [`uninit_sentry`], but blocks briefly (bounded) on Linux/Windows to reap the
+/// minidump crash-reporter child process before returning.
+///
+/// Use this only when the whole process is about to exit shortly after this call (app/TUI
+/// shutdown, or right before a hard `std::process::exit`), so an external process-group-based
+/// shutdown wait -- such as the Oz agent sidecar's launcher script -- can't be left waiting on
+/// an unreaped zombie. Do not use this from a live settings toggle or similar: blocking there
+/// would stall the caller if the child is slow to die.
+pub fn uninit_sentry_before_exit() {
+    uninit_sentry_impl(true);
+}
+
+fn uninit_sentry_impl(
+    #[cfg_attr(not(linux_or_windows), allow(unused_variables))] before_exit: bool,
+) {
     // Take the client guard out of the mutex, replacing it with
     // `Uninitialized`.
     let client_guard = std::mem::take(RUST_SENTRY_CLIENT_GUARD.lock().deref_mut());
@@ -427,7 +450,11 @@ pub fn uninit_sentry() {
         log::info!("Uninitializing crash reporting...");
 
         #[cfg(linux_or_windows)]
-        sentry_minidump::uninit();
+        if before_exit {
+            sentry_minidump::uninit_before_exit();
+        } else {
+            sentry_minidump::uninit();
+        }
         #[cfg(target_os = "macos")]
         if FeatureFlag::CocoaSentry.is_enabled() {
             uninit_cocoa_sentry();

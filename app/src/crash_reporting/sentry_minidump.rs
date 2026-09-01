@@ -40,6 +40,14 @@ lazy_static! {
 /// parent (this process) is running.
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How long to wait for the minidump child process to be reaped after `kill()`, before giving
+/// up. Bounds both [`MinidumpGuard::reap_blocking`] and the background reaper spawned by
+/// [`Drop for MinidumpGuard`](Drop), so a wedged child can never hang either path indefinitely.
+const REAP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Poll interval used while waiting for the minidump child process to be reaped.
+const REAP_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
 /// Initialize the minidump reporter.
 pub fn init() {
     let mut global_guard = GUARD.lock();
@@ -55,12 +63,35 @@ pub fn init() {
 }
 
 /// Uninitialize the minidump reporter.
+///
+/// The minidump child process is reaped on a background thread (see [`Drop for
+/// MinidumpGuard`](Drop)), so this never blocks the caller. Use this when the app keeps
+/// running afterward, e.g. a live settings/preference toggle -- a slow-to-die child must not
+/// stall whatever triggered the toggle. Use [`uninit_before_exit`] instead when the whole
+/// process is about to exit shortly after this call.
 pub fn uninit() {
     let maybe_guard = { GUARD.lock().take() };
     // Ensure we drop the `MinidumpGuard` after releasing the GUARD mutex. If there's an
     // error stopping the server, we should log it as a Sentry breadcrumb in the Warp
     // process, but not forward the breadcrumb to the server process.
     std::mem::drop(maybe_guard);
+}
+
+/// Like [`uninit`], but blocks (with a short bound) until the minidump child process is
+/// reaped before returning.
+///
+/// Use this only when the whole process is about to exit shortly after this call (e.g. app
+/// shutdown, or right before a hard `std::process::exit`), so the child is guaranteed to be
+/// reaped before we're gone. This matters because, in the Oz agent sidecar, the launcher
+/// shell script waits for this process's entire process group to become empty before letting
+/// the container exit; an unreaped zombie there can wedge that wait indefinitely. Blocking
+/// briefly here is fine specifically because the caller isn't going to do anything else
+/// afterward.
+pub fn uninit_before_exit() {
+    let maybe_guard = { GUARD.lock().take() };
+    if let Some(mut guard) = maybe_guard {
+        guard.reap_blocking();
+    }
 }
 
 /// Set a tag to include in minidump crash reports.
@@ -111,7 +142,9 @@ pub fn crash() {
 
 /// Handle for minidump state that must be kept in scope while crash reporting is enabled.
 pub struct MinidumpGuard {
-    child: process::Child,
+    /// `None` once the child has been taken for reaping (by [`MinidumpGuard::reap_blocking`]
+    /// or by `Drop`), so each is only ever reaped once.
+    child: Option<process::Child>,
     client: Arc<minidumper::Client>,
     crash_handler: CrashHandler,
 }
@@ -313,7 +346,7 @@ impl MinidumpGuard {
         crash_handler.set_ptracer(Some(child.id()));
 
         let guard = MinidumpGuard {
-            child,
+            child: Some(child),
             client: client2,
             crash_handler,
         };
@@ -349,29 +382,39 @@ impl MinidumpGuard {
         #[cfg(not(target_os = "linux"))]
         self.crash_handler.simulate_exception(None);
     }
-}
 
-impl Drop for MinidumpGuard {
-    fn drop(&mut self) {
-        // Dropping the crash handler will detach it.
-        // We can report errors here, as the minidump handler is no longer active.
-
-        // Send a graceful shutdown command before killing the child process.
+    /// Sends the minidump server a graceful shutdown command. Best-effort: logged, not
+    /// propagated, since the caller is tearing this guard down regardless.
+    fn send_shutdown_command(&self) {
         if let Err(err) = send_command(&self.client, MinidumpCommand::Shutdown) {
             log::warn!("Unable to send shutdown command to minidump child process: {err:#}");
         }
+    }
 
-        if let Err(err) = self.child.kill() {
+    /// Kills the minidump child process and blocks (with a short bound) until it's reaped.
+    ///
+    /// Only call this when the whole process is about to exit shortly after (see
+    /// [`uninit_before_exit`]); otherwise use plain `drop`, which reaps in the background
+    /// instead of blocking the caller.
+    fn reap_blocking(&mut self) {
+        self.send_shutdown_command();
+
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+
+        if let Err(err) = child.kill() {
             log::warn!("Unable to kill minidump child process: {err:#}");
+            return;
         }
 
         // `Child::kill` only sends the signal; it does not reap the process. Without an
         // explicit wait, a killed-but-unreaped child becomes a zombie until some ancestor
-        // waits on it. Since this process may itself exit shortly after this Drop runs (e.g.
-        // on a failed run), an unreaped zombie here can be orphaned to PID 1 and never
+        // waits on it. Since this process may itself exit shortly after this call returns
+        // (e.g. on a failed run), an unreaped zombie here can be orphaned to PID 1 and never
         // reaped, which is exactly the kind of leaked zombie that can wedge a container's
         // shutdown wait. Wait with a short bound so a wedged child can't hang our own exit.
-        match wait_with_timeout(&mut self.child, Duration::from_secs(5)) {
+        match wait_with_timeout(&mut child, REAP_TIMEOUT) {
             Ok(true) => {}
             Ok(false) => {
                 log::warn!("Timed out waiting to reap minidump child process after kill");
@@ -381,6 +424,46 @@ impl Drop for MinidumpGuard {
             }
         }
     }
+}
+
+impl Drop for MinidumpGuard {
+    fn drop(&mut self) {
+        // Dropping the crash handler will detach it.
+        // We can report errors here, as the minidump handler is no longer active.
+        self.send_shutdown_command();
+
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+
+        if let Err(err) = child.kill() {
+            log::warn!("Unable to kill minidump child process: {err:#}");
+            return;
+        }
+
+        // Reap on a background thread rather than blocking here: this `Drop` also runs from
+        // a live settings/preference toggle (crash reporting disabled while the app keeps
+        // running), where a wedged child must not stall the caller. Callers that are about
+        // to exit the whole process should call `reap_blocking`/`uninit_before_exit` instead,
+        // where blocking briefly is fine and actually needed (see its doc comment).
+        spawn_reaper(child);
+    }
+}
+
+/// Waits (bounded) for `child` to exit and reaps it, off the calling thread, so a
+/// killed-but-slow-to-die process can't block whoever dropped the [`MinidumpGuard`].
+fn spawn_reaper(mut child: process::Child) {
+    let _ = std::thread::Builder::new()
+        .name("minidump-reaper".to_string())
+        .spawn(move || match wait_with_timeout(&mut child, REAP_TIMEOUT) {
+            Ok(true) => {}
+            Ok(false) => {
+                log::warn!("Timed out waiting to reap minidump child process after kill");
+            }
+            Err(err) => {
+                log::warn!("Unable to reap minidump child process: {err:#}");
+            }
+        });
 }
 
 /// Poll `child` for exit, up to `timeout`, so it gets reaped instead of left as a zombie.
@@ -394,7 +477,7 @@ fn wait_with_timeout(child: &mut process::Child, timeout: Duration) -> io::Resul
         if instant::Instant::now() >= deadline {
             return Ok(false);
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(REAP_POLL_INTERVAL);
     }
 }
 
@@ -471,5 +554,87 @@ fn format_crash_details(crash_context: &CrashContext) -> Option<String> {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command as StdCommand;
+
+    use super::*;
+
+    /// A process that exits (almost) immediately should be reported as reaped well within
+    /// the bound, without needing to hit the timeout branch.
+    #[test]
+    fn wait_with_timeout_reaps_a_short_lived_process() {
+        let mut child = spawn_short_lived_process();
+
+        let reaped = wait_with_timeout(&mut child, Duration::from_secs(5))
+            .expect("waiting on a valid child should not error");
+
+        assert!(reaped, "a process that already exited should be reaped");
+    }
+
+    /// A killed longer-running process should be reaped once it actually exits, even though
+    /// it wasn't already dead when the wait started.
+    #[test]
+    fn wait_with_timeout_reaps_a_killed_process() {
+        let mut child = spawn_long_lived_process();
+
+        child.kill().expect("failed to kill helper process");
+
+        let reaped = wait_with_timeout(&mut child, Duration::from_secs(5))
+            .expect("waiting on a killed child should not error");
+
+        assert!(reaped, "a killed process should be reaped within the bound");
+    }
+
+    /// If the process never exits, the wait must give up at the bound instead of hanging
+    /// forever -- this is the whole point of using a bounded wait instead of a plain `wait()`.
+    #[test]
+    fn wait_with_timeout_gives_up_on_a_still_running_process() {
+        let mut child = spawn_long_lived_process();
+
+        let reaped = wait_with_timeout(&mut child, Duration::from_millis(200))
+            .expect("polling a running child should not error");
+
+        assert!(
+            !reaped,
+            "a still-running process must not be reported as reaped"
+        );
+
+        // Clean up the helper process now that the test is done with it.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Spawns a portable helper process that exits immediately with status 0.
+    fn spawn_short_lived_process() -> process::Child {
+        #[cfg(unix)]
+        let mut command = StdCommand::new("true");
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = StdCommand::new("cmd");
+            command.args(["/C", "exit 0"]);
+            command
+        };
+        command.spawn().expect("failed to spawn helper process")
+    }
+
+    /// Spawns a portable helper process that keeps running until killed.
+    fn spawn_long_lived_process() -> process::Child {
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = StdCommand::new("sleep");
+            command.arg("30");
+            command
+        };
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = StdCommand::new("ping");
+            command.args(["-n", "30", "127.0.0.1"]);
+            command
+        };
+        command.spawn().expect("failed to spawn helper process")
     }
 }
