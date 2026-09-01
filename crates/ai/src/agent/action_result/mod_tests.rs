@@ -60,15 +60,6 @@ fn run_agents_is_failed_when_no_agents_launch() {
     assert!(result.is_failed());
 }
 
-#[test]
-fn run_agents_failure_triggers_a_follow_up_request() {
-    let result = AIAgentActionResultType::RunAgents(RunAgentsResult::Failure {
-        error: "child launch failed".to_owned(),
-    });
-
-    assert!(result.should_trigger_request_upon_completion());
-}
-
 fn populated_activity() -> LrcActivity {
     LrcActivity {
         since_last_activity: Some(Duration::from_millis(1500)),
