@@ -49,12 +49,21 @@ use crate::{AppContext, WindowId};
 /// double-click, triple-click, etc.
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
-/// The maximum distance (in logical pixels) the cursor may have moved between clicks for them to
-/// still be treated as part of the same multi-click sequence. Without this, two quick clicks on
-/// different rows (e.g. different tabs) within [`MULTI_CLICK_INTERVAL`] would incorrectly be
-/// treated as a double-click on the second row. This mirrors the position-aware click count that
-/// macOS provides natively via `NSEvent.clickCount`, and is comparable to the default
-/// double-click distance thresholds used elsewhere (e.g. Windows' `SM_CXDOUBLECLK`/`SM_CYDOUBLECLK`).
+/// The maximum per-axis distance (in logical pixels) the cursor may have moved between clicks for
+/// them to still be treated as part of the same multi-click sequence: a click is only counted as
+/// a continuation of the previous one if both its horizontal and vertical offset from that click
+/// are within this bound. Without this, two quick clicks on different rows (e.g. different tabs)
+/// within [`MULTI_CLICK_INTERVAL`] would incorrectly be treated as a double-click on the second
+/// row.
+///
+/// This is an axis-aligned (rectangular) bound, matching [`MAX_TAP_DISTANCE`]'s existing
+/// axis-aligned check below and the shape of the OS-level double-click distance settings this is
+/// meant to approximate (e.g. Windows' independent `SM_CXDOUBLECLK`/`SM_CYDOUBLECLK` metrics),
+/// rather than a circular radius, which would be stricter on the diagonal than either axis alone.
+/// This value isn't read from the OS/user settings (winit exposes no such API, and
+/// [`MULTI_CLICK_INTERVAL`] above is a fixed constant for the same reason); it's a fixed
+/// approximation of common OS defaults, mirroring the position-aware click count that macOS
+/// provides natively via `NSEvent.clickCount`.
 const MULTI_CLICK_DISTANCE: f32 = 5.0;
 
 /// The debounce timeout for drag-and-drop files. Multiple DroppedFile events
@@ -232,7 +241,8 @@ impl WindowState {
             .filter(|old_state| {
                 old_state.button_pressed == button
                     && now.duration_since(old_state.pressed_at) <= MULTI_CLICK_INTERVAL
-                    && (old_state.position - position).length() <= MULTI_CLICK_DISTANCE
+                    && (old_state.position.x() - position.x()).abs() <= MULTI_CLICK_DISTANCE
+                    && (old_state.position.y() - position.y()).abs() <= MULTI_CLICK_DISTANCE
             })
             .map(|old_state| old_state.click_count + 1)
             .unwrap_or(1);

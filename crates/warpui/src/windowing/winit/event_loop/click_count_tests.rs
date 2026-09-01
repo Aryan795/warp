@@ -44,6 +44,65 @@ fn test_click_within_multi_click_distance_still_increments_click_count() {
 }
 
 #[test]
+fn test_click_exactly_at_axis_boundary_still_increments_click_count() {
+    let mut window_state = WindowState::new(crate::WindowId::new());
+    let first_position = vec2f(10., 20.);
+    // Exactly `MULTI_CLICK_DISTANCE` away on each axis: the check is inclusive (`<=`).
+    let second_position = first_position + vec2f(MULTI_CLICK_DISTANCE, -MULTI_CLICK_DISTANCE);
+
+    let first = window_state
+        .determine_click_count_and_update_button_state(MouseButton::Left, first_position);
+    let second = window_state
+        .determine_click_count_and_update_button_state(MouseButton::Left, second_position);
+
+    assert_eq!(first, 1);
+    assert_eq!(second, 2);
+}
+
+#[test]
+fn test_click_just_past_axis_boundary_on_a_single_axis_resets_click_count() {
+    let mut window_state = WindowState::new(crate::WindowId::new());
+    let first_position = vec2f(10., 20.);
+    // Just past the boundary on the x-axis only; y is unchanged.
+    let second_position = first_position + vec2f(MULTI_CLICK_DISTANCE + 0.1, 0.);
+
+    let first = window_state
+        .determine_click_count_and_update_button_state(MouseButton::Left, first_position);
+    let second = window_state
+        .determine_click_count_and_update_button_state(MouseButton::Left, second_position);
+
+    assert_eq!(first, 1);
+    assert_eq!(
+        second, 1,
+        "exceeding the bound on a single axis must reset the click count"
+    );
+}
+
+#[test]
+fn test_diagonal_click_within_axis_bounds_on_both_axes_still_counts_as_multi_click() {
+    // The check is axis-aligned (an independent bound per axis, like `MAX_TAP_DISTANCE` and the
+    // OS metrics it approximates), not a circular radius. A diagonal move can therefore have a
+    // Euclidean distance greater than `MULTI_CLICK_DISTANCE` while still passing, as long as
+    // each axis individually stays within the bound.
+    let mut window_state = WindowState::new(crate::WindowId::new());
+    let first_position = vec2f(10., 20.);
+    let second_position = first_position + vec2f(MULTI_CLICK_DISTANCE, MULTI_CLICK_DISTANCE);
+    assert!(
+        (second_position - first_position).length() > MULTI_CLICK_DISTANCE,
+        "this test only demonstrates the intended behavior if the diagonal distance exceeds \
+         MULTI_CLICK_DISTANCE"
+    );
+
+    let first = window_state
+        .determine_click_count_and_update_button_state(MouseButton::Left, first_position);
+    let second = window_state
+        .determine_click_count_and_update_button_state(MouseButton::Left, second_position);
+
+    assert_eq!(first, 1);
+    assert_eq!(second, 2);
+}
+
+#[test]
 fn test_click_on_sufficiently_separated_position_resets_click_count() {
     let mut window_state = WindowState::new(crate::WindowId::new());
     let first_position = vec2f(10., 20.);
