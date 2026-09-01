@@ -336,6 +336,8 @@ fn observe_server_result_stream_completion(
                 )
             });
 
+        let sent_request_count = *sent_request_count.lock().unwrap();
+        let start_agent_request_count = *start_agent_request_count.lock().unwrap();
         ServerResultStreamCompletionObservation {
             output_action_ids,
             hydrated_result_ids,
@@ -343,8 +345,8 @@ fn observe_server_result_stream_completion(
             recorded_result,
             pending_action_ids,
             resolved_execution_pending,
-            sent_request_count: *sent_request_count.lock().unwrap(),
-            start_agent_request_count: *start_agent_request_count.lock().unwrap(),
+            sent_request_count,
+            start_agent_request_count,
         }
     })
 }
