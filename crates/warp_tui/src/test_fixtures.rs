@@ -26,8 +26,6 @@ macro_rules! assert_eventually {
     ($cond:expr_2021, $($arg:tt)+) => {
         $crate::test_fixtures::assert_eventually!(20 => $cond, $($arg)+);
     };
-    // Run the condition up to ticks times, yielding to the executor in between. If it does not
-    // become true, this panics with the provided format string + args.
     ($ticks:literal => $cond:expr_2021, $($arg:tt)+) => {{
         let mut pass = false;
         for _ in 0..$ticks {
