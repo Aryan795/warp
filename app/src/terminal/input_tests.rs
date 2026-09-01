@@ -7322,7 +7322,7 @@ fn test_vim_escape_with_history_menu() {
 }
 
 #[test]
-fn input_action_up_does_not_panic_when_inline_history_is_already_checked_out() {
+fn input_action_up_defers_until_inline_history_checkout_completes() {
     let _flag = FeatureFlag::InlineHistoryMenu.override_enabled(true);
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -7338,7 +7338,6 @@ fn input_action_up_does_not_panic_when_inline_history_is_already_checked_out() {
 
         input.update(&mut app, |input, ctx| {
             input.handle_action(&InputAction::Up, ctx);
-            input.handle_action(&InputAction::Up, ctx);
         });
         input.read(&app, |input, ctx| {
             assert!(
@@ -7346,7 +7345,7 @@ fn input_action_up_does_not_panic_when_inline_history_is_already_checked_out() {
                     .suggestions_mode_model
                     .as_ref(ctx)
                     .is_inline_history_menu(),
-                "Up while Input is checked out should open and keep inline history"
+                "deferred Up should open inline history after Input is reinserted"
             );
         });
 
@@ -7367,7 +7366,7 @@ fn input_action_up_does_not_panic_when_inline_history_is_already_checked_out() {
                     .suggestions_mode_model
                     .as_ref(ctx)
                     .is_inline_history_menu(),
-                "re-entrant Up must not panic or dismiss inline history"
+                "Up dispatched while InlineHistoryMenuView is checked out must still run after that checkout ends"
             );
         });
     });
@@ -9037,6 +9036,8 @@ fn test_page_up_and_down_do_not_scroll_terminal_when_suggestions_are_visible() {
 
         input.update(&mut app, |input, ctx| {
             input.handle_action(&InputAction::Up, ctx);
+        });
+        input.read(&app, |input, ctx| {
             assert!(input.suggestions_mode_model.as_ref(ctx).is_visible());
         });
 
