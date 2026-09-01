@@ -20,6 +20,7 @@ use futures::FutureExt as _;
 use futures::channel::oneshot;
 use futures::future::{self, Either, join_all};
 use handlebars::get_arguments;
+use instant::Instant;
 use itertools::Itertools as _;
 use oneshot::{Canceled, Receiver};
 use repo_metadata::local_model::IndexedRepoState;
@@ -917,6 +918,24 @@ impl From<PrepareEnvironmentError> for AgentDriverError {
             PrepareEnvironmentError::TerminalDriver { source } => source,
             error => AgentDriverError::EnvironmentSetupFailed(error.to_string()),
         }
+    }
+}
+
+fn file_based_mcp_wait_result(
+    mut failed: Vec<String>,
+    still_starting: Vec<String>,
+    timeout: Duration,
+) -> Result<(), AgentDriverError> {
+    failed.sort();
+    failed.extend(
+        still_starting
+            .into_iter()
+            .map(|detail| format!("{detail} did not start within {}s", timeout.as_secs())),
+    );
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(AgentDriverError::MCPStartupFailed { details: failed })
     }
 }
 
@@ -2312,8 +2331,31 @@ impl AgentDriver {
         rx
     }
 
+    /// Whether `uuid` still needs to be awaited by [`Self::wait_for_file_based_mcps_running`]:
+    /// it must still be tracked by [`FileBasedMCPManager`] (i.e. its config has not been
+    /// removed) and not yet have reached a terminal state (`Running`, `FailedToStart`, or
+    /// `NotRunning`). A config removed before or during the wait despawns its installation and
+    /// reports `NotRunning`, which settles the wait rather than blocking it.
+    fn is_file_based_mcp_pending(
+        templatable_manager: &TemplatableMCPServerManager,
+        file_based_manager: &FileBasedMCPManager,
+        uuid: Uuid,
+    ) -> bool {
+        file_based_manager.get_hash_by_uuid(uuid).is_some()
+            && !matches!(
+                templatable_manager.get_server_state(uuid),
+                Some(MCPServerState::Running)
+                    | Some(MCPServerState::FailedToStart)
+                    | Some(MCPServerState::NotRunning)
+            )
+    }
+
     /// Wait for auto-start-requested file-based MCP servers to reach a terminal state
-    /// (`Running` or `FailedToStart`). Non-fatal: always completes without returning an error.
+    /// (`Running`, `FailedToStart`, or a despawn's `NotRunning`), bounded by `timeout`.
+    ///
+    /// `FailedToStart` and timeout become [`AgentDriverError::MCPStartupFailed`] so the
+    /// existing strict/degraded-start policy can be applied. `timeout` is remaining budget
+    /// from a shared deadline, not a fresh full timeout.
     ///
     /// **Sequencing note:** `AgentDriver` supports only one active subscription to
     /// [`TemplatableMCPServerManager`] at a time. This function, [`Self::start_mcp_servers`],
@@ -2322,25 +2364,46 @@ impl AgentDriver {
     fn wait_for_file_based_mcps_running(
         &self,
         uuids: Vec<Uuid>,
+        timeout: Duration,
         ctx: &mut ModelContext<Self>,
-    ) -> impl Future<Output = ()> + use<> {
-        // Filter out UUIDs that have already reached a terminal state.
+    ) -> impl Future<Output = Result<(), AgentDriverError>> + use<> {
+        let mut failed: Vec<String> = Vec::new();
         let mut pending_uuids: HashSet<Uuid> = {
             let templatable_manager = TemplatableMCPServerManager::as_ref(ctx);
+            let file_based_manager = FileBasedMCPManager::as_ref(ctx);
             uuids
                 .into_iter()
                 .filter(|uuid| {
-                    !matches!(
+                    if matches!(
                         templatable_manager.get_server_state(*uuid),
-                        Some(MCPServerState::Running) | Some(MCPServerState::FailedToStart)
-                    )
+                        Some(MCPServerState::FailedToStart)
+                    ) {
+                        let name = file_based_manager
+                            .get_installation_by_uuid(*uuid)
+                            .map(|installation| installation.templatable_mcp_server().name.clone())
+                            .unwrap_or_else(|| uuid.to_string());
+                        let error = templatable_manager
+                            .get_server_error_message(*uuid)
+                            .map(|message| format!(": {message}"))
+                            .unwrap_or_default();
+                        failed.push(format!("'{name}' failed to start{error}"));
+                        return false;
+                    }
+                    Self::is_file_based_mcp_pending(templatable_manager, file_based_manager, *uuid)
                 })
                 .collect()
         };
 
+        let failed = Arc::new(Mutex::new(failed));
         if pending_uuids.is_empty() {
-            log::info!("All file-based MCP servers have reached a terminal state; proceeding");
-            return Either::Right(future::ready(()));
+            return Either::Right(future::ready(file_based_mcp_wait_result(
+                failed
+                    .lock()
+                    .map(|failed_servers| failed_servers.clone())
+                    .unwrap_or_default(),
+                Vec::new(),
+                timeout,
+            )));
         }
 
         let pending_state_details = {
@@ -2390,7 +2453,9 @@ impl AgentDriver {
 
         let templatable_manager_handle = TemplatableMCPServerManager::handle(ctx);
         let pending_state_details_for_subscription = Arc::clone(&pending_state_details);
+        let failed_for_subscription = Arc::clone(&failed);
 
+        ctx.unsubscribe_from_model(&templatable_manager_handle);
         ctx.subscribe_to_model(
             &templatable_manager_handle,
             move |_me, manager, event, ctx| {
@@ -2404,21 +2469,32 @@ impl AgentDriver {
                         .unwrap_or("<unknown>");
                     let error = TemplatableMCPServerManager::as_ref(ctx)
                         .get_server_error_message(*uuid)
-                        .map(|message| format!(", error={message}"))
+                        .map(|message| format!(": {message}"))
                         .unwrap_or_default();
                     if let Ok(mut details) = pending_state_details_for_subscription.lock() {
                         details.insert(*uuid, format!("{server_name} ({uuid}): {state:?}{error}"));
                     }
                     match state {
-                        MCPServerState::Running | MCPServerState::FailedToStart => {
+                        MCPServerState::FailedToStart => {
+                            log::warn!("MCP server '{server_name}' failed to start{error}");
+                            if let Ok(mut failed_servers) = failed_for_subscription.lock() {
+                                failed_servers
+                                    .push(format!("'{server_name}' failed to start{error}"));
+                            }
                             pending_uuids.remove(uuid);
                             if let Ok(mut details) = pending_state_details_for_subscription.lock() {
                                 details.remove(uuid);
                             }
                         }
-                        _ => {
-                            return;
+                        MCPServerState::Running | MCPServerState::NotRunning => {
+                            pending_uuids.remove(uuid);
+                            if let Ok(mut details) = pending_state_details_for_subscription.lock() {
+                                details.remove(uuid);
+                            }
                         }
+                        MCPServerState::Starting
+                        | MCPServerState::Authenticating
+                        | MCPServerState::ShuttingDown => return,
                     }
                     if pending_uuids.is_empty() {
                         log::info!(
@@ -2433,22 +2509,94 @@ impl AgentDriver {
             },
         );
 
+        let spawner = ctx.spawner();
         Either::Left(async move {
-            match rx.with_timeout(MCP_SERVER_STARTUP_TIMEOUT).await {
+            let mut still_starting = Vec::new();
+            match rx.with_timeout(timeout).await {
                 Ok(Ok(())) => {}
                 Ok(Err(Canceled)) => {
-                    log::warn!(
-                        "File-based MCP server readiness subscription dropped early; proceeding"
-                    );
+                    log::error!("File-based MCP server readiness subscription dropped early");
+                    return Err(AgentDriverError::InvalidRuntimeState);
                 }
                 Err(TimeoutError) => {
-                    let pending_details = pending_state_details
+                    still_starting = pending_state_details
                         .lock()
-                        .map(|details| details.values().cloned().join("; "))
-                        .unwrap_or_else(|_| "<unable to read pending state>".to_string());
+                        .map(|details| details.values().cloned().collect())
+                        .unwrap_or_default();
+                    still_starting.sort();
+                    let pending_details = still_starting.join("; ");
                     log::warn!(
-                        "Timed out waiting for file-based MCP servers to reach a terminal state; proceeding without. Still pending: {pending_details}"
+                        "Timed out waiting for file-based MCP servers to reach a terminal state. Still pending: {pending_details}"
                     );
+                    let _ = spawner
+                        .spawn(|_, ctx| {
+                            let manager = TemplatableMCPServerManager::handle(ctx);
+                            ctx.unsubscribe_from_model(&manager);
+                        })
+                        .await;
+                }
+            }
+
+            file_based_mcp_wait_result(
+                failed
+                    .lock()
+                    .map(|failed_servers| failed_servers.clone())
+                    .unwrap_or_default(),
+                still_starting,
+                timeout,
+            )
+        })
+    }
+
+    /// Await the one-time initial global home-config MCP scan (e.g. `~/.warp/.mcp.json`),
+    /// returning the UUIDs of servers that were actually auto-start requested while it ran.
+    ///
+    /// Checks [`FileBasedMCPManager::initial_global_scan_result`] first so a driver constructed
+    /// after application initialization still observes completion. Falls back to the transient
+    /// completion event, bounded by `deadline`, only while the scan is pending.
+    fn wait_for_initial_global_file_based_mcp_scan(
+        &self,
+        deadline: Instant,
+        ctx: &mut ModelContext<Self>,
+    ) -> impl Future<Output = Vec<Uuid>> + use<> {
+        let manager = FileBasedMCPManager::handle(ctx);
+        if let Some(wait_uuids) = manager.as_ref(ctx).initial_global_scan_result() {
+            return Either::Right(future::ready(wait_uuids));
+        }
+
+        log::info!("Waiting for the initial global file-based MCP scan to complete...");
+        let (tx, rx) = oneshot::channel::<Vec<Uuid>>();
+        let mut tx = Some(tx);
+        ctx.subscribe_to_model(&manager, move |_me, manager_handle, event, ctx| {
+            if let FileBasedMCPManagerEvent::InitialGlobalMcpScanComplete { wait_server_uuids } =
+                event
+                && let Some(sender) = tx.take()
+            {
+                let _ = sender.send(wait_server_uuids.clone());
+                ctx.unsubscribe_from_model(&manager_handle);
+            }
+        });
+
+        if let Some(wait_uuids) = manager.as_ref(ctx).initial_global_scan_result() {
+            ctx.unsubscribe_from_model(&manager);
+            return Either::Right(future::ready(wait_uuids));
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        Either::Left(async move {
+            match rx.with_timeout(remaining).await {
+                Ok(Ok(uuids)) => uuids,
+                Ok(Err(Canceled)) => {
+                    log::warn!(
+                        "Initial global file-based MCP scan subscription dropped early; proceeding without"
+                    );
+                    vec![]
+                }
+                Err(TimeoutError) => {
+                    log::warn!(
+                        "Timed out waiting for the initial global file-based MCP scan to complete; proceeding without"
+                    );
+                    vec![]
                 }
             }
         })
@@ -3120,9 +3268,13 @@ impl AgentDriver {
                     );
                     setup_events
                         .record_result(SetupStep::FileBasedMcpReadiness, async {
-                            foreground
+                            let _ = foreground
                                 .spawn(move |me, ctx| {
-                                    me.wait_for_file_based_mcps_running(wait_uuids, ctx)
+                                    me.wait_for_file_based_mcps_running(
+                                        wait_uuids,
+                                        MCP_SERVER_STARTUP_TIMEOUT,
+                                        ctx,
+                                    )
                                 })
                                 .await?
                                 .await;
@@ -3206,6 +3358,47 @@ impl AgentDriver {
         // they are dropped automatically when the harness result resolves.
         match task.harness {
             HarnessKind::Oz => {
+                // First-turn barrier for auto-started global file-based MCP servers. The scan
+                // starts during application init, so it often finishes before this join; a
+                // late driver still observes the latched result. Shared deadline keeps scan
+                // plus readiness inside one MCP startup timeout.
+                let mcp_startup_timeout = foreground.spawn(|me, _| me.mcp_startup_timeout).await?;
+                let initial_global_mcp_deadline = Instant::now() + mcp_startup_timeout;
+                let initial_global_scan_wait = foreground
+                    .spawn(move |me, ctx| {
+                        me.wait_for_initial_global_file_based_mcp_scan(
+                            initial_global_mcp_deadline,
+                            ctx,
+                        )
+                    })
+                    .await?;
+                let initial_global_wait_uuids = setup_events
+                    .record_value(SetupStep::InitialGlobalMcpScan, initial_global_scan_wait)
+                    .await;
+                if !initial_global_wait_uuids.is_empty() {
+                    log::info!(
+                        "Checking readiness for {} initial global file-based MCP server(s)",
+                        initial_global_wait_uuids.len()
+                    );
+                    let initial_global_readiness = setup_events
+                        .record_result(SetupStep::InitialGlobalMcpReadiness, async {
+                            let remaining_readiness_timeout = initial_global_mcp_deadline
+                                .saturating_duration_since(Instant::now());
+                            foreground
+                                .spawn(move |me, ctx| {
+                                    me.wait_for_file_based_mcps_running(
+                                        initial_global_wait_uuids,
+                                        remaining_readiness_timeout,
+                                        ctx,
+                                    )
+                                })
+                                .await?
+                                .await
+                        })
+                        .await;
+                    Self::handle_mcp_startup_result(initial_global_readiness, &foreground).await?;
+                }
+
                 let status_rx = foreground
                     .spawn(move |me, ctx| me.execute_run(task.prompt, ctx))
                     .await?;

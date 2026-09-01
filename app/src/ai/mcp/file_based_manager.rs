@@ -26,7 +26,9 @@ pub struct FileBasedMCPManager {
     /// Reverse mapping: logical root path → provider → set of server hashes.
     file_based_servers_by_root: HashMap<PathBuf, HashMap<MCPProvider, HashSet<u64>>>,
     /// UUIDs that were actually auto-start requested while parsing each `(root, provider)`.
-    /// They are temporarily stored here and removed to emit FileBasedMCPManagerEvent::CloudEnvMcpScanComplete
+    /// Cloud-environment completion drains the matching root; the initial global scan
+    /// snapshots the global-scoped entries without removing them (those sources keep
+    /// receiving incremental updates for the rest of the session).
     pending_scan_auto_started_servers_by_root:
         HashMap<PathBuf, HashMap<MCPProvider, HashSet<Uuid>>>,
     /// Latest read or parse diagnostic for each config path.
@@ -43,6 +45,20 @@ pub struct FileBasedMCPManager {
     defer_global_warp_autostart: bool,
     /// Whether deferred global Warp servers may now be started.
     global_warp_servers_activated: bool,
+    /// Readiness latch for the one-time initial global home-config scan. `AgentDriver`
+    /// consults this instead of relying only on the transient completion event, since
+    /// application model initialization can finish the scan well before the driver
+    /// (constructed per-run, much later) ever subscribes.
+    initial_global_scan_state: InitialGlobalMcpScanState,
+}
+
+/// State of the one-time initial global home-config MCP scan.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum InitialGlobalMcpScanState {
+    #[default]
+    Pending,
+    /// The scan settled; carries the UUIDs actually auto-start requested while it ran.
+    Complete(Vec<Uuid>),
 }
 
 impl FileBasedMCPManager {
@@ -60,6 +76,15 @@ impl FileBasedMCPManager {
             });
         }
 
+        // When the feature is off, `FileMCPWatcher` events are never subscribed to above, so
+        // no global server can ever be auto-start requested through this pipeline. Settle the
+        // latch immediately so `AgentDriver` never waits on a scan that can't produce a result.
+        let initial_global_scan_state = if FeatureFlag::FileBasedMcp.is_enabled() {
+            InitialGlobalMcpScanState::Pending
+        } else {
+            InitialGlobalMcpScanState::Complete(Vec::new())
+        };
+
         Self {
             file_based_servers: Default::default(),
             file_based_servers_by_root: Default::default(),
@@ -67,11 +92,20 @@ impl FileBasedMCPManager {
             config_diagnostics_by_path: Default::default(),
             defer_global_warp_autostart,
             global_warp_servers_activated: !defer_global_warp_autostart,
+            initial_global_scan_state,
         }
     }
 
     /// Handle an event from [`FileMCPWatcher`].
-    fn handle_watcher_event(&mut self, event: &FileMCPWatcherEvent, ctx: &mut ModelContext<Self>) {
+    ///
+    /// `pub(crate)` (rather than private) so tests outside this module (e.g. `AgentDriver`'s)
+    /// can drive the initial-global-scan latch deterministically without needing a full
+    /// filesystem-backed `FileMCPWatcher` scan.
+    pub(crate) fn handle_watcher_event(
+        &mut self,
+        event: &FileMCPWatcherEvent,
+        ctx: &mut ModelContext<Self>,
+    ) {
         match event {
             FileMCPWatcherEvent::ConfigParsed {
                 config_path,
@@ -110,6 +144,56 @@ impl FileBasedMCPManager {
             FileMCPWatcherEvent::CloudEnvMcpScanComplete { repo_path } => {
                 self.handle_cloud_environment_scan_complete(repo_path, ctx);
             }
+            FileMCPWatcherEvent::InitialGlobalMcpScanComplete => {
+                self.complete_initial_global_scan(ctx);
+            }
+        }
+    }
+
+    /// Freezes the first-turn wait set by snapshotting auto-start UUIDs already
+    /// recorded for global-scoped `(root, provider)` entries. Idempotent: a second
+    /// call is a no-op rather than clobbering the frozen set.
+    fn complete_initial_global_scan(&mut self, ctx: &mut ModelContext<Self>) {
+        if matches!(
+            self.initial_global_scan_state,
+            InitialGlobalMcpScanState::Complete(_)
+        ) {
+            return;
+        }
+        let wait_server_uuids: Vec<Uuid> = self
+            .pending_scan_auto_started_servers_by_root
+            .iter()
+            .flat_map(|(root_path, provider_map)| {
+                provider_map.iter().filter_map(|(provider, uuids)| {
+                    (Self::scope_for_source(root_path, *provider)
+                        == FileBasedMCPServerScope::Global)
+                        .then_some(uuids)
+                })
+            })
+            .flatten()
+            .copied()
+            .unique()
+            .sorted_by_key(|uuid| uuid.to_string())
+            .collect();
+        log::info!(
+            "Initial global file-based MCP scan complete: {} auto-started server(s) to await before the first turn",
+            wait_server_uuids.len()
+        );
+        self.initial_global_scan_state =
+            InitialGlobalMcpScanState::Complete(wait_server_uuids.clone());
+        ctx.emit(FileBasedMCPManagerEvent::InitialGlobalMcpScanComplete { wait_server_uuids });
+    }
+
+    /// Returns the frozen initial-global-scan wait set once the scan has completed, or `None`
+    /// while it is still pending.
+    ///
+    /// `AgentDriver` checks this before subscribing for the transient completion event:
+    /// application model initialization schedules and often finishes this scan long before any
+    /// particular run's driver exists, so relying only on the event would miss it.
+    pub fn initial_global_scan_result(&self) -> Option<Vec<Uuid>> {
+        match &self.initial_global_scan_state {
+            InitialGlobalMcpScanState::Complete(uuids) => Some(uuids.clone()),
+            InitialGlobalMcpScanState::Pending => None,
         }
     }
 
@@ -202,15 +286,17 @@ impl FileBasedMCPManager {
         }
     }
 
-    /// Applies a parsed list of MCP servers
-    /// spawning new servers and removing servers that are no longer present.
+    /// Applies a parsed list of MCP servers, spawning new servers and removing servers that
+    /// are no longer present. Returns the UUIDs that were actually auto-start requested as a
+    /// result; those UUIDs are also recorded in `pending_scan_auto_started_servers_by_root`
+    /// so a later scan-complete event can freeze a wait set from them.
     fn apply_parsed_servers(
         &mut self,
         root_path: PathBuf,
         provider: MCPProvider,
         parsed_servers: Vec<ParsedTemplatableMCPServerResult>,
         ctx: &mut ModelContext<Self>,
-    ) {
+    ) -> Vec<Uuid> {
         let previous_scanned_servers: HashSet<u64> = self
             .file_based_servers_by_root
             .get(&root_path)
@@ -249,7 +335,7 @@ impl FileBasedMCPManager {
         self.pending_scan_auto_started_servers_by_root
             .entry(root_path.clone())
             .or_default()
-            .insert(provider, auto_started_uuids.into_iter().collect());
+            .insert(provider, auto_started_uuids.iter().copied().collect());
 
         // Determine which servers have been removed.
         let servers_to_remove = previous_scanned_servers
@@ -285,6 +371,7 @@ impl FileBasedMCPManager {
         if previous_scanned_servers != scanned_servers {
             ctx.emit(FileBasedMCPManagerEvent::ServersChanged);
         }
+        auto_started_uuids
     }
 
     /// Returns `true` if the server identified by `hash` is referenced from any global
@@ -740,6 +827,12 @@ pub enum FileBasedMCPManagerEvent {
         repo_path: PathBuf,
         #[allow(dead_code)]
         detected_servers: Vec<CloudEnvMcpScanServer>,
+        wait_server_uuids: Vec<Uuid>,
+    },
+    /// The one-time initial global home-config scan settled. `AgentDriver` awaits
+    /// [`FileBasedMCPManager::initial_global_scan_result`] instead of only listening for
+    /// this event, since it can fire long before a given run's driver ever subscribes.
+    InitialGlobalMcpScanComplete {
         wait_server_uuids: Vec<Uuid>,
     },
 }
