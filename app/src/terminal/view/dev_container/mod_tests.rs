@@ -71,7 +71,7 @@ fn interpret_dev_container_up_output_errors_on_missing_remote_workspace_folder()
 #[test]
 fn interpret_dev_container_up_output_uses_structured_message_on_failure_exit_status() {
     let stdout = r#"{"outcome":"error","message":"Command failed: docker pull nope:latest"}"#;
-    let outcome = interpret_dev_container_up_output(false, stdout.as_bytes(), b"some stderr noise");
+    let outcome = interpret_dev_container_up_output(false, stdout.as_bytes(), b"");
 
     assert_eq!(
         outcome,
@@ -111,7 +111,7 @@ fn interpret_dev_container_up_output_errors_when_success_exit_but_outcome_is_err
 #[test]
 fn dev_container_up_failure_message_prefers_structured_description_over_stderr() {
     let stdout = r#"{"outcome":"error","description":"no space left on device"}"#;
-    let message = dev_container_up_failure_message(stdout.as_bytes(), b"irrelevant stderr");
+    let message = dev_container_up_failure_message(stdout.as_bytes(), b"");
 
     assert_eq!(
         message,
@@ -221,6 +221,10 @@ fn interpret_docker_ps_probe_failure_keeps_command_and_underlying_stderr() {
     assert!(
         !message.contains("\u{1b}"),
         "failure text must not include raw ANSI, got {message:?}"
+    );
+    assert!(
+        message.contains("Cannot connect to the Docker daemon"),
+        "unique useful stderr must accompany structured text, got {message:?}"
     );
 }
 

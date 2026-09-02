@@ -1008,11 +1008,7 @@ fn dev_container_up_failure_message(stdout: &[u8], stderr: &[u8]) -> String {
     let structured = parse_dev_container_up_stdout(stdout)
         .and_then(|result| result.message.or(result.description));
     let extra_stdout = leftover_stdout_lines(stdout);
-    let extra_stderr = if structured.is_some() {
-        None
-    } else {
-        useful_stderr_lines(stderr)
-    };
+    let extra_stderr = useful_stderr_lines(stderr);
 
     let mut parts = Vec::new();
     if let Some(structured) = structured {
