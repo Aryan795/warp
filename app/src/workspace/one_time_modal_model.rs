@@ -74,6 +74,31 @@ pub struct OneTimeModalModel {
     /// that fires while the claim is in flight from starting a second,
     /// redundant claim.
     pending_factories_launch_claim: bool,
+    /// Set when the cross-device claim for the Factories launch modal
+    /// resolved as a win (`claimed == true`) while the feature-intro popover
+    /// was open. Unlike the other one-time modals, the popover is
+    /// intentionally excluded from `is_any_modal_open` (see
+    /// `active_feature_intro`), so it isn't covered by
+    /// `pending_factories_launch_claim`'s slot reservation. The win is real
+    /// and must not be lost, but showing it immediately would stack the
+    /// centered, focus-stealing modal on top of the popover, so it is held
+    /// here and displayed by `check_and_trigger_factories_launch_modal` (or
+    /// `maybe_display_pending_factories_launch_modal`) once the popover
+    /// closes.
+    factories_launch_pending_display: bool,
+    /// Set when a Factories launch modal claim request on this device ended
+    /// without a definitive server answer -- a network error, or the
+    /// client-side timeout in `claim_and_show_factories_launch_modal_with_claim`
+    /// racing a server commit -- rather than resolving cleanly. The claim is
+    /// idempotent per *user*, not per *request*: if that request actually
+    /// committed server-side, a retry legitimately observes the row as
+    /// already claimed and returns `claimed == false`, even though this
+    /// device is the rightful winner. Without a server-side idempotency
+    /// token that echoes back which request actually won, this flag is the
+    /// best available signal to tell that apart from a genuine loss to
+    /// another device: a true loss would have returned `false` on the very
+    /// first attempt, never left the outcome unknown.
+    factories_launch_claim_had_transport_error: bool,
     /// Whether the HOA onboarding flow is currently being shown.
     is_hoa_onboarding_open: bool,
     /// The feature-intro popover currently being shown, if any. Unlike the other
@@ -222,6 +247,8 @@ impl OneTimeModalModel {
             is_free_ai_removal_modal_open: false,
             is_factories_launch_modal_open: false,
             pending_factories_launch_claim: false,
+            factories_launch_pending_display: false,
+            factories_launch_claim_had_transport_error: false,
             is_hoa_onboarding_open: false,
             active_feature_intro: None,
             has_completed_initial_modal_checks: false,
@@ -294,6 +321,15 @@ impl OneTimeModalModel {
 
     fn resume_modal_checks_after_feature_intro(&mut self, ctx: &mut ModelContext<Self>) {
         if self.check_and_trigger_free_ai_removal_modal(ctx) {
+            return;
+        }
+        // Factories sits immediately after feature intros in
+        // `check_and_trigger_all_modals`'s priority order. Without this, an
+        // eligible Factories claim (or a claim that already won and is held
+        // as `factories_launch_pending_display`) would never be attempted
+        // again once the last-registered feature intro has been seen, since
+        // `check_and_trigger_all_modals` only runs once at startup.
+        if self.check_and_trigger_factories_launch_modal(ctx) {
             return;
         }
         if self.check_and_trigger_hoa_onboarding(ctx) {
@@ -904,13 +940,40 @@ impl OneTimeModalModel {
         if !self.has_completed_initial_modal_checks
             || self.is_any_modal_open()
             || self.pending_factories_launch_claim
+            // The feature-intro popover is intentionally excluded from
+            // `is_any_modal_open` (it's non-blocking), but Factories must
+            // still wait for it: starting a claim now could resolve into a
+            // centered, focus-stealing modal stacked on top of the popover.
+            || self.active_feature_intro.is_some()
         {
             return;
         }
         self.check_and_trigger_factories_launch_modal(ctx);
     }
 
+    /// Applies a Factories launch claim that already won
+    /// (`factories_launch_pending_display`) but was held back because the
+    /// feature-intro popover was open when it resolved. Never starts a new
+    /// claim; it only releases a win that's already been decided. Returns
+    /// `true` when it displayed the modal.
+    fn maybe_display_pending_factories_launch_modal(&mut self, ctx: &mut ModelContext<Self>) -> bool {
+        if !self.factories_launch_pending_display
+            || self.is_any_modal_open()
+            || self.active_feature_intro.is_some()
+        {
+            return false;
+        }
+        self.factories_launch_pending_display = false;
+        self.set_factories_launch_modal_open(true, ctx);
+        send_telemetry_from_ctx!(FactoriesLaunchModalTelemetryEvent::Shown, ctx);
+        true
+    }
+
     fn check_and_trigger_factories_launch_modal(&mut self, ctx: &mut ModelContext<Self>) -> bool {
+        if self.maybe_display_pending_factories_launch_modal(ctx) {
+            return true;
+        }
+
         if !FeatureFlag::FactoriesLaunchModal.is_enabled() {
             return false;
         }
@@ -988,15 +1051,37 @@ impl OneTimeModalModel {
                 me.pending_factories_launch_claim = false;
                 match result {
                     Ok(Ok(claimed)) => {
+                        // A retry that lands here after our own earlier attempt ended
+                        // inconclusively (network error or client-side timeout, below)
+                        // must not assume `claimed == false` means another device won:
+                        // the claim is idempotent per user, not per request, so if our
+                        // unconfirmed attempt actually committed, this retry legitimately
+                        // observes it as already claimed. A genuine loss to another
+                        // device always resolves cleanly on the very first attempt, so
+                        // `factories_launch_claim_had_transport_error` is the best
+                        // available signal to recover the win without a server-side
+                        // idempotency token (see the field's doc comment).
+                        let had_transport_error =
+                            std::mem::take(&mut me.factories_launch_claim_had_transport_error);
+                        let won = claimed || had_transport_error;
+
                         AISettings::handle(ctx).update(ctx, |settings, ctx| {
                             settings.mark_feature_intro_seen(FACTORIES_LAUNCH_SEEN_KEY, ctx);
                         });
-                        if claimed {
-                            me.set_factories_launch_modal_open(true, ctx);
-                            send_telemetry_from_ctx!(
-                                FactoriesLaunchModalTelemetryEvent::Shown,
-                                ctx
-                            );
+                        if won {
+                            // The feature-intro popover is intentionally excluded from
+                            // `is_any_modal_open`, so a win that resolves while it's open
+                            // must be held rather than stacking the centered Factories
+                            // modal on top of it.
+                            if me.active_feature_intro.is_some() {
+                                me.factories_launch_pending_display = true;
+                            } else {
+                                me.set_factories_launch_modal_open(true, ctx);
+                                send_telemetry_from_ctx!(
+                                    FactoriesLaunchModalTelemetryEvent::Shown,
+                                    ctx
+                                );
+                            }
                         } else {
                             // Another device already won the claim; the modal has
                             // genuinely been shown, so it's correctly marked seen above.
@@ -1005,21 +1090,20 @@ impl OneTimeModalModel {
                     }
                     Ok(Err(e)) => {
                         log::warn!("Failed to claim Factories launch modal impression: {e:#}");
+                        me.factories_launch_claim_had_transport_error = true;
                         me.resume_modal_checks_after_factories_launch(ctx);
                     }
                     Err(_timed_out) => {
-                        // Accepted gap: this only stops waiting on the client side. If the
-                        // server commits the claim just after the timeout elapses, this
-                        // device's seen marker stays unset and a later retry receives
-                        // `Ok(false)` like any non-winning caller, so the user never sees
-                        // the modal despite having won the claim. Closing it needs a
-                        // client-generated idempotency token or a claim-status lookup,
-                        // which is disproportionate for a launch announcement given the
-                        // failure is rare, costs at most one impression, and errs toward
-                        // under- rather than over-showing.
+                        // This only stops waiting on the client side. If the server commits
+                        // the claim just after the timeout elapses, a later retry receives
+                        // `claimed == false` like any non-winning caller; the transport-error
+                        // flag set here lets that retry recover the win instead of silently
+                        // suppressing it (see the field's doc comment for why a server-side
+                        // idempotency token would be the fully precise fix).
                         log::warn!(
                             "Timed out waiting for the Factories launch modal impression claim"
                         );
+                        me.factories_launch_claim_had_transport_error = true;
                         me.resume_modal_checks_after_factories_launch(ctx);
                     }
                 }
@@ -1028,8 +1112,9 @@ impl OneTimeModalModel {
                 // The claim was aborted before resolving. Nothing currently calls `abort()`
                 // on this future, but releasing the reservation here keeps the invariant —
                 // every terminal outcome resumes the queue — true even if a future teardown
-                // path starts doing so.
+                // path starts doing so. The outcome is unknown, same as a timeout.
                 me.pending_factories_launch_claim = false;
+                me.factories_launch_claim_had_transport_error = true;
                 me.resume_modal_checks_after_factories_launch(ctx);
             },
         );

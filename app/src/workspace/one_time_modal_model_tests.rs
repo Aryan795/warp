@@ -987,6 +987,201 @@ fn factories_launch_claim_timeout_releases_the_reservation() {
 }
 
 #[test]
+fn factories_launch_check_reruns_after_feature_intro_dismissal() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
+
+        terminal.update(&mut app, |_, ctx| {
+            let window_id = ctx.window_id();
+            prepare_factories_launch_eligible(ctx);
+            // Isolate this test from the free-AI-removal check that also runs
+            // in `resume_modal_checks_after_feature_intro`, ahead of Factories.
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                let _ = settings
+                    .did_check_to_trigger_free_ai_removal_modal
+                    .set_value(true, ctx);
+            });
+
+            let mut auth_client = MockAuthClient::new();
+            auth_client
+                .expect_claim_feature_intro_impression()
+                .withf(|intro_key| intro_key == FACTORIES_LAUNCH_SEEN_KEY)
+                .times(1)
+                .return_once(|_| Ok(true));
+            ServerApiProvider::handle(ctx).update(ctx, |provider, _ctx| {
+                provider.set_auth_client_for_test(Arc::new(auth_client));
+            });
+
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                model.update_target_window_id(window_id, ctx);
+                model.force_open_feature_intro(FeatureIntroId::CustomModelRouter, ctx);
+                assert!(model.active_feature_intro().is_some());
+
+                // Dismissing the feature intro must resume the queue into the
+                // Factories check that sits right after it in
+                // `check_and_trigger_all_modals`, not stop at feature intro.
+                model.mark_feature_intro_dismissed(ctx);
+                assert!(model.active_feature_intro().is_none());
+                assert!(
+                    !model.is_factories_launch_modal_open(),
+                    "still awaiting the claim"
+                );
+            });
+        });
+
+        wait_for_factories_launch_claim_to_resolve(&mut app).await;
+
+        terminal.update(&mut app, |_, ctx| {
+            let window_id = ctx.window_id();
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                model.update_target_window_id(window_id, ctx);
+                assert!(
+                    model.is_factories_launch_modal_open(),
+                    "the Factories check must have re-run once the feature intro was dismissed"
+                );
+            });
+        });
+    });
+}
+
+#[test]
+fn factories_launch_claim_that_resolves_while_feature_intro_is_open_is_held_pending() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
+
+        terminal.update(&mut app, |_, ctx| {
+            let window_id = ctx.window_id();
+            prepare_factories_launch_eligible(ctx);
+
+            let mut auth_client = MockAuthClient::new();
+            auth_client
+                .expect_claim_feature_intro_impression()
+                .withf(|intro_key| intro_key == FACTORIES_LAUNCH_SEEN_KEY)
+                .times(1)
+                .return_once(|_| Ok(true));
+            ServerApiProvider::handle(ctx).update(ctx, |provider, _ctx| {
+                provider.set_auth_client_for_test(Arc::new(auth_client));
+            });
+
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                model.update_target_window_id(window_id, ctx);
+                assert!(model.check_and_trigger_factories_launch_modal(ctx));
+
+                // Simulate a feature intro popover opening during the claim's
+                // round trip (e.g. from a fresh `ExperimentsUpdated` event).
+                // Feature intros are intentionally excluded from
+                // `is_any_modal_open`, which is exactly the gap this guards.
+                model.force_open_feature_intro(FeatureIntroId::CustomModelRouter, ctx);
+                assert!(model.active_feature_intro().is_some());
+            });
+        });
+
+        // Let the spawned claim future resolve while the feature intro is open.
+        wait_for_factories_launch_claim_to_resolve(&mut app).await;
+
+        terminal.update(&mut app, |_, ctx| {
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                assert!(
+                    !model.is_factories_launch_modal_open(),
+                    "a win that resolves while the feature intro is open must not stack on top \
+                     of it"
+                );
+                assert!(
+                    model.factories_launch_pending_display,
+                    "the win must be held for display once the popover closes"
+                );
+                assert!(AISettings::as_ref(ctx).is_feature_intro_seen(FACTORIES_LAUNCH_SEEN_KEY));
+
+                // Dismissing the feature intro must release the held win.
+                model.mark_feature_intro_dismissed(ctx);
+                assert!(
+                    model.is_factories_launch_modal_open(),
+                    "dismissing the popover should reveal the win that was held back"
+                );
+                assert!(!model.factories_launch_pending_display);
+            });
+        });
+    });
+}
+
+#[test]
+fn factories_launch_modal_retry_after_transport_error_recovers_the_win() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
+
+        terminal.update(&mut app, |_, ctx| {
+            prepare_factories_launch_eligible(ctx);
+
+            // First attempt: the mutation actually commits server-side (this
+            // device wins the claim), but the response never makes it back.
+            let mut auth_client = MockAuthClient::new();
+            auth_client
+                .expect_claim_feature_intro_impression()
+                .withf(|intro_key| intro_key == FACTORIES_LAUNCH_SEEN_KEY)
+                .times(1)
+                .return_once(|_| Err(anyhow::anyhow!("connection reset")));
+            ServerApiProvider::handle(ctx).update(ctx, |provider, _ctx| {
+                provider.set_auth_client_for_test(Arc::new(auth_client));
+            });
+
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                assert!(model.check_and_trigger_factories_launch_modal(ctx));
+            });
+        });
+
+        wait_for_factories_launch_claim_to_resolve(&mut app).await;
+
+        terminal.update(&mut app, |_, ctx| {
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                assert!(!model.is_factories_launch_modal_open());
+                assert!(!AISettings::as_ref(ctx).is_feature_intro_seen(FACTORIES_LAUNCH_SEEN_KEY));
+                assert!(
+                    model.factories_launch_claim_had_transport_error,
+                    "the transport-error flag must be recorded so a later retry can recover the \
+                     win"
+                );
+
+                // Retry: the server reports the row is already claimed --
+                // because it's the SAME earlier request that actually won,
+                // not a genuine loss to another device.
+                let mut retry_client = MockAuthClient::new();
+                retry_client
+                    .expect_claim_feature_intro_impression()
+                    .withf(|intro_key| intro_key == FACTORIES_LAUNCH_SEEN_KEY)
+                    .times(1)
+                    .return_once(|_| Ok(false));
+                ServerApiProvider::handle(ctx).update(ctx, |provider, _ctx| {
+                    provider.set_auth_client_for_test(Arc::new(retry_client));
+                });
+                assert!(model.check_and_trigger_factories_launch_modal(ctx));
+            });
+        });
+
+        wait_for_factories_launch_claim_to_resolve(&mut app).await;
+
+        terminal.update(&mut app, |_, ctx| {
+            let window_id = ctx.window_id();
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                model.update_target_window_id(window_id, ctx);
+                assert!(
+                    model.is_factories_launch_modal_open(),
+                    "the retry must recognize this device as the rightful winner instead of \
+                     concluding another device won"
+                );
+                assert!(AISettings::as_ref(ctx).is_feature_intro_seen(FACTORIES_LAUNCH_SEEN_KEY));
+                assert!(!model.factories_launch_claim_had_transport_error);
+            });
+        });
+    });
+}
+
+#[test]
 fn feature_intro_recheck_on_experiments_updated() {
     App::test((), |mut app| async move {
         initialize_app_for_terminal_view(&mut app);
