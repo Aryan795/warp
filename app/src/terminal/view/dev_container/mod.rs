@@ -1138,11 +1138,7 @@ fn append_unique_failure_part(parts: &mut Vec<String>, extra: Option<String>) {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .filter(|line| {
-            !existing
-                .iter()
-                .any(|part| line == part || line.contains(part) || part.contains(line))
-        })
+        .filter(|line| !existing.contains(line))
         .collect();
     if novel.is_empty() {
         return;

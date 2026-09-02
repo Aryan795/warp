@@ -231,18 +231,20 @@ fn interpret_docker_ps_probe_failure_keeps_command_and_underlying_stderr() {
 #[test]
 fn failure_message_keeps_novel_stderr_after_repeated_structured_prefix() {
     let stdout = r#"{"outcome":"error","message":"Command failed: docker pull nope:latest"}"#;
-    let stderr = "Command failed: docker pull nope:latest\nmanifest unknown\n";
+    let stderr = "Command failed: docker pull nope:latest\n\
+Command failed: docker pull nope:latest: manifest unknown\n";
     let message = dev_container_up_failure_message(stdout.as_bytes(), stderr.as_bytes());
     assert_eq!(
         message
             .matches("Command failed: docker pull nope:latest")
             .count(),
-        1,
-        "structured command prefix must not be duplicated, got {message:?}"
+        2,
+        "exact prefix line is dropped, enriched cause line is kept, got {message:?}"
     );
-    assert!(
-        message.contains("manifest unknown"),
-        "novel registry/daemon cause must be kept, got {message:?}"
+    assert_eq!(
+        message.matches("manifest unknown").count(),
+        1,
+        "novel registry/daemon cause must be kept once, got {message:?}"
     );
 }
 
