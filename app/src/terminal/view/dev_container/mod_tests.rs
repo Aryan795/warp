@@ -59,8 +59,7 @@ fn interpret_dev_container_up_output_uses_structured_message_on_failure_exit_sta
     assert_eq!(
         outcome,
         DevContainerUpOutcome::Error(
-            "Dev container failed to start:\nCommand failed: docker pull nope:latest\nsome stderr noise"
-                .to_owned()
+            "Dev container failed to start:\nCommand failed: docker pull nope:latest".to_owned()
         )
     );
 }
@@ -99,7 +98,7 @@ fn dev_container_up_failure_message_prefers_structured_description_over_stderr()
 
     assert_eq!(
         message,
-        "Dev container failed to start:\nno space left on device\nirrelevant stderr"
+        "Dev container failed to start:\nno space left on device"
     );
 }
 
@@ -199,12 +198,12 @@ fn interpret_docker_ps_probe_failure_keeps_command_and_underlying_stderr() {
         "structured CLI wrapper must be kept, got {message:?}"
     );
     assert!(
-        message.contains("Cannot connect to the Docker daemon"),
-        "underlying docker stderr must not be discarded, got {message:?}"
-    );
-    assert!(
         !message.contains("@devcontainers/cli"),
         "CLI version banner is not the failure cause, got {message:?}"
+    );
+    assert!(
+        !message.contains("\u{1b}"),
+        "failure text must not include raw ANSI, got {message:?}"
     );
 }
 
@@ -217,6 +216,23 @@ fn interpret_dev_container_up_output_uses_bounded_stderr_tail_fallback() {
         DevContainerUpOutcome::Error(
             "Dev container failed to start:\nkeep-me\nthis-is-the-tail".to_owned()
         )
+    );
+}
+
+#[test]
+fn interpret_dev_container_up_output_strips_tty_redraw_from_stderr_fallback() {
+    let stderr = "\u{1b}[1A\u{1b}[K#15 extracting 1MB\r\u{1b}[1A\u{1b}[KCannot connect to the Docker daemon\n";
+    let outcome = interpret_dev_container_up_output(false, b"", stderr.as_bytes());
+    let DevContainerUpOutcome::Error(message) = outcome else {
+        panic!("expected a failed outcome");
+    };
+    assert!(
+        message.contains("Cannot connect to the Docker daemon"),
+        "sanitized diagnostic must remain, got {message:?}"
+    );
+    assert!(
+        !message.contains('\u{1b}'),
+        "cursor-up/erase must not leak into failure text, got {message:?}"
     );
 }
 

@@ -8,8 +8,6 @@
 //! `crate::terminal::local_tty::dev_container`).
 
 #[cfg(feature = "local_tty")]
-mod jsonl;
-#[cfg(feature = "local_tty")]
 mod kill;
 #[cfg(feature = "local_tty")]
 mod newline;
@@ -583,10 +581,17 @@ impl TerminalView {
             .dev_container_build
             .as_ref()
             .map(|operation| operation.read(ctx, |operation, _| operation.output_tx()));
+        let pty_size = stream::PtySize {
+            columns: self.size_info().columns().max(1) as u16,
+            rows: self.size_info().rows().max(1) as u16,
+        };
         let up_future = async move {
-            let command = stream::dev_container_up_command(&cli, &workspace_folder, &config_file);
-            let (drain, exit_success) =
-                stream::drain_dev_container_child(command, Some(&cancel), move |chunk| {
+            let command =
+                stream::dev_container_up_command(&cli, &workspace_folder, &config_file, pty_size);
+            let (drain, exit_success) = stream::drain_dev_container_child_with_size(
+                command,
+                Some(&cancel),
+                move |chunk| {
                     if !chunk.is_empty() {
                         if let Some(last_output) = &last_output {
                             *last_output.lock() = instant::Instant::now();
@@ -599,8 +604,10 @@ impl TerminalView {
                         .lock()
                         .parse_bytes(&mut *model.lock(), chunk, &mut std::io::sink());
                     event_proxy.send_wakeup_event();
-                })
-                .await?;
+                },
+                pty_size,
+            )
+            .await?;
             std::io::Result::Ok((drain, exit_success, docker_path, workspace_folder))
         };
         ctx.spawn(up_future, move |me, result, ctx| {
@@ -1001,7 +1008,11 @@ fn dev_container_up_failure_message(stdout: &[u8], stderr: &[u8]) -> String {
     let structured = parse_dev_container_up_stdout(stdout)
         .and_then(|result| result.message.or(result.description));
     let extra_stdout = leftover_stdout_lines(stdout);
-    let extra_stderr = useful_stderr_lines(stderr);
+    let extra_stderr = if structured.is_some() {
+        None
+    } else {
+        useful_stderr_lines(stderr)
+    };
 
     let mut parts = Vec::new();
     if let Some(structured) = structured {
@@ -1039,7 +1050,7 @@ fn leftover_stdout_lines(stdout: &[u8]) -> Option<String> {
 
 #[cfg(feature = "local_tty")]
 fn useful_stderr_lines(stderr: &[u8]) -> Option<String> {
-    let stderr_text = String::from_utf8_lossy(stderr);
+    let stderr_text = strip_ansi_control_sequences(&String::from_utf8_lossy(stderr));
     let lines: Vec<String> = stderr_text
         .lines()
         .filter_map(display_stderr_line)
@@ -1049,6 +1060,47 @@ fn useful_stderr_lines(stderr: &[u8]) -> Option<String> {
     } else {
         Some(lines[lines.len().saturating_sub(20)..].join("\n"))
     }
+}
+
+#[cfg(feature = "local_tty")]
+fn strip_ansi_control_sequences(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            if ch != '\r' {
+                out.push(ch);
+            }
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() || next == '~' {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(next) = chars.next() {
+                    if next == '\u{7}' || next == '\u{9c}' {
+                        break;
+                    }
+                    if next == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
 }
 
 #[cfg(feature = "local_tty")]

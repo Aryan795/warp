@@ -9,14 +9,29 @@ use futures_util::future::{try_join, try_join3};
 use futures_util::io::AsyncReadExt;
 use parking_lot::Mutex;
 
-use super::jsonl::JsonlDecoder;
 pub(crate) use super::kill::ProcessGroupKillOnDrop;
 #[cfg(test)]
 pub(crate) use super::kill::take_process_group_terminations;
+use super::newline::NewlineNormalizer;
 use super::operation::DevContainerBuildCancel;
 
 pub(crate) const STDOUT_LIMIT: usize = 1024 * 1024;
 const STDERR_TAIL_LIMIT: usize = 8 * 1024;
+
+#[derive(Clone, Copy)]
+pub(crate) struct PtySize {
+    pub columns: u16,
+    pub rows: u16,
+}
+
+impl Default for PtySize {
+    fn default() -> Self {
+        Self {
+            columns: 80,
+            rows: 24,
+        }
+    }
+}
 
 pub(crate) struct DevContainerUpStdout {
     pub bytes: Vec<u8>,
@@ -32,6 +47,7 @@ pub(crate) fn dev_container_up_command(
     cli: &Path,
     workspace_folder: &Path,
     config_file: &Path,
+    pty_size: PtySize,
 ) -> Command {
     let mut command = Command::new_with_process_group(cli);
     command
@@ -41,49 +57,102 @@ pub(crate) fn dev_container_up_command(
         .arg("--config")
         .arg(config_file)
         .arg("--log-format")
-        .arg("json")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .arg("text")
+        .arg("--terminal-columns")
+        .arg(pty_size.columns.to_string())
+        .arg("--terminal-rows")
+        .arg(pty_size.rows.to_string())
         .kill_on_drop(true);
+    #[cfg(not(unix))]
+    {
+        let _ = pty_size;
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
     command
 }
 
+#[cfg(test)]
 pub(crate) async fn drain_dev_container_child<F>(
-    mut command: Command,
+    command: Command,
     cancel: Option<&DevContainerBuildCancel>,
     on_stderr: F,
 ) -> io::Result<(DevContainerDrain, bool)>
 where
     F: FnMut(&[u8]) + Send,
 {
-    let mut child = command.spawn()?;
-    let process_group_id = child.id();
-    let kill_group = ProcessGroupKillOnDrop::new(process_group_id);
-    if let Some(cancel) = cancel
-        && !cancel.register_kill_group(kill_group.clone())
+    drain_dev_container_child_with_size(command, cancel, on_stderr, PtySize::default()).await
+}
+
+pub(crate) async fn drain_dev_container_child_with_size<F>(
+    mut command: Command,
+    cancel: Option<&DevContainerBuildCancel>,
+    on_stderr: F,
+    pty_size: PtySize,
+) -> io::Result<(DevContainerDrain, bool)>
+where
+    F: FnMut(&[u8]) + Send,
+{
+    #[cfg(unix)]
     {
-        kill_group.terminate_now();
-        let _ = child.status().await;
-        return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-    }
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("devcontainer up stdout was not piped"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("devcontainer up stderr was not piped"))?;
-    let drain_fut = drain_dev_container_pipes(stdout, stderr, on_stderr);
-    let status_fut = {
-        let kill_group = kill_group.clone();
-        async move {
-            let status = child.status().await?;
+        let (stdout_master, stderr_master) = attach_stdio_ptys(&mut command, pty_size)?;
+        let mut child = command.spawn()?;
+        drop(command);
+        let process_group_id = child.id();
+        let kill_group = ProcessGroupKillOnDrop::new(process_group_id);
+        if let Some(cancel) = cancel
+            && !cancel.register_kill_group(kill_group.clone())
+        {
             kill_group.terminate_now();
-            io::Result::Ok(status)
+            let _ = child.status().await;
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
-    };
-    join_drain_and_status(kill_group, drain_fut, status_fut).await
+        let drain_fut = drain_dev_container_pipes(
+            PtyMasterReader(stdout_master),
+            PtyMasterReader(stderr_master),
+            on_stderr,
+        );
+        let status_fut = {
+            let kill_group = kill_group.clone();
+            async move {
+                let status = child.status().await?;
+                kill_group.terminate_now();
+                io::Result::Ok(status)
+            }
+        };
+        join_drain_and_status(kill_group, drain_fut, status_fut).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pty_size;
+        let mut child = command.spawn()?;
+        let process_group_id = child.id();
+        let kill_group = ProcessGroupKillOnDrop::new(process_group_id);
+        if let Some(cancel) = cancel
+            && !cancel.register_kill_group(kill_group.clone())
+        {
+            kill_group.terminate_now();
+            let _ = child.status().await;
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("devcontainer up stdout was not piped"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("devcontainer up stderr was not piped"))?;
+        let drain_fut = drain_dev_container_pipes(stdout, stderr, on_stderr);
+        let status_fut = {
+            let kill_group = kill_group.clone();
+            async move {
+                let status = child.status().await?;
+                kill_group.terminate_now();
+                io::Result::Ok(status)
+            }
+        };
+        join_drain_and_status(kill_group, drain_fut, status_fut).await
+    }
 }
 
 async fn join_drain_and_status(
@@ -197,19 +266,20 @@ where
     F: FnMut(&[u8]),
 {
     let mut buf = [0_u8; 8192];
-    let mut decoder = JsonlDecoder::new();
+    let mut normalizer = NewlineNormalizer::new();
     let mut stderr_tail = Vec::new();
     loop {
         let n = stderr.read(&mut buf).await?;
         if n == 0 {
             break;
         }
-        append_bounded_tail(&mut stderr_tail, &buf[..n]);
-        let decoded = decoder.push(&buf[..n]);
-        (on_stderr.lock())(&decoded);
+        let normalized = normalizer.push(&buf[..n]);
+        append_bounded_tail(&mut stderr_tail, &normalized);
+        (on_stderr.lock())(&normalized);
     }
-    let trailing = decoder.finish();
+    let trailing = normalizer.finish();
     if !trailing.is_empty() {
+        append_bounded_tail(&mut stderr_tail, &trailing);
         (on_stderr.lock())(&trailing);
     }
     Ok(stderr_tail)
@@ -217,12 +287,12 @@ where
 
 #[cfg(test)]
 pub(crate) fn transform_dev_container_stderr(chunks: &[&[u8]]) -> Vec<u8> {
-    let mut decoder = JsonlDecoder::new();
+    let mut normalizer = NewlineNormalizer::new();
     let mut out = Vec::new();
     for chunk in chunks {
-        out.extend(decoder.push(chunk));
+        out.extend(normalizer.push(chunk));
     }
-    out.extend(decoder.finish());
+    out.extend(normalizer.finish());
     out
 }
 
@@ -231,6 +301,65 @@ fn append_bounded_tail(tail: &mut Vec<u8>, chunk: &[u8]) {
     if tail.len() > STDERR_TAIL_LIMIT {
         let overflow = tail.len() - STDERR_TAIL_LIMIT;
         tail.drain(..overflow);
+    }
+}
+
+#[cfg(unix)]
+fn attach_stdio_ptys(
+    command: &mut Command,
+    pty_size: PtySize,
+) -> io::Result<(
+    async_io::Async<std::fs::File>,
+    async_io::Async<std::fs::File>,
+)> {
+    let (stdout_master, stdout_slave) = open_stdio_pty(pty_size)?;
+    let (stderr_master, stderr_slave) = open_stdio_pty(pty_size)?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_slave))
+        .stderr(Stdio::from(stderr_slave))
+        .env("TERM", "xterm-256color");
+    Ok((stdout_master, stderr_master))
+}
+
+#[cfg(unix)]
+fn open_stdio_pty(
+    pty_size: PtySize,
+) -> io::Result<(async_io::Async<std::fs::File>, std::fs::File)> {
+    use std::os::unix::io::FromRawFd;
+
+    let size = libc::winsize {
+        ws_row: pty_size.rows.max(1),
+        ws_col: pty_size.columns.max(1),
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let ends = nix::pty::openpty(Some(&size), None).map_err(io::Error::other)?;
+    unsafe {
+        libc::fcntl(ends.master, libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(ends.slave, libc::F_SETFD, libc::FD_CLOEXEC);
+        let master = std::fs::File::from_raw_fd(ends.master);
+        let slave = std::fs::File::from_raw_fd(ends.slave);
+        Ok((async_io::Async::new(master)?, slave))
+    }
+}
+
+#[cfg(unix)]
+struct PtyMasterReader(async_io::Async<std::fs::File>);
+
+#[cfg(unix)]
+impl futures_util::AsyncRead for PtyMasterReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        match std::pin::Pin::new(&mut self.get_mut().0).poll_read(cx, buf) {
+            std::task::Poll::Ready(Err(error)) if error.raw_os_error() == Some(libc::EIO) => {
+                std::task::Poll::Ready(Ok(0))
+            }
+            other => other,
+        }
     }
 }
 

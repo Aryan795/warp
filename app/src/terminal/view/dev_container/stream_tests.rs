@@ -67,6 +67,49 @@ os.write(1, b'\n{"outcome":"success","containerId":"abc","remoteWorkspaceFolder"
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn pty_stdio_is_tty_and_redraw_reaches_sink_before_exit() {
+    block_on(async {
+        let mut command = command::r#async::Command::new_with_process_group("python3");
+        command
+            .arg("-c")
+            .arg(
+                r#"
+import os
+os.write(2, f"stdout_tty={int(os.isatty(1))} stderr_tty={int(os.isatty(2))}\n".encode())
+os.write(2, b"first\rsecond\n")
+os.write(1, b'note\n{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"/w"}\n')
+"#,
+            )
+            .kill_on_drop(true);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = seen.clone();
+        let (drain, success) = super::drain_dev_container_child(command, None, move |chunk| {
+            seen_cb.lock().unwrap().extend_from_slice(chunk);
+        })
+        .await
+        .expect("drain");
+        assert!(success);
+        let seen_bytes = seen.lock().unwrap().clone();
+        let stderr = String::from_utf8_lossy(&seen_bytes);
+        assert!(
+            stderr.contains("stdout_tty=1"),
+            "fd 1 must be a TTY, got {stderr:?}"
+        );
+        assert!(
+            stderr.contains("stderr_tty=1"),
+            "fd 2 must be a TTY, got {stderr:?}"
+        );
+        assert!(
+            stderr.contains("second"),
+            "redraw must reach sink, got {stderr:?}"
+        );
+        let stdout = String::from_utf8_lossy(&drain.stdout.bytes);
+        assert!(stdout.contains(r#""outcome":"success""#), "got {stdout:?}");
+    });
+}
+
 #[test]
 fn successful_drain_terminates_process_group_once() {
     let _ = super::take_process_group_terminations();
@@ -476,18 +519,6 @@ fn failure_details_with_bare_lf_render_left_aligned() {
     }
 }
 
-fn jsonl_event(event_type: &str, text: &str) -> String {
-    format!(
-        "{}\n",
-        serde_json::json!({
-            "type": event_type,
-            "level": 3,
-            "timestamp": 1,
-            "text": text,
-        })
-    )
-}
-
 fn wide_terminal_model() -> TerminalModel {
     let mut sizes = block_size();
     sizes.size = SizeInfo::new_without_font_metrics(24, 160);
@@ -519,15 +550,11 @@ fn grid_output_from_stderr_chunks(chunks: &[&[u8]]) -> String {
 
 #[test]
 fn raw_cr_progress_overwrites_in_the_grid() {
-    let header = jsonl_event("text", "[cli] @devcontainers/cli 0.89.0");
-    let first = jsonl_event("raw", "#15 extracting sha256:abc 1.5MB / 52.40MB");
-    let last = jsonl_event("raw", "\r#15 extracting sha256:abc 52.40MB / 52.40MB");
-    let done = jsonl_event("text", "#15 DONE 2.1s");
     let output = grid_output_from_stderr_chunks(&[
-        header.as_bytes(),
-        first.as_bytes(),
-        last.as_bytes(),
-        done.as_bytes(),
+        b"[cli] @devcontainers/cli 0.89.0\n",
+        b"#15 extracting sha256:abc 1.5MB / 52.40MB\r",
+        b"#15 extracting sha256:abc 52.40MB / 52.40MB\n",
+        b"#15 DONE 2.1s\n",
     ]);
     assert!(
         output.contains("@devcontainers/cli 0.89.0"),
@@ -554,9 +581,8 @@ fn raw_cr_progress_overwrites_in_the_grid() {
 
 #[test]
 fn raw_cursor_up_progress_overwrites_in_the_grid() {
-    let first = jsonl_event("raw", "layer-a 1MB\r\nlayer-b 1MB");
-    let update = jsonl_event("raw", "\u{1b}[1A\rlayer-a 2MB");
-    let output = grid_output_from_stderr_chunks(&[first.as_bytes(), update.as_bytes()]);
+    let output =
+        grid_output_from_stderr_chunks(&[b"layer-a 1MB\r\nlayer-b 1MB", b"\x1b[1A\rlayer-a 2MB"]);
     assert!(
         output.contains("layer-a 2MB"),
         "cursor-up must apply the later snapshot, got {output:?}"
@@ -569,6 +595,44 @@ fn raw_cursor_up_progress_overwrites_in_the_grid() {
 }
 
 #[test]
+fn raw_lf_lines_left_align_and_cr_progress_overwrites_across_chunks() {
+    let joined = "[+] Building 1.0s (1/3)\n\
+#1 [internal] load build definition from Dockerfile\n\
+#15 extracting sha256:abc 1.5MB / 52.40MB\r\
+#15 extracting sha256:abc 52.40MB / 52.40MB\n\
+#15 DONE 2.1s\n";
+    let split_at = joined.len() / 2;
+    let output = grid_output_from_stderr_chunks(&[
+        &joined.as_bytes()[..split_at],
+        &joined.as_bytes()[split_at..],
+    ]);
+    for needle in ["[+] Building", "load build definition", "#15 DONE 2.1s"] {
+        let line = output
+            .lines()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} missing from {output:?}"));
+        assert_eq!(
+            line.trim_start(),
+            line,
+            "raw LF lines must start at column 0, got {line:?}"
+        );
+    }
+    let extracting_lines = output
+        .lines()
+        .filter(|line| line.contains("extracting sha256:abc"))
+        .count();
+    assert_eq!(
+        extracting_lines, 1,
+        "CR snapshots must overwrite in place, got {output:?}"
+    );
+    assert!(
+        !output.contains("1.5MB"),
+        "overwritten snapshots must not linger, got {output:?}"
+    );
+    assert!(output.contains("52.40MB / 52.40MB"));
+}
+
+#[test]
 fn drain_preserves_raw_cr_through_the_stream_boundary() {
     block_on(async {
         let mut command = command::r#async::Command::new("python3");
@@ -576,13 +640,11 @@ fn drain_preserves_raw_cr_through_the_stream_boundary() {
             .arg("-c")
             .arg(
                 r##"
-import json, os
-def emit(event_type, text):
-    os.write(2, (json.dumps({"type": event_type, "level": 3, "timestamp": 1, "text": text}) + "\n").encode())
-emit("text", "[cli] @devcontainers/cli 0.89.0")
-emit("raw", "#15 extracting sha256:abc 1.5MB / 52.40MB")
-emit("raw", "\r#15 extracting sha256:abc 52.40MB / 52.40MB")
-emit("text", "#15 DONE 2.1s")
+import os
+os.write(2, b"[cli] @devcontainers/cli 0.89.0\n")
+os.write(2, b"#15 extracting sha256:abc 1.5MB / 52.40MB\r")
+os.write(2, b"#15 extracting sha256:abc 52.40MB / 52.40MB\n")
+os.write(2, b"#15 DONE 2.1s\n")
 os.write(1, b'{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"/w"}\n')
 "##,
             )
@@ -628,6 +690,111 @@ os.write(1, b'{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"
 }
 
 #[test]
+fn stderr_tail_overflow_keeps_decoded_diagnostics_not_json_envelopes() {
+    block_on(async {
+        let mut command = command::r#async::Command::new("python3");
+        command
+            .arg("-c")
+            .arg(format!(
+                "import os; nl=bytes([10]); os.write(2, b'x'*{}+nl+b'Cannot connect to the Docker daemon'+nl); os.write(1, nl)",
+                super::STDERR_TAIL_LIMIT + 512
+            ))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().expect("spawn overflow child");
+        let stdout = child.stdout.take().expect("stdout");
+        let stderr = child.stderr.take().expect("stderr");
+        let result = drain_dev_container_pipes(stdout, stderr, |_| {})
+            .await
+            .expect("drain");
+        let _ = child.status().await;
+        let tail = String::from_utf8_lossy(&result.stderr_tail);
+        assert!(
+            tail.contains("Cannot connect to the Docker daemon"),
+            "decoded diagnostic must survive tail overflow, got {tail:?}"
+        );
+        assert!(
+            !tail.contains("\"type\":"),
+            "JSON envelopes must not appear in the failure tail, got {tail:?}"
+        );
+    });
+}
+
+#[test]
+fn drain_renders_first_marker_before_split_json_and_ansi_are_released() {
+    let step = b"step-one\n".to_vec();
+    let color = b"\x1b[31mred".to_vec();
+    let rest = b"-text\x1b[0m\n".to_vec();
+    let split_at = color.len() / 2;
+    let mut first = step;
+    first.extend_from_slice(&color[..split_at]);
+    let chunks = vec![first, color[split_at..].to_vec(), rest];
+    let released = Arc::new(Mutex::new(1usize));
+    let stderr = GatedReader {
+        chunks,
+        next: 0,
+        released: released.clone(),
+    };
+    let model = Arc::new(Mutex::new({
+        let mut model = wide_terminal_model();
+        model.start_commandless_output_block();
+        model
+    }));
+    let processor = Arc::new(Mutex::new(Processor::new()));
+    let saw_first = Arc::new(Mutex::new(false));
+    let model_for_cb = model.clone();
+    let processor_for_cb = processor.clone();
+    let saw_first_for_cb = saw_first.clone();
+    let released_for_cb = released.clone();
+
+    block_on(async {
+        drain_dev_container_pipes(EofReader, stderr, move |chunk| {
+            processor_for_cb.lock().unwrap().parse_bytes(
+                &mut *model_for_cb.lock().unwrap(),
+                chunk,
+                &mut io::sink(),
+            );
+            let mut saw_first = saw_first_for_cb.lock().unwrap();
+            if !*saw_first {
+                let output = model_for_cb
+                    .lock()
+                    .unwrap()
+                    .block_list()
+                    .active_block()
+                    .output_grid()
+                    .contents_to_string(false, None);
+                assert!(
+                    output.contains("step-one"),
+                    "first marker must render before later chunks, got {output:?}"
+                );
+                assert!(
+                    !output.contains("red-text") && !output.contains("-text"),
+                    "split ANSI must not be complete before later chunks, got {output:?}"
+                );
+                *saw_first = true;
+                *released_for_cb.lock().unwrap() = usize::MAX;
+            }
+        })
+        .await
+        .expect("drain");
+    });
+
+    assert!(*saw_first.lock().unwrap(), "first marker callback must run");
+    let output = model
+        .lock()
+        .unwrap()
+        .block_list()
+        .active_block()
+        .output_grid()
+        .contents_to_string(false, None);
+    assert!(
+        output.contains("red-text") || (output.contains("red") && output.contains("text")),
+        "split ANSI must complete after later chunks, got {output:?}"
+    );
+}
+
+#[test]
 fn commandless_output_block_height_grows_with_later_batches() {
     use warpui::units::Lines;
 
@@ -662,6 +829,50 @@ fn commandless_output_block_height_grows_with_later_batches() {
             .active_block()
             .is_visible(&TranscriptScope::Terminal)
     );
+}
+
+struct EofReader;
+
+impl futures_util::io::AsyncRead for EofReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut [u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::task::Poll::Ready(Ok(0))
+    }
+}
+
+struct GatedReader {
+    chunks: Vec<Vec<u8>>,
+    next: usize,
+    released: Arc<Mutex<usize>>,
+}
+
+impl futures_util::io::AsyncRead for GatedReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if this.next >= this.chunks.len() {
+            return std::task::Poll::Ready(Ok(0));
+        }
+        if this.next >= *this.released.lock().unwrap() {
+            cx.waker().wake_by_ref();
+            return std::task::Poll::Pending;
+        }
+        let chunk = &this.chunks[this.next];
+        let n = chunk.len().min(buf.len());
+        buf[..n].copy_from_slice(&chunk[..n]);
+        if n == chunk.len() {
+            this.next += 1;
+        } else {
+            this.chunks[this.next] = chunk[n..].to_vec();
+        }
+        std::task::Poll::Ready(Ok(n))
+    }
 }
 
 struct WriteCapture<'a>(&'a mut Vec<u8>);
