@@ -462,7 +462,7 @@ time.sleep(30)
         let descendant = wait_for_pid_file(&pid_file);
         assert!(pid_is_alive(descendant), "descendant must start alive");
         let result = join_staging_pipes_and_status(
-            process_group_id,
+            StagingProcessGroupKillOnDrop::new(process_group_id),
             async { Err(io::Error::other("stdout reader failed")) },
             async { Ok(Vec::new()) },
             async { child.status().await },
@@ -479,6 +479,22 @@ time.sleep(30)
         }
     });
     let _ = std::fs::remove_file(pid_file);
+}
+
+#[test]
+fn successful_staging_command_terminates_process_group_once() {
+    let _ = take_staging_process_group_terminations();
+    futures_lite::future::block_on(async {
+        let output = run_dev_container_docker_output(
+            Path::new("python3"),
+            &[OsString::from("-c"), OsString::from("pass")],
+            Some(&StagingCancel::new()),
+        )
+        .await
+        .expect("run");
+        assert!(output.status.success());
+    });
+    assert_eq!(take_staging_process_group_terminations(), 1);
 }
 
 #[test]

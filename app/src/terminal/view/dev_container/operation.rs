@@ -37,12 +37,6 @@ pub(crate) enum DevContainerBuildStatus {
     Completed,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DevContainerBuildFailure {
-    pub phase: DevContainerBuildPhase,
-    pub message: String,
-}
-
 #[derive(Default)]
 struct DevContainerBuildCancelState {
     cancelled: bool,
@@ -100,7 +94,6 @@ pub(crate) struct DevContainerBuildOperation {
     config_file: PathBuf,
     phase: DevContainerBuildPhase,
     status: DevContainerBuildStatus,
-    failure: Option<DevContainerBuildFailure>,
     cancel: DevContainerBuildCancel,
 }
 
@@ -116,7 +109,6 @@ impl DevContainerBuildOperation {
             config_file,
             phase: DevContainerBuildPhase::Build,
             status: DevContainerBuildStatus::Running,
-            failure: None,
             cancel: DevContainerBuildCancel::new(),
         }
     }
@@ -195,15 +187,9 @@ impl DevContainerBuildOperation {
         ctx.notify();
     }
 
-    pub(crate) fn fail(
-        &mut self,
-        phase: DevContainerBuildPhase,
-        message: String,
-        ctx: &mut ModelContext<Self>,
-    ) {
+    pub(crate) fn fail(&mut self, phase: DevContainerBuildPhase, ctx: &mut ModelContext<Self>) {
         self.phase = phase;
         self.status = DevContainerBuildStatus::Failed;
-        self.failure = Some(DevContainerBuildFailure { phase, message });
         ctx.notify();
     }
 
@@ -233,7 +219,6 @@ impl DevContainerBuildOperation {
         self.attempt_id += 1;
         self.phase = DevContainerBuildPhase::Build;
         self.status = DevContainerBuildStatus::Running;
-        self.failure = None;
         self.cancel = DevContainerBuildCancel::new();
         ctx.notify();
         (self.attempt_id, prior_process_group)

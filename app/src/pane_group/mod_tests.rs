@@ -4235,6 +4235,26 @@ fn failed_devcontainer_keeps_concise_header_and_shows_error_in_body() {
                 body.contains("Cannot connect to the Docker daemon"),
                 "body must show the underlying docker error when present, got {body:?}"
             );
+            build_view.update(ctx, |view, _ctx| {
+                let output = view
+                    .model
+                    .lock()
+                    .block_list()
+                    .active_block()
+                    .output_grid()
+                    .contents_to_string(false, None);
+                for needle in ["Command failed", "Cannot connect"] {
+                    let line = output
+                        .lines()
+                        .find(|line| line.contains(needle))
+                        .unwrap_or_else(|| panic!("{needle} missing from {output:?}"));
+                    assert_eq!(
+                        line.trim_start(),
+                        line,
+                        "failure details must start at column 0, got {line:?}"
+                    );
+                }
+            });
             assert!(
                 build_view
                     .as_ref(ctx)

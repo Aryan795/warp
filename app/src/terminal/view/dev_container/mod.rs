@@ -490,7 +490,7 @@ impl TerminalView {
         };
         let key = operation.read(ctx, |operation, _| operation.key().clone());
         operation.update(ctx, |operation, ctx| {
-            operation.fail(phase, message.clone(), ctx);
+            operation.fail(phase, ctx);
         });
         registry::DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
             registry.mark_failed(&key);
@@ -508,8 +508,9 @@ impl TerminalView {
         {
             let mut model = self.model.lock();
             let mut processor = Processor::new();
-            let bytes = format!("\r\n{message}\r\n");
-            processor.parse_bytes(&mut *model, bytes.as_bytes(), &mut std::io::sink());
+            let mut normalizer = newline::NewlineNormalizer::new();
+            let bytes = normalizer.push(format!("\n{message}\n").as_bytes());
+            processor.parse_bytes(&mut *model, &bytes, &mut std::io::sink());
         }
         event_proxy.send_wakeup_event();
     }

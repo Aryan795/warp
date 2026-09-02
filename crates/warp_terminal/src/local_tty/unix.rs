@@ -11,6 +11,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::sync::Arc;
 use std::{io, ptr};
 
 use anyhow::{Context as _, Error, Result};
@@ -24,6 +25,7 @@ use mio::Interest;
 use mio::unix::SourceFd;
 use nix::pty::openpty;
 use nix::sys::termios::{self, InputFlags, SetArg};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signal_hook_mio::v1_0::Signals;
@@ -1310,17 +1312,47 @@ pub trait ProcessGroupCancel: Send + Sync {
     fn is_cancelled(&self) -> bool;
 }
 
+/// Holds the process-group id until the first terminate, so Drop cannot
+/// SIGKILL a pid that has already been reused.
+#[derive(Clone)]
 struct StagingProcessGroupKillOnDrop {
-    process_group_id: u32,
+    process_group_id: Arc<Mutex<Option<u32>>>,
+}
+
+impl StagingProcessGroupKillOnDrop {
+    fn new(process_group_id: u32) -> Self {
+        Self {
+            process_group_id: Arc::new(Mutex::new(Some(process_group_id))),
+        }
+    }
+
+    fn terminate_now(&self) {
+        if let Some(process_group_id) = self.process_group_id.lock().take() {
+            terminate_staging_process_group(process_group_id);
+        }
+    }
 }
 
 impl Drop for StagingProcessGroupKillOnDrop {
     fn drop(&mut self) {
-        terminate_staging_process_group(self.process_group_id);
+        self.terminate_now();
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static STAGING_PROCESS_GROUP_TERMINATIONS: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_staging_process_group_terminations() -> u32 {
+    STAGING_PROCESS_GROUP_TERMINATIONS.with(std::cell::Cell::take)
+}
+
 fn terminate_staging_process_group(process_group_id: u32) {
+    #[cfg(test)]
+    STAGING_PROCESS_GROUP_TERMINATIONS.with(|count| count.set(count.get() + 1));
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
     if process_group_id < 2 {
@@ -1343,12 +1375,11 @@ fn cancelled_staging_error() -> Error {
 }
 
 async fn join_staging_pipes_and_status(
-    process_group_id: u32,
+    _kill_group: StagingProcessGroupKillOnDrop,
     stdout_fut: impl Future<Output = io::Result<Vec<u8>>>,
     stderr_fut: impl Future<Output = io::Result<Vec<u8>>>,
     status_fut: impl Future<Output = io::Result<std::process::ExitStatus>>,
 ) -> Result<(Vec<u8>, Vec<u8>, std::process::ExitStatus)> {
-    let _kill_group = StagingProcessGroupKillOnDrop { process_group_id };
     try_join3(stdout_fut, stderr_fut, status_fut)
         .await
         .map_err(Error::from)
@@ -1411,7 +1442,7 @@ async fn run_dev_container_docker_output(
         .kill_on_drop(true);
     let mut child = command.spawn().map_err(Error::from)?;
     let process_group_id = child.id();
-    let _kill_group = StagingProcessGroupKillOnDrop { process_group_id };
+    let kill_group = StagingProcessGroupKillOnDrop::new(process_group_id);
     if !cancel.register_process_group(process_group_id) {
         let _ = child.status().await;
         return Err(cancelled_staging_error());
@@ -1436,13 +1467,16 @@ async fn run_dev_container_docker_output(
         reader.read_to_end(&mut bytes).await?;
         io::Result::Ok(bytes)
     };
-    let status_fut = async {
-        let status = child.status().await?;
-        terminate_staging_process_group(process_group_id);
-        io::Result::Ok(status)
+    let status_fut = {
+        let kill_group = kill_group.clone();
+        async move {
+            let status = child.status().await?;
+            kill_group.terminate_now();
+            io::Result::Ok(status)
+        }
     };
     let (stdout, stderr, status) =
-        join_staging_pipes_and_status(process_group_id, stdout_fut, stderr_fut, status_fut).await?;
+        join_staging_pipes_and_status(kill_group, stdout_fut, stderr_fut, status_fut).await?;
     Ok(Output {
         status,
         stdout,

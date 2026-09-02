@@ -63,6 +63,26 @@ os.write(1, b'\n{"outcome":"success","containerId":"abc","remoteWorkspaceFolder"
 }
 
 #[test]
+fn successful_drain_terminates_process_group_once() {
+    let _ = super::take_process_group_terminations();
+    block_on(async {
+        let mut command = command::r#async::Command::new_with_process_group("python3");
+        command
+            .arg("-c")
+            .arg("pass")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let (drain, success) = super::drain_dev_container_child(command, None, |_| {})
+            .await
+            .expect("drain");
+        assert!(success);
+        assert!(!drain.stdout.oversized);
+    });
+    assert_eq!(super::take_process_group_terminations(), 1);
+}
+
+#[test]
 fn drain_marks_stdout_oversized_past_one_mib() {
     block_on(async {
         let mut command = command::r#async::Command::new("python3");
@@ -138,7 +158,7 @@ time.sleep(30)
         let descendant = wait_for_pid_file(&pid_file);
         assert!(pid_is_alive(descendant), "descendant must start alive");
         let result = super::join_drain_and_status(
-            process_group_id,
+            super::ProcessGroupKillOnDrop::new(process_group_id),
             async { Err(io::Error::other("reader failed")) },
             async { child.status().await },
         )
@@ -239,6 +259,34 @@ fn devcontainer_text_stream_renders_incrementally() {
         assert!(
             !line.starts_with(' '),
             "bare LF should left-align after normalization, got {line:?}"
+        );
+    }
+}
+
+#[test]
+fn failure_details_with_bare_lf_render_left_aligned() {
+    let mut model = TerminalModel::mock(None, None);
+    model.start_commandless_output_block();
+    let mut processor = Processor::new();
+    let mut normalizer = NewlineNormalizer::new();
+    let message = "Dev container failed to start:\nCommand failed: docker ps -q --filter \
+         label=devcontainer.local_folder=/tmp/ws\nCannot connect to the Docker daemon";
+    let bytes = normalizer.push(format!("\n{message}\n").as_bytes());
+    processor.parse_bytes(&mut model, &bytes, &mut io::sink());
+    let output = model
+        .block_list()
+        .active_block()
+        .output_grid()
+        .contents_to_string(false, None);
+    for needle in ["Command failed", "Cannot connect"] {
+        let line = output
+            .lines()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} missing from {output:?}"));
+        assert_eq!(
+            line.trim_start(),
+            line,
+            "failure details must start at column 0, got {line:?}"
         );
     }
 }

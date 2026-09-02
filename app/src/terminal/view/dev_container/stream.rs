@@ -45,17 +45,46 @@ pub(crate) fn dev_container_up_command(
     command
 }
 
+/// Holds the process-group id until the first terminate, so Drop cannot
+/// SIGKILL a pid that has already been reused.
+#[derive(Clone)]
 struct ProcessGroupKillOnDrop {
-    process_group_id: u32,
+    process_group_id: Arc<Mutex<Option<u32>>>,
+}
+
+impl ProcessGroupKillOnDrop {
+    fn new(process_group_id: u32) -> Self {
+        Self {
+            process_group_id: Arc::new(Mutex::new(Some(process_group_id))),
+        }
+    }
+
+    fn terminate_now(&self) {
+        if let Some(process_group_id) = self.process_group_id.lock().take() {
+            terminate_process_group(process_group_id);
+        }
+    }
 }
 
 impl Drop for ProcessGroupKillOnDrop {
     fn drop(&mut self) {
-        terminate_process_group(self.process_group_id);
+        self.terminate_now();
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static PROCESS_GROUP_TERMINATIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_process_group_terminations() -> u32 {
+    PROCESS_GROUP_TERMINATIONS.with(std::cell::Cell::take)
+}
+
 pub(crate) fn terminate_process_group(process_group_id: u32) {
+    #[cfg(test)]
+    PROCESS_GROUP_TERMINATIONS.with(|count| count.set(count.get() + 1));
     #[cfg(unix)]
     {
         use nix::sys::signal::{Signal, kill};
@@ -88,7 +117,7 @@ where
 {
     let mut child = command.spawn()?;
     let process_group_id = child.id();
-    let _kill_group = ProcessGroupKillOnDrop { process_group_id };
+    let kill_group = ProcessGroupKillOnDrop::new(process_group_id);
     if let Some(cancel) = cancel
         && !cancel.register_process_group(process_group_id)
     {
@@ -104,20 +133,22 @@ where
         .take()
         .ok_or_else(|| io::Error::other("devcontainer up stderr was not piped"))?;
     let drain_fut = drain_dev_container_pipes(stdout, stderr, on_stderr);
-    let status_fut = async {
-        let status = child.status().await?;
-        terminate_process_group(process_group_id);
-        io::Result::Ok(status)
+    let status_fut = {
+        let kill_group = kill_group.clone();
+        async move {
+            let status = child.status().await?;
+            kill_group.terminate_now();
+            io::Result::Ok(status)
+        }
     };
-    join_drain_and_status(process_group_id, drain_fut, status_fut).await
+    join_drain_and_status(kill_group, drain_fut, status_fut).await
 }
 
 async fn join_drain_and_status(
-    process_group_id: u32,
+    _kill_group: ProcessGroupKillOnDrop,
     drain_fut: impl Future<Output = io::Result<DevContainerDrain>>,
     status_fut: impl Future<Output = io::Result<std::process::ExitStatus>>,
 ) -> io::Result<(DevContainerDrain, bool)> {
-    let _kill_group = ProcessGroupKillOnDrop { process_group_id };
     let (drain, status) = try_join(drain_fut, status_fut).await?;
     Ok((drain, status.success()))
 }
@@ -132,7 +163,7 @@ pub(crate) async fn run_cancellable_process_group_command(
         .kill_on_drop(true);
     let mut child = command.spawn()?;
     let process_group_id = child.id();
-    let _kill_group = ProcessGroupKillOnDrop { process_group_id };
+    let kill_group = ProcessGroupKillOnDrop::new(process_group_id);
     if !cancel.register_process_group(process_group_id) {
         let _ = child.status().await;
         return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
@@ -147,10 +178,13 @@ pub(crate) async fn run_cancellable_process_group_command(
         .ok_or_else(|| io::Error::other("stderr was not piped"))?;
     let stdout_fut = read_to_end(stdout);
     let stderr_fut = read_to_end(stderr);
-    let status_fut = async {
-        let status = child.status().await?;
-        terminate_process_group(process_group_id);
-        io::Result::Ok(status)
+    let status_fut = {
+        let kill_group = kill_group.clone();
+        async move {
+            let status = child.status().await?;
+            kill_group.terminate_now();
+            io::Result::Ok(status)
+        }
     };
     let (stdout, stderr, status) = try_join3(stdout_fut, stderr_fut, status_fut).await?;
     Ok(Output {
