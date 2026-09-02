@@ -122,3 +122,16 @@ fn output_shortly_after_threshold_clears_subtitle_and_rearms_remaining() {
         Duration::from_secs(115)
     );
 }
+
+#[test]
+fn output_wake_channel_coalesces_to_one_pending_signal() {
+    let op = DevContainerBuildOperation::new(key());
+    let tx = op.output_tx();
+    let rx = op.output_rx();
+    while rx.try_recv().is_ok() {}
+    for _ in 0..32 {
+        let _ = tx.try_send(());
+    }
+    assert!(rx.try_recv().is_ok());
+    assert!(rx.try_recv().is_err());
+}

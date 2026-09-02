@@ -137,7 +137,7 @@ impl DevContainerBuildOperation {
     pub(crate) fn new(key: DevContainerBuildKey) -> Self {
         let workspace_folder = key.workspace_folder.clone();
         let config_file = key.config_file.clone();
-        let (output_tx, output_rx) = async_channel::unbounded();
+        let (output_tx, output_rx) = async_channel::bounded(1);
         Self {
             key,
             operation_id: Uuid::new_v4(),
