@@ -6,6 +6,7 @@ pub(crate) mod codex_modal;
 pub mod conversation_list;
 #[cfg(enable_crash_recovery)]
 mod crash_recovery;
+pub(crate) mod factories_launch_modal;
 pub(crate) mod feature_intro_modal;
 pub(crate) mod free_ai_removal_modal;
 pub mod global_search;
@@ -518,9 +519,13 @@ use crate::workspace::view::cloud_agent_capacity_modal::{
     CloudAgentCapacityModal, CloudAgentCapacityModalEvent, CloudAgentCapacityModalVariant,
 };
 use crate::workspace::view::codex_modal::{CodexModal, CodexModalEvent};
+use crate::workspace::view::factories_launch_modal::{
+    FactoriesLaunchModal, FactoriesLaunchModalEvent, FactoriesLaunchModalTelemetryEvent,
+    with_email_id_prefill,
+};
 use crate::workspace::view::feature_intro_modal::{
     FeatureIntroCtaTarget, FeatureIntroId, FeatureIntroModal, FeatureIntroModalEvent,
-    FeatureIntroModalTelemetryEvent, feature_intro_by_id, with_email_id_prefill,
+    FeatureIntroModalTelemetryEvent, feature_intro_by_id,
 };
 use crate::workspace::view::free_ai_removal_modal::{
     FreeAiRemovalModal, FreeAiRemovalModalEvent, FreeAiRemovalModalTelemetryEvent,
@@ -1118,6 +1123,7 @@ pub struct Workspace {
     openwarp_launch_modal: ViewHandle<OpenWarpLaunchModal>,
     orchestration_launch_modal: ViewHandle<OrchestrationLaunchModal>,
     agent_cli_launch_modal: ViewHandle<AgentCliLaunchModal>,
+    factories_launch_modal: ViewHandle<FactoriesLaunchModal>,
     feature_intro_modal: ViewHandle<FeatureIntroModal>,
     /// Tab that first received the feature-intro popover. The popover stays
     /// pinned to this tab for the rest of its lifetime so switching tabs does
@@ -3042,6 +3048,11 @@ impl Workspace {
             me.handle_agent_cli_launch_modal_event(event, ctx);
         });
 
+        let factories_launch_view = ctx.add_typed_action_view(FactoriesLaunchModal::new);
+        ctx.subscribe_to_view(&factories_launch_view, |me, _, event, ctx| {
+            me.handle_factories_launch_modal_event(event, ctx);
+        });
+
         let feature_intro_view = ctx.add_typed_action_view(FeatureIntroModal::new);
         ctx.subscribe_to_view(&feature_intro_view, |me, _, event, ctx| {
             me.handle_feature_intro_modal_event(event, ctx);
@@ -3384,6 +3395,8 @@ impl Workspace {
                         me.show_hoa_onboarding_flow(ctx);
                     } else if model_ref.is_build_plan_migration_modal_open() {
                         me.focus_build_plan_migration_modal(ctx);
+                    } else if model_ref.is_factories_launch_modal_open() {
+                        me.focus_factories_launch_modal(ctx);
                     } else if let Some(id) = model_ref.active_feature_intro() {
                         me.show_feature_intro_modal(id, ctx);
                     }
@@ -3525,6 +3538,7 @@ impl Workspace {
             openwarp_launch_modal: openwarp_launch_view,
             orchestration_launch_modal: orchestration_launch_view,
             agent_cli_launch_modal: agent_cli_launch_view,
+            factories_launch_modal: factories_launch_view,
             feature_intro_modal: feature_intro_view,
             feature_intro_tab_pane_group_id: None,
             auto_handoff_sleep_modal: auto_handoff_sleep_view,
@@ -19103,14 +19117,32 @@ impl Workspace {
                         settings.scroll_to_settings_widget(page, widget_id(), ctx);
                     });
                 }
-                FeatureIntroCtaTarget::FactoriesLaunchModalBooking => {
-                    let cta_url = UserWorkspaces::as_ref(ctx).factories_launch_modal_cta_url();
-                    let url =
-                        with_email_id_prefill(&cta_url, self.auth_state.user_email().as_deref());
-                    ctx.open_url(&url);
-                }
             }
         }
+        ctx.notify();
+    }
+
+    fn handle_factories_launch_modal_event(
+        &mut self,
+        event: &FactoriesLaunchModalEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            FactoriesLaunchModalEvent::Close => {
+                send_telemetry_from_ctx!(FactoriesLaunchModalTelemetryEvent::Dismissed, ctx);
+            }
+            FactoriesLaunchModalEvent::GetEarlyAccess => {
+                send_telemetry_from_ctx!(FactoriesLaunchModalTelemetryEvent::CtaClicked, ctx);
+                let cta_url = UserWorkspaces::as_ref(ctx).factories_launch_modal_cta_url();
+                let url = with_email_id_prefill(&cta_url, self.auth_state.user_email().as_deref());
+                ctx.open_url(&url);
+            }
+        }
+
+        OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+            model.mark_factories_launch_modal_dismissed(ctx);
+        });
+        self.focus_active_tab(ctx);
         ctx.notify();
     }
 
@@ -23620,6 +23652,10 @@ impl Workspace {
         ctx.focus(&self.agent_cli_launch_modal);
     }
 
+    fn focus_factories_launch_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.focus(&self.factories_launch_modal);
+    }
+
     fn show_feature_intro_modal(&mut self, id: FeatureIntroId, ctx: &mut ViewContext<Self>) {
         // Non-blocking popover: set the descriptor but intentionally do NOT focus it,
         // so the terminal and input stay usable while it is visible. Pin to the
@@ -25925,6 +25961,26 @@ impl TypedActionView for Workspace {
                 log::info!("Feature intro seen state has been reset");
             }
             #[cfg(debug_assertions)]
+            OpenFactoriesLaunchModal => {
+                OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                    model.force_open_factories_launch_modal(ctx);
+                });
+                ctx.notify();
+            }
+            #[cfg(debug_assertions)]
+            ResetFactoriesLaunchModalState => {
+                use crate::workspace::view::factories_launch_modal::FACTORIES_LAUNCH_SEEN_KEY;
+
+                AISettings::handle(ctx).update(ctx, |ai_settings, ctx| {
+                    let mut seen = ai_settings.seen_feature_intro_ids.clone();
+                    seen.remove(FACTORIES_LAUNCH_SEEN_KEY);
+                    if let Err(e) = ai_settings.seen_feature_intro_ids.set_value(seen, ctx) {
+                        log::warn!("Failed to reset Factories launch modal seen state: {e}");
+                    }
+                });
+                log::info!("Factories launch modal seen state has been reset");
+            }
+            #[cfg(debug_assertions)]
             InstallOpenCodeWarpPlugin => {
                 let message = set_opencode_warp_plugin("github:warpdotdev/opencode-warp-internal");
                 self.toast_stack.update(ctx, |view, ctx| {
@@ -27321,6 +27377,10 @@ impl View for Workspace {
 
         if should_show_modal && one_time_modal_model.is_free_ai_removal_modal_open() {
             stack.add_child(ChildView::new(&self.free_ai_removal_modal).finish());
+        }
+
+        if should_show_modal && one_time_modal_model.is_factories_launch_modal_open() {
+            stack.add_child(ChildView::new(&self.factories_launch_modal).finish());
         }
 
         if self

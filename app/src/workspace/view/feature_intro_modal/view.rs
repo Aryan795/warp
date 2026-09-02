@@ -1,11 +1,10 @@
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
-use warp_core::features::FeatureFlag;
 use warp_core::ui::theme::Fill;
 use warpui::assets::asset_cache::AssetSource;
 use warpui::elements::{
     Border, CacheOption, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius,
-    CrossAxisAlignment, Empty, Expanded, Flex, Highlight, Image, MainAxisAlignment, MainAxisSize,
+    CrossAxisAlignment, Empty, Expanded, Flex, Image, MainAxisAlignment, MainAxisSize,
     OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Stack, Text,
 };
 use warpui::fonts::{Properties, Weight};
@@ -23,38 +22,13 @@ use crate::view_components::action_button::{
 const MODAL_WIDTH: f32 = 340.;
 const HERO_HEIGHT: f32 = 110.;
 
-/// Spacing between grouped elements (badge+title, or all of badge, title,
-/// and description when there's no offer block) — matches the badge/title/
-/// description group spacing used by every other launch modal in this crate
-/// (`openwarp_launch_modal`, `orchestration_launch_modal`,
-/// `auto_handoff_sleep_modal`).
+/// Spacing between grouped elements (badge+title, or all of badge, title, and
+/// description) — matches the badge/title/description group spacing used by
+/// every other launch modal in this crate (`openwarp_launch_modal`,
+/// `orchestration_launch_modal`, `auto_handoff_sleep_modal`).
 const COMPACT_SPACING: f32 = 8.;
-/// Wider spacing used in place of [`COMPACT_SPACING`] only when an offer
-/// block is present, so the badge and title read as a pair distinct from
-/// the body copy below them, rather than as part of one dense block.
-const SPACIOUS_HEADING_SPACING: f32 = 12.;
-/// Wider spacing used in place of [`COMPACT_SPACING`] between the heading
-/// group, the description, and the offer block, only when an offer block
-/// is present, so each reads as its own section.
-const SPACIOUS_SECTION_SPACING: f32 = 16.;
-/// Looser line height for the description and offer paragraphs, used only
-/// when an offer block is present, since that copy is denser than the
-/// single-sentence descriptions other launch modals render at the default
-/// (`1.2`) line height.
-const SPACIOUS_LINE_HEIGHT_RATIO: f32 = 1.4;
-/// The body container's own top and bottom padding, used only when there's
-/// no offer block (matches the original, pre-offer-block padding).
-const COMPACT_BODY_PADDING: f32 = 16.;
-const SPACIOUS_BODY_PADDING_TOP: f32 = 20.;
-/// Larger than [`SPACIOUS_BODY_PADDING_TOP`]: the offer block is the last
-/// thing before the footer divider and earns more room ahead of it.
-const SPACIOUS_BODY_PADDING_BOTTOM: f32 = 24.;
-/// The footer's own vertical padding, used only when there's no offer block
-/// (matches the original, pre-offer-block padding).
-const COMPACT_FOOTER_PADDING: f32 = 12.;
-const SPACIOUS_FOOTER_PADDING: f32 = 16.;
-/// Uniform padding inside the offer block's own container.
-const OFFER_PADDING: f32 = 12.;
+const BODY_PADDING: f32 = 16.;
+const FOOTER_PADDING: f32 = 12.;
 
 /// Identifies a single feature announced through the reusable feature-intro
 /// popover. The string form ([`FeatureIntroId::as_key`]) is the persisted
@@ -62,7 +36,6 @@ const OFFER_PADDING: f32 = 12.;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeatureIntroId {
     CustomModelRouter,
-    FactoriesLaunch,
 }
 
 impl FeatureIntroId {
@@ -70,7 +43,6 @@ impl FeatureIntroId {
     pub fn as_key(self) -> &'static str {
         match self {
             FeatureIntroId::CustomModelRouter => "custom_model_router",
-            FeatureIntroId::FactoriesLaunch => "factories_launch",
         }
     }
 }
@@ -81,20 +53,6 @@ pub enum FeatureIntroCtaTarget {
         page: SettingsSection,
         widget_id: fn() -> &'static str,
     },
-    /// Opens the Factories launch modal's server-configured booking
-    /// destination (see `UserWorkspaces::factories_launch_modal_cta_url`).
-    FactoriesLaunchModalBooking,
-}
-
-/// A promotional callout (e.g. a limited-time incentive) rendered in its
-/// own visually distinct block below a [`FeatureIntro`]'s description,
-/// rather than as another line of body copy. `emphasis` must be an exact
-/// substring of `text`; it renders with the strongest visual emphasis in
-/// the block. See [`FeatureIntroModal::render_offer`].
-#[derive(Clone, Copy)]
-pub struct FeatureIntroOffer {
-    pub text: &'static str,
-    pub emphasis: &'static str,
 }
 
 /// A data-driven description of a single feature-intro popover. New feature
@@ -113,9 +71,6 @@ pub struct FeatureIntro {
     pub description: &'static str,
     /// Optional icon rendered to the left of the description.
     pub description_icon: Option<Icon>,
-    /// Optional promotional callout rendered in its own visually distinct
-    /// block below the description. `None` renders no such block.
-    pub offer: Option<FeatureIntroOffer>,
     /// Label for the primary call-to-action button.
     pub cta_label: &'static str,
     /// Destination opened when the user clicks the call-to-action. `None`
@@ -126,101 +81,29 @@ pub struct FeatureIntro {
     /// ineligible intro is skipped without consuming its one-time slot, so it
     /// can still show later once the user becomes eligible.
     pub eligible: fn(&AppContext) -> bool,
-    /// Whether showing this intro requires first winning an atomic,
-    /// server-side claim (see `AuthClient::claim_feature_intro_impression`).
-    /// Used for intros whose one-time impression must be consistent across a
-    /// user's devices, rather than merely once per device.
-    pub requires_server_claim: bool,
 }
 
 /// The registry of feature-intro popovers, in priority order. On startup the
 /// first eligible entry whose id has not yet been seen is shown.
-pub const FEATURE_INTROS: &[FeatureIntro] = &[
-    FeatureIntro {
-        id: FeatureIntroId::CustomModelRouter,
-        hero_image_path: "async/png/onboarding/custom_model_router_intro_banner.png",
-        badge: Some("NEW"),
-        title: "Build a custom model router for the Warp Agent.",
-        description: "Custom routers can be complexity-based, where tasks are routed based on how difficult they are, or rule-based, where they are routed based on a set of natural language prompts.",
-        description_icon: Some(Icon::Compass),
-        offer: None,
-        cta_label: "Get started",
-        cta_target: Some(FeatureIntroCtaTarget::SettingsWidget {
-            page: SettingsSection::WarpAgent,
-            widget_id: custom_model_routers_widget_id,
-        }),
-        // This intro has no server-driven targeting of its own, so it reuses the
-        // general "has AI enabled at all" gate that used to apply to every intro.
-        eligible: |app| crate::settings::AISettings::as_ref(app).is_any_ai_enabled(app),
-        requires_server_claim: false,
-    },
-    FeatureIntro {
-        id: FeatureIntroId::FactoriesLaunch,
-        hero_image_path: "async/png/onboarding/factories_launch_intro_banner.png",
-        badge: Some("NEW"),
-        title: "Build your software factory on Warp",
-        description: "Open, flexible infrastructure for building cloud software factories around your team. Factories-as-code, any model or harness, with evals and self-improvement built in.",
-        description_icon: None,
-        offer: Some(FeatureIntroOffer {
-            text: "Get hands-on implementation support and up to $10K in Factory usage during Early Access.",
-            emphasis: "up to $10K",
-        }),
-        cta_label: "Get Early Access",
-        cta_target: Some(FeatureIntroCtaTarget::FactoriesLaunchModalBooking),
-        // Purely server-driven: the feature flag reflects cohort membership, and a
-        // validated CTA URL (see `UserWorkspaces::has_validated_factories_launch_modal_cta_url`)
-        // ensures the modal never shows before a real booking link is configured.
-        eligible: |app| {
-            FeatureFlag::FactoriesLaunchModal.is_enabled()
-                && crate::workspaces::user_workspaces::UserWorkspaces::as_ref(app)
-                    .has_validated_factories_launch_modal_cta_url()
-        },
-        requires_server_claim: true,
-    },
-];
+pub const FEATURE_INTROS: &[FeatureIntro] = &[FeatureIntro {
+    id: FeatureIntroId::CustomModelRouter,
+    hero_image_path: "async/png/onboarding/custom_model_router_intro_banner.png",
+    badge: Some("NEW"),
+    title: "Build a custom model router for the Warp Agent.",
+    description: "Custom routers can be complexity-based, where tasks are routed based on how difficult they are, or rule-based, where they are routed based on a set of natural language prompts.",
+    description_icon: Some(Icon::Compass),
+    cta_label: "Get started",
+    cta_target: Some(FeatureIntroCtaTarget::SettingsWidget {
+        page: SettingsSection::WarpAgent,
+        widget_id: custom_model_routers_widget_id,
+    }),
+    eligible: |app| crate::settings::AISettings::as_ref(app).is_any_ai_enabled(app),
+}];
 
 /// Looks up a feature-intro descriptor by its id.
 pub fn feature_intro_by_id(id: FeatureIntroId) -> Option<&'static FeatureIntro> {
     FEATURE_INTROS.iter().find(|intro| intro.id == id)
 }
-
-/// Sets the signed-in user's `email` on `cta_url` as its `id` query
-/// parameter, Chili Piper's documented smart parameter for identifying and
-/// prefilling a guest on a Round-Robin scheduling link, replacing rather
-/// than duplicating an `id` pair the configured URL already carries so
-/// there's exactly one and its value is unambiguous. Every other query
-/// pair is preserved. Leaves `cta_url` unchanged when `email` is `None`,
-/// empty (an anonymous user), or when `cta_url` doesn't parse as an
-/// absolute URL.
-pub fn with_email_id_prefill(cta_url: &str, email: Option<&str>) -> String {
-    let Some(email) = email.filter(|email| !email.is_empty()) else {
-        return cta_url.to_string();
-    };
-    let Ok(mut parsed) = url::Url::parse(cta_url) else {
-        return cta_url.to_string();
-    };
-
-    let other_pairs: Vec<(String, String)> = parsed
-        .query_pairs()
-        .filter(|(key, _)| key != "id")
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-
-    {
-        let mut query = parsed.query_pairs_mut();
-        query.clear();
-        for (key, value) in &other_pairs {
-            query.append_pair(key, value);
-        }
-        query.append_pair("id", email);
-    }
-
-    parsed.to_string()
-}
-
-#[cfg(test)]
-#[path = "view_tests.rs"]
-mod tests;
 
 fn modal_background(appearance: &Appearance) -> Fill {
     appearance.theme().surface_3()
@@ -385,12 +268,11 @@ impl FeatureIntroModal {
     fn render_description(intro: &FeatureIntro, appearance: &Appearance) -> Box<dyn Element> {
         let mut lines = Flex::column().with_spacing(4.);
         for line in intro.description.split('\n') {
-            let mut text = Text::new(line, appearance.ui_font_family(), 14.)
-                .with_color(modal_text_sub(appearance));
-            if intro.offer.is_some() {
-                text = text.with_line_height_ratio(SPACIOUS_LINE_HEIGHT_RATIO);
-            }
-            lines.add_child(text.finish());
+            lines.add_child(
+                Text::new(line, appearance.ui_font_family(), 14.)
+                    .with_color(modal_text_sub(appearance))
+                    .finish(),
+            );
         }
         let description = lines.finish();
 
@@ -418,94 +300,31 @@ impl FeatureIntroModal {
         }
     }
 
-    /// Renders `offer` as its own visually distinct block: an accent-tinted,
-    /// rounded container (distinguishing it from the plain-text description
-    /// above it) with `emphasis` highlighted in bold, accent-colored text as
-    /// the strongest emphasis in the line.
-    fn render_offer(offer: &FeatureIntroOffer, appearance: &Appearance) -> Box<dyn Element> {
-        debug_assert!(
-            offer.text.contains(offer.emphasis),
-            "FeatureIntroOffer::emphasis must be a substring of its text"
-        );
-
-        let mut text = Text::new(offer.text, appearance.ui_font_family(), 14.)
-            .with_color(modal_text_main(appearance))
-            .with_line_height_ratio(SPACIOUS_LINE_HEIGHT_RATIO);
-        if let Some(byte_start) = offer.text.find(offer.emphasis) {
-            let char_start = offer.text[..byte_start].chars().count();
-            let char_count = offer.emphasis.chars().count();
-            text = text.with_single_highlight(
-                Highlight::new()
-                    .with_properties(Properties::default().weight(Weight::Bold))
-                    .with_foreground_color(appearance.theme().accent().into_solid()),
-                (char_start..char_start + char_count).collect(),
-            );
-        }
-
-        Container::new(text.finish())
-            .with_uniform_padding(OFFER_PADDING)
-            .with_background(appearance.theme().accent_overlay())
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
-            .finish()
-    }
-
-    /// Builds `render_body`'s vertical rhythm. With no offer block, this
-    /// reproduces the original flat badge/title/description spacing exactly
-    /// (nesting the badge+title pair one level deeper doesn't change the gap
-    /// between any two adjacent elements when every spacing value is equal).
-    /// With an offer block, the badge+title pair, the description, and the
-    /// offer each get more room, so the card reads as sections rather than
-    /// one dense block.
     fn render_header(intro: &FeatureIntro, appearance: &Appearance) -> Box<dyn Element> {
-        let spacious = intro.offer.is_some();
-
         let mut heading = Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
-            .with_spacing(if spacious {
-                SPACIOUS_HEADING_SPACING
-            } else {
-                COMPACT_SPACING
-            });
+            .with_spacing(COMPACT_SPACING);
         if let Some(badge) = intro.badge {
             heading.add_child(Self::render_badge(badge, appearance));
         }
         heading.add_child(Self::render_title(intro.title, appearance));
 
-        let mut header = Flex::column()
+        Flex::column()
             .with_cross_axis_alignment(CrossAxisAlignment::Start)
-            .with_spacing(if spacious {
-                SPACIOUS_SECTION_SPACING
-            } else {
-                COMPACT_SPACING
-            });
-        header.add_child(heading.finish());
-        header.add_child(Self::render_description(intro, appearance));
-        if let Some(offer) = &intro.offer {
-            header.add_child(Self::render_offer(offer, appearance));
-        }
-        header.finish()
+            .with_spacing(COMPACT_SPACING)
+            .with_child(heading.finish())
+            .with_child(Self::render_description(intro, appearance))
+            .finish()
     }
 
     fn render_body(&self, intro: &FeatureIntro, appearance: &Appearance) -> Box<dyn Element> {
-        let spacious = intro.offer.is_some();
-
-        let (body_padding_top, body_padding_bottom) = if spacious {
-            (SPACIOUS_BODY_PADDING_TOP, SPACIOUS_BODY_PADDING_BOTTOM)
-        } else {
-            (COMPACT_BODY_PADDING, COMPACT_BODY_PADDING)
-        };
         let body = Container::new(Self::render_header(intro, appearance))
             .with_horizontal_padding(16.)
-            .with_padding_top(body_padding_top)
-            .with_padding_bottom(body_padding_bottom)
+            .with_padding_top(BODY_PADDING)
+            .with_padding_bottom(BODY_PADDING)
             .with_background(modal_background(appearance))
             .finish();
 
-        let footer_padding = if spacious {
-            SPACIOUS_FOOTER_PADDING
-        } else {
-            COMPACT_FOOTER_PADDING
-        };
         let footer = Container::new(
             Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
@@ -515,7 +334,7 @@ impl FeatureIntroModal {
                 .finish(),
         )
         .with_horizontal_padding(16.)
-        .with_vertical_padding(footer_padding)
+        .with_vertical_padding(FOOTER_PADDING)
         .with_background(modal_background(appearance))
         .with_border(Border::top(1.).with_border_fill(appearance.theme().outline()))
         .with_corner_radius(CornerRadius::with_bottom(Radius::Pixels(8.)))

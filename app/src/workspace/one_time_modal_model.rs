@@ -8,8 +8,11 @@ use warp_util::sync::Condition;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity, WindowId};
 
 use super::hoa_onboarding;
+use super::view::factories_launch_modal::{
+    FACTORIES_LAUNCH_SEEN_KEY, FactoriesLaunchModalTelemetryEvent,
+};
 use super::view::feature_intro_modal::{
-    FEATURE_INTROS, FeatureIntro, FeatureIntroId, FeatureIntroModalTelemetryEvent,
+    FEATURE_INTROS, FeatureIntroId, FeatureIntroModalTelemetryEvent,
 };
 use super::view::free_ai_removal_modal::{
     FreeAiRemovalModalTelemetryEvent, FreeAiRemovalModalVariant,
@@ -55,6 +58,15 @@ pub struct OneTimeModalModel {
     auto_handoff_sleep_modal_closed: Condition,
     /// Whether the free-AI-removal notice modal is currently being shown.
     is_free_ai_removal_modal_open: bool,
+    /// Whether the Factories launch modal is currently being shown. Unlike the
+    /// feature-intro popover, this is a centered, focus-stealing modal, so it
+    /// participates in `is_any_modal_open`.
+    is_factories_launch_modal_open: bool,
+    /// Set while awaiting the atomic, cross-device impression claim for the
+    /// Factories launch modal. Prevents a recheck that fires while the claim
+    /// is in flight (e.g. from an `ExperimentsUpdated` event) from starting a
+    /// second, redundant claim.
+    pending_factories_launch_claim: bool,
     /// Whether the HOA onboarding flow is currently being shown.
     is_hoa_onboarding_open: bool,
     /// The feature-intro popover currently being shown, if any. Unlike the other
@@ -62,11 +74,6 @@ pub struct OneTimeModalModel {
     /// intentionally excluded from `is_any_modal_open` (which suppresses terminal
     /// focus stealing) to keep the terminal usable while it is visible.
     active_feature_intro: Option<FeatureIntroId>,
-    /// The `requires_server_claim` intro currently awaiting its atomic claim
-    /// response, if any. Prevents a recheck that fires while the claim is in
-    /// flight (e.g. from an `ExperimentsUpdated` event or another modal's
-    /// dismissal) from starting a second, redundant claim for the same intro.
-    pending_claim_intro_id: Option<FeatureIntroId>,
     /// Whether the initial one-time modal checks have run. The seen markers are
     /// cloud-synced settings, so event-driven re-checks must wait for the initial
     /// cloud preferences load to avoid acting on stale values.
@@ -111,6 +118,7 @@ impl OneTimeModalModel {
             ctx.subscribe_to_model(&ServerExperiments::handle(ctx), |me, _, event, ctx| {
                 let ServerExperimentsEvent::ExperimentsUpdated = event;
                 me.maybe_check_and_trigger_feature_intro_modal(ctx);
+                me.maybe_check_and_trigger_factories_launch_modal(ctx);
             });
         }
 
@@ -169,6 +177,9 @@ impl OneTimeModalModel {
                     for intro in FEATURE_INTROS {
                         settings.mark_feature_intro_seen(intro.id.as_key(), ctx);
                     }
+                    // The Factories launch modal isn't a `FEATURE_INTROS` entry, so it
+                    // needs its own pre-dismissal here for the same reason.
+                    settings.mark_feature_intro_seen(FACTORIES_LAUNCH_SEEN_KEY, ctx);
                 });
                 // Accounts created after the removal of free AI go through the new
                 // onboarding and are treated as already-noticed (no modal).
@@ -198,9 +209,10 @@ impl OneTimeModalModel {
             is_auto_handoff_sleep_modal_open: false,
             auto_handoff_sleep_modal_closed,
             is_free_ai_removal_modal_open: false,
+            is_factories_launch_modal_open: false,
+            pending_factories_launch_claim: false,
             is_hoa_onboarding_open: false,
             active_feature_intro: None,
-            pending_claim_intro_id: None,
             has_completed_initial_modal_checks: false,
             has_fetched_workspaces: false,
             target_window_id: None,
@@ -384,6 +396,51 @@ impl OneTimeModalModel {
         self.set_hoa_onboarding_open(false, ctx);
     }
 
+    /// Returns whether the Factories launch modal is currently open.
+    pub fn is_factories_launch_modal_open(&self) -> bool {
+        self.is_factories_launch_modal_open && self.target_window_id.is_some()
+    }
+
+    /// This modal occupies the priority slot the shared feature-intro engine
+    /// used to hold on its behalf, so its dismissal resumes the same later
+    /// checks (HOA onboarding, then build-plan migration) that dismissing
+    /// that slot used to reach via `resume_modal_checks_after_feature_intro`.
+    pub fn mark_factories_launch_modal_dismissed(&mut self, ctx: &mut ModelContext<Self>) {
+        if !self.set_factories_launch_modal_open(false, ctx) {
+            return;
+        }
+        self.resume_modal_checks_after_factories_launch(ctx);
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn force_open_factories_launch_modal(&mut self, ctx: &mut ModelContext<Self>) {
+        self.set_factories_launch_modal_open(true, ctx);
+    }
+
+    fn set_factories_launch_modal_open(
+        &mut self,
+        is_open: bool,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
+        if self.is_factories_launch_modal_open != is_open {
+            self.is_factories_launch_modal_open = is_open;
+            ctx.emit(OneTimeModalEvent::VisibilityChanged { is_open });
+            return true;
+        }
+        false
+    }
+
+    /// Resumes the modal-check chain after the Factories launch modal's own
+    /// slot, without retrying the Factories check itself (retrying inline
+    /// from a lost/failed claim would immediately hammer the claim endpoint
+    /// again; see `claim_and_show_factories_launch_modal`).
+    fn resume_modal_checks_after_factories_launch(&mut self, ctx: &mut ModelContext<Self>) {
+        if self.check_and_trigger_hoa_onboarding(ctx) {
+            return;
+        }
+        self.check_and_trigger_build_plan_migration_modal(ctx);
+    }
+
     /// Returns true if any one-time modal is currently open.
     pub fn is_any_modal_open(&self) -> bool {
         (self.is_oz_launch_modal_open
@@ -393,6 +450,7 @@ impl OneTimeModalModel {
             || self.is_auto_handoff_sleep_modal_open
             || self.is_build_plan_migration_modal_open
             || self.is_free_ai_removal_modal_open
+            || self.is_factories_launch_modal_open
             || self.is_hoa_onboarding_open)
             && self.target_window_id.is_some()
     }
@@ -525,6 +583,10 @@ impl OneTimeModalModel {
         }
 
         if self.check_and_trigger_feature_intro_modal(ctx) {
+            return;
+        }
+
+        if self.check_and_trigger_factories_launch_modal(ctx) {
             return;
         }
 
@@ -798,12 +860,9 @@ impl OneTimeModalModel {
         // Show the first registered, unseen feature intro that the user is currently
         // eligible for (see `FEATURE_INTROS`). An unseen but ineligible intro (e.g. a
         // server-targeted launch the user isn't enrolled in yet) is left unseen rather
-        // than consumed, so it can still show once the user becomes eligible. An intro
-        // whose claim is already in flight is skipped too, so a recheck that fires
-        // while we're waiting on the server doesn't start a second concurrent claim.
+        // than consumed, so it can still show once the user becomes eligible.
         let next = FEATURE_INTROS.iter().find(|intro| {
             !AISettings::as_ref(ctx).is_feature_intro_seen(intro.id.as_key())
-                && self.pending_claim_intro_id != Some(intro.id)
                 && (intro.eligible)(ctx)
         });
         let Some(intro) = next else {
@@ -815,68 +874,95 @@ impl OneTimeModalModel {
             return false;
         }
 
-        if intro.requires_server_claim {
-            // Unlike the non-claim path below, the seen marker is deliberately NOT set
-            // here: it is a globally-synced setting, so writing it before the claim
-            // resolves and then treating a network failure as "already shown" would
-            // permanently suppress the modal everywhere for a user who was never
-            // actually shown it. `claim_and_show_feature_intro` only marks it seen once
-            // the claim outcome (won or genuinely lost to another device) is known.
-            self.claim_and_show_feature_intro(intro, ctx);
-        } else {
-            // Mark it seen up front so it shows at most once per device. This intro has
-            // no server claim to lose, so there's no failure mode where marking it seen
-            // could cost the user their only impression.
-            AISettings::handle(ctx).update(ctx, |settings, ctx| {
-                settings.mark_feature_intro_seen(id.as_key(), ctx);
-            });
-            self.set_active_feature_intro(Some(id), ctx);
-            send_telemetry_from_ctx!(FeatureIntroModalTelemetryEvent::Shown { feature: id }, ctx);
-        }
+        AISettings::handle(ctx).update(ctx, |settings, ctx| {
+            settings.mark_feature_intro_seen(id.as_key(), ctx);
+        });
+        self.set_active_feature_intro(Some(id), ctx);
+        send_telemetry_from_ctx!(FeatureIntroModalTelemetryEvent::Shown { feature: id }, ctx);
         true
     }
 
-    /// Wins the atomic, cross-device impression claim before actually showing a
-    /// `requires_server_claim` intro (see `AuthClient::claim_feature_intro_impression`).
-    /// The one-time seen marker is written only once the outcome is known: on a win
-    /// (`Ok(true)`) or a genuine loss to another device (`Ok(false)`), never on a
-    /// request error, so a transient failure or being offline leaves the intro
-    /// eligible to retry on the next recheck instead of silently burning the user's
-    /// only impression.
-    fn claim_and_show_feature_intro(
-        &mut self,
-        intro: &'static FeatureIntro,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        self.pending_claim_intro_id = Some(intro.id);
+    /// Re-runs `check_and_trigger_factories_launch_modal` outside the initial
+    /// startup check, e.g. when a fresh experiments fetch makes the server-
+    /// validated CTA URL newly available (see
+    /// `UserWorkspaces::has_validated_factories_launch_modal_cta_url`).
+    fn maybe_check_and_trigger_factories_launch_modal(&mut self, ctx: &mut ModelContext<Self>) {
+        if !self.has_completed_initial_modal_checks
+            || self.is_any_modal_open()
+            || self.pending_factories_launch_claim
+        {
+            return;
+        }
+        self.check_and_trigger_factories_launch_modal(ctx);
+    }
+
+    fn check_and_trigger_factories_launch_modal(&mut self, ctx: &mut ModelContext<Self>) -> bool {
+        if !FeatureFlag::FactoriesLaunchModal.is_enabled() {
+            return false;
+        }
+
+        if AISettings::as_ref(ctx).is_feature_intro_seen(FACTORIES_LAUNCH_SEEN_KEY) {
+            return false;
+        }
+
+        if self.pending_factories_launch_claim {
+            return false;
+        }
+
+        // Purely server-driven: the feature flag reflects cohort membership, and a
+        // validated CTA URL ensures the modal never shows before a real booking
+        // link is configured (never falls back to the generic Contact Sales page).
+        if !UserWorkspaces::as_ref(ctx).has_validated_factories_launch_modal_cta_url() {
+            return false;
+        }
+
+        if matches!(ChannelState::channel(), Channel::Integration) {
+            return false;
+        }
+
+        self.claim_and_show_factories_launch_modal(ctx);
+        true
+    }
+
+    /// Wins the atomic, cross-device impression claim before actually showing
+    /// the Factories launch modal (see
+    /// `AuthClient::claim_feature_intro_impression`). The one-time seen marker
+    /// is written only once the outcome is known: on a win (`Ok(true)`) or a
+    /// genuine loss to another device (`Ok(false)`), never on a request error,
+    /// so a transient failure or being offline leaves the modal eligible to
+    /// retry on the next recheck instead of silently burning the user's only
+    /// impression.
+    fn claim_and_show_factories_launch_modal(&mut self, ctx: &mut ModelContext<Self>) {
+        self.pending_factories_launch_claim = true;
         let auth_client = ServerApiProvider::as_ref(ctx).get_auth_client();
-        let intro_key = intro.id.as_key();
         ctx.spawn(
-            async move { auth_client.claim_feature_intro_impression(intro_key).await },
+            async move {
+                auth_client
+                    .claim_feature_intro_impression(FACTORIES_LAUNCH_SEEN_KEY)
+                    .await
+            },
             move |me, result, ctx| {
-                me.pending_claim_intro_id = None;
+                me.pending_factories_launch_claim = false;
                 match result {
                     Ok(claimed) => {
                         AISettings::handle(ctx).update(ctx, |settings, ctx| {
-                            settings.mark_feature_intro_seen(intro_key, ctx);
+                            settings.mark_feature_intro_seen(FACTORIES_LAUNCH_SEEN_KEY, ctx);
                         });
                         if claimed {
-                            me.set_active_feature_intro(Some(intro.id), ctx);
+                            me.set_factories_launch_modal_open(true, ctx);
                             send_telemetry_from_ctx!(
-                                FeatureIntroModalTelemetryEvent::Shown { feature: intro.id },
+                                FactoriesLaunchModalTelemetryEvent::Shown,
                                 ctx
                             );
                         } else {
-                            // Another device already won the claim; the intro has
+                            // Another device already won the claim; the modal has
                             // genuinely been shown, so it's correctly marked seen above.
-                            me.resume_modal_checks_after_feature_intro(ctx);
+                            me.resume_modal_checks_after_factories_launch(ctx);
                         }
                     }
                     Err(e) => {
-                        log::warn!(
-                            "Failed to claim feature intro impression for {intro_key}: {e:#}"
-                        );
-                        me.resume_modal_checks_after_feature_intro(ctx);
+                        log::warn!("Failed to claim Factories launch modal impression: {e:#}");
+                        me.resume_modal_checks_after_factories_launch(ctx);
                     }
                 }
             },
