@@ -1176,15 +1176,14 @@ fn dev_container_preflight_args(
 #[cfg(feature = "local_tty")]
 fn parse_dev_container_up_stdout(stdout: &[u8]) -> Option<DevContainerUpResult> {
     let stdout_text = String::from_utf8_lossy(stdout);
-    stdout_text.lines().rev().find_map(|line| {
-        let line = line.trim();
-        if line.is_empty() {
-            return None;
-        }
-        serde_json::from_str::<DevContainerUpResult>(line)
-            .ok()
-            .filter(|parsed| !parsed.outcome.is_empty())
-    })
+    let line = stdout_text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    serde_json::from_str::<DevContainerUpResult>(line)
+        .ok()
+        .filter(|parsed| !parsed.outcome.is_empty())
 }
 
 /// Finds `devcontainer.json` candidates for `workspace_folder`, in the order the
@@ -1225,6 +1224,18 @@ fn discover_dev_container_configs(workspace_folder: &Path) -> Vec<PathBuf> {
     }
 
     configs
+}
+
+#[cfg(all(test, feature = "local_tty"))]
+pub(crate) fn interpret_up_output_for_test(
+    exit_success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> bool {
+    matches!(
+        interpret_dev_container_up_output(exit_success, stdout, stderr),
+        DevContainerUpOutcome::ReadyToAttach { .. }
+    )
 }
 
 #[cfg(all(test, feature = "local_tty"))]

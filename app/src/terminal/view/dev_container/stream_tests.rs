@@ -944,6 +944,53 @@ fn held_outcome_is_released_when_unterminated_stdout_follows_before_eof() {
 }
 
 #[test]
+fn same_read_outcome_then_unterminated_tail_reaches_sink_before_eof() {
+    let payload = b"{\"outcome\":\"success\",\"containerId\":\"abc\",\"remoteWorkspaceFolder\":\"/w\"}\ntail-without-nl"
+        .to_vec();
+    let released = Arc::new(Mutex::new(1usize));
+    let stdout = GatedReader {
+        chunks: vec![payload, b"after-eof-guard".to_vec()],
+        next: 0,
+        released: released.clone(),
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+    let released_cb = released.clone();
+    let saw_before_eof = Arc::new(Mutex::new(false));
+    let saw_cb = saw_before_eof.clone();
+
+    let result = block_on(async {
+        drain_dev_container_pipes(stdout, EofReader, move |chunk| {
+            let text = {
+                let mut seen = seen_cb.lock().unwrap();
+                seen.extend_from_slice(chunk);
+                String::from_utf8_lossy(&seen).into_owned()
+            };
+            if text.contains("tail-without-nl") {
+                assert!(
+                    text.contains(r#""outcome":"success""#),
+                    "same-read held outcome must reach the sink before EOF, got {text:?}"
+                );
+                *saw_cb.lock().unwrap() = true;
+                *released_cb.lock().unwrap() = usize::MAX;
+            }
+        })
+        .await
+        .expect("drain")
+    });
+
+    assert!(
+        *saw_before_eof.lock().unwrap(),
+        "same-read tail must be observed before EOF"
+    );
+    assert!(
+        !super::super::interpret_up_output_for_test(true, &result.stdout.bytes, b""),
+        "ordinary tail after outcome JSON must not attach, got {:?}",
+        String::from_utf8_lossy(&result.stdout.bytes)
+    );
+}
+
+#[test]
 fn drain_renders_first_marker_before_split_json_and_ansi_are_released() {
     let step = b"step-one\n".to_vec();
     let color = b"\x1b[31mred".to_vec();

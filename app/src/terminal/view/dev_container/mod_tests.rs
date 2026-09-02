@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn interpret_dev_container_up_output_does_not_attach_when_ordinary_tail_follows_outcome() {
+    let stdout = r#"{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"/w"}
+ordinary-tail"#;
+    let drain = futures_lite::future::block_on(stream::drain_dev_container_pipes(
+        futures_lite::io::Cursor::new(stdout.as_bytes().to_vec()),
+        futures_lite::io::Cursor::new(Vec::<u8>::new()),
+        |_| {},
+    ))
+    .expect("drain");
+    let outcome = interpret_dev_container_up_output(true, &drain.stdout.bytes, &drain.stderr_tail);
+    assert!(
+        matches!(outcome, DevContainerUpOutcome::Error(_)),
+        "stale outcome before ordinary tail must not attach, got {outcome:?}"
+    );
+}
+
+#[test]
 fn interpret_dev_container_up_output_ready_to_attach_on_full_success() {
     let stdout = r#"Some progress line
 {"outcome":"success","containerId":"abc123","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/project"}"#;

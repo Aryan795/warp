@@ -271,10 +271,16 @@ where
                 emit_output(&on_output, &mut normalizer, &record);
             }
         }
+        if !pending.is_empty()
+            && let Some(previous) = held_outcome.take()
+        {
+            emit_output(&on_output, &mut normalizer, &previous);
+        }
         if pending.len() > STDOUT_LIMIT {
             oversized = true;
             pending.clear();
-        } else if !could_be_outcome_json_prefix(&pending) {
+        } else if !pending.is_empty() && !could_be_outcome_json_prefix(&pending) {
+            append_complete_stdout_record(&mut complete, &pending);
             emit_output(&on_output, &mut normalizer, &pending);
             pending.clear();
         }
