@@ -183,8 +183,7 @@ impl MaterializedLayoutRetention {
     }
 
     #[cfg(test)]
-    fn reusable_len(&mut self) -> usize {
-        self.sweep();
+    fn reusable_len(&self) -> usize {
         self.reusable.len()
     }
 }
@@ -2107,7 +2106,7 @@ impl Paragraph {
             return None;
         }
         let mut paragraph = self.clone();
-        paragraph.frame = layout.layout_text_prefix(
+        paragraph.frame = layout.layout_text_prefix_uncached(
             &deferred.text,
             &deferred.paragraph_styles,
             &self.spacing,

@@ -105,6 +105,24 @@ impl<T> TextCache<T> {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
+impl TextCache<TextFrame> {
+    fn payload_counts(&self) -> (usize, usize) {
+        let prev_frame = self.prev_frame.lock();
+        let curr_frame = self.curr_frame.read();
+        prev_frame
+            .values()
+            .chain(curr_frame.values())
+            .flat_map(|frame| frame.lines())
+            .fold((0, 0), |(glyphs, carets), line| {
+                (
+                    glyphs + line.runs.iter().map(|run| run.glyphs.len()).sum::<usize>(),
+                    carets + line.caret_positions.len(),
+                )
+            })
+    }
+}
+
 pub struct LayoutCache {
     line_cache: TextCache<Line>,
     text_frame_cache: TextCache<TextFrame>,
@@ -127,6 +145,12 @@ impl LayoutCache {
     pub fn finish_frame(&self) {
         self.line_cache.finish_frame();
         self.text_frame_cache.finish_frame();
+    }
+
+    /// Returns glyph and caret payload counts retained by cached text frames.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn cached_text_frame_payload_counts(&self) -> (usize, usize) {
+        self.text_frame_cache.payload_counts()
     }
 
     pub fn remove_line(&self, key: &dyn CacheKey) {

@@ -255,6 +255,78 @@ fn test_main_viewport_and_simultaneous_lenses_share_one_materialization_budget()
 }
 
 #[test]
+fn test_sequential_lens_admission_does_not_retain_intermediate_cached_payloads() {
+    App::test((), |app| async move {
+        app.read(|ctx| {
+            let layout_cache = LayoutCache::new();
+            let layout = TextLayout::new(
+                &layout_cache,
+                ctx.font_cache().text_layout_system(),
+                &TEST_STYLES,
+                f32::MAX,
+            );
+            let mut content = SumTree::new();
+            for text in ["abcdefghij", "klmnopqrst", "uvwxyz1234"] {
+                content.push(BlockItem::Paragraph(deferred_paragraph(
+                    &layout,
+                    text,
+                    &BufferBlockStyle::PlainText,
+                )));
+            }
+            let mut model =
+                RenderState::new_for_test(TEST_STYLES, 200.0.into_pixels(), 24.0.into_pixels());
+            model.set_content(content);
+            layout_cache.finish_frame();
+            layout_cache.finish_frame();
+
+            let main = model.materialize_viewport_with_max_chars(
+                &layout,
+                8.0.into_pixels(),
+                200.0.into_pixels(),
+                Pixels::zero(),
+                12,
+            );
+            let materialize_lens = |line| {
+                let blocks = model.blocks_in_line_range(
+                    super::RenderLineLocation::Current(LineCount(line))
+                        ..super::RenderLineLocation::Current(LineCount(line + 1)),
+                    200.0.into_pixels(),
+                );
+                model.materialize_items(&layout, blocks, 12)
+            };
+            let first_lens = materialize_lens(1);
+            let second_lens = materialize_lens(2);
+
+            let (live_glyphs, live_carets) = [&main, &first_lens, &second_lens]
+                .into_iter()
+                .flat_map(|items| items.iter())
+                .filter_map(|item| item.block())
+                .fold((0, 0), |(glyphs, carets), block| {
+                    let BlockItem::Paragraph(paragraph) = block.as_ref() else {
+                        panic!("expected materialized paragraph");
+                    };
+                    paragraph.frame.lines().iter().fold(
+                        (glyphs, carets),
+                        |(glyphs, carets), line| {
+                            (
+                                glyphs
+                                    + line.runs.iter().map(|run| run.glyphs.len()).sum::<usize>(),
+                                carets + line.caret_positions.len(),
+                            )
+                        },
+                    )
+                });
+            let (cached_glyphs, cached_carets) = layout_cache.cached_text_frame_payload_counts();
+
+            assert_eq!(cached_glyphs, 0);
+            assert_eq!(cached_carets, 0);
+            assert!(live_glyphs <= 12);
+            assert!(live_carets <= 15);
+        });
+    })
+}
+
+#[test]
 fn test_materialized_layout_retention_prunes_dead_reusable_ranges() {
     App::test((), |app| async move {
         app.read(|ctx| {
@@ -285,14 +357,18 @@ fn test_materialized_layout_retention_prunes_dead_reusable_ranges() {
                 );
                 drop(model.materialize_items(&layout, blocks, 10));
             }
+            let blocks = model.blocks_in_line_range(
+                super::RenderLineLocation::Current(LineCount(0))
+                    ..super::RenderLineLocation::Current(LineCount(1)),
+                200.0.into_pixels(),
+            );
+            let live = model.materialize_items(&layout, blocks, 10);
 
             assert_eq!(
-                model
-                    .materialized_layout_retention
-                    .borrow_mut()
-                    .reusable_len(),
-                0
+                model.materialized_layout_retention.borrow().reusable_len(),
+                1
             );
+            drop(live);
         });
     })
 }

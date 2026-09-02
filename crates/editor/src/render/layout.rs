@@ -190,6 +190,27 @@ impl<'a> TextLayout<'a> {
             max_chars.min(MAX_LAYOUT_LINE_CHARS),
         )
     }
+
+    /// Shapes through a throwaway cache so superseded retained-layout prefixes release immediately.
+    pub(crate) fn layout_text_prefix_uncached(
+        &self,
+        text: &str,
+        paragraph_style: &ParagraphStyles,
+        spacing: &BlockSpacing,
+        style_runs: &[(Range<usize>, StyleAndFont)],
+        max_chars: usize,
+    ) -> Arc<TextFrame> {
+        let cache = LayoutCache::new();
+        self.layout_text_with_options_and_max_chars_in_cache(
+            &cache,
+            text,
+            paragraph_style,
+            style_runs,
+            self.content_width(spacing),
+            Default::default(),
+            max_chars.min(MAX_LAYOUT_LINE_CHARS),
+        )
+    }
     pub fn layout_text_with_options(
         &self,
         text: &str,
@@ -217,6 +238,28 @@ impl<'a> TextLayout<'a> {
         alignment: TextAlignment,
         max_chars: usize,
     ) -> Arc<TextFrame> {
+        self.layout_text_with_options_and_max_chars_in_cache(
+            self.layout_cache,
+            text,
+            paragraph_style,
+            style_runs,
+            max_width,
+            alignment,
+            max_chars,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_text_with_options_and_max_chars_in_cache(
+        &self,
+        layout_cache: &LayoutCache,
+        text: &str,
+        paragraph_style: &ParagraphStyles,
+        style_runs: &[(Range<usize>, StyleAndFont)],
+        max_width: f32,
+        alignment: TextAlignment,
+        max_chars: usize,
+    ) -> Arc<TextFrame> {
         if text.is_empty() {
             return Arc::new(TextFrame::empty(
                 paragraph_style.font_size,
@@ -230,7 +273,7 @@ impl<'a> TextLayout<'a> {
             clamp_style_runs_for_layout_with_max_chars(style_runs, max_chars)
         });
 
-        self.layout_cache.layout_text(
+        layout_cache.layout_text(
             shaped_text,
             paragraph_style.line_style(),
             clamped_style_runs.as_deref().unwrap_or(style_runs),
