@@ -1778,3 +1778,142 @@ fn restored_block_count_up_to_recurses_into_summarization_subtasks() {
     assert_eq!(conversation.restored_block_count_up_to(20), 10);
     assert_eq!(conversation.restored_block_count_up_to(5), 6);
 }
+
+fn executed_shell_command_attachment(command_id: &str) -> api::Attachment {
+    api::Attachment {
+        value: Some(api::attachment::Value::ExecutedShellCommand(
+            api::ExecutedShellCommand {
+                command: format!("echo {command_id}"),
+                output: String::new(),
+                exit_code: 0,
+                command_id: command_id.to_string(),
+                started_ts: None,
+                finished_ts: None,
+                is_auto_attached: false,
+            },
+        )),
+    }
+}
+
+fn user_query_message_with_attachment(
+    id: &str,
+    request_id: &str,
+    command_id: &str,
+) -> api::Message {
+    api::Message {
+        fetched_memories: vec![],
+        id: id.to_string(),
+        task_id: "root-task".to_string(),
+        server_message_data: String::new(),
+        citations: vec![],
+        message: Some(api::message::Message::UserQuery(api::message::UserQuery {
+            query: String::new(),
+            context: None,
+            referenced_attachments: HashMap::from([(
+                "attachment-1".to_string(),
+                executed_shell_command_attachment(command_id),
+            )]),
+            mode: None,
+            intended_agent: Default::default(),
+        })),
+        request_id: request_id.to_string(),
+        timestamp: None,
+    }
+}
+
+fn user_query_message_with_context_command(
+    id: &str,
+    request_id: &str,
+    command_id: &str,
+) -> api::Message {
+    #[allow(deprecated)]
+    let context = api::InputContext {
+        executed_shell_commands: vec![api::ExecutedShellCommand {
+            command: format!("echo {command_id}"),
+            output: String::new(),
+            exit_code: 0,
+            command_id: command_id.to_string(),
+            started_ts: None,
+            finished_ts: None,
+            is_auto_attached: false,
+        }],
+        ..Default::default()
+    };
+    api::Message {
+        fetched_memories: vec![],
+        id: id.to_string(),
+        task_id: "root-task".to_string(),
+        server_message_data: String::new(),
+        citations: vec![],
+        message: Some(api::message::Message::UserQuery(api::message::UserQuery {
+            query: String::new(),
+            context: Some(context),
+            referenced_attachments: HashMap::new(),
+            mode: None,
+            intended_agent: Default::default(),
+        })),
+        request_id: request_id.to_string(),
+        timestamp: None,
+    }
+}
+
+/// Regression test for APP-5428 review finding: `count_command_blocks_up_to` must
+/// apply the same `seen_command_ids` deduplication policy as
+/// `extract_command_blocks_from_messages`, or the two diverge on conversations with
+/// duplicate nonempty `command_id`s. Covers the three cases named in review: two
+/// attachments sharing a `command_id`, two context blocks sharing a `command_id`, and a
+/// `RunShellCommand` followed by an attachment for its completed command.
+#[test]
+fn count_command_blocks_matches_extract_command_blocks_len_for_duplicate_attachments() {
+    let conversation = restored_conversation_with_messages(vec![
+        user_query_message_with_attachment("user-0", "request-0", "shared-command"),
+        user_query_message_with_attachment("user-1", "request-1", "shared-command"),
+    ]);
+
+    assert_eq!(
+        conversation.count_command_blocks_for_test(),
+        conversation.extract_command_blocks().len()
+    );
+    // Both duplicate attachments share one command_id, so only one block is real.
+    assert_eq!(conversation.count_command_blocks_for_test(), 1);
+}
+
+#[test]
+fn count_command_blocks_matches_extract_command_blocks_len_for_duplicate_context_commands() {
+    let conversation = restored_conversation_with_messages(vec![
+        user_query_message_with_context_command("user-0", "request-0", "shared-command"),
+        user_query_message_with_context_command("user-1", "request-1", "shared-command"),
+    ]);
+
+    assert_eq!(
+        conversation.count_command_blocks_for_test(),
+        conversation.extract_command_blocks().len()
+    );
+    assert_eq!(conversation.count_command_blocks_for_test(), 1);
+}
+
+#[test]
+fn count_command_blocks_matches_extract_command_blocks_len_for_run_shell_command_then_attachment() {
+    let conversation = restored_conversation_with_messages(vec![
+        tool_call_message(
+            "tool-call-0",
+            "request-0",
+            "call-0",
+            run_shell_command_tool_call("echo shared"),
+        ),
+        tool_call_result_message(
+            "tool-result-0",
+            "request-0",
+            "call-0",
+            run_shell_command_finished_result("echo shared", "out", "shared-command"),
+        ),
+        user_query_message_with_attachment("user-1", "request-1", "shared-command"),
+    ]);
+
+    assert_eq!(
+        conversation.count_command_blocks_for_test(),
+        conversation.extract_command_blocks().len()
+    );
+    // The RunShellCommand result claims the id, so the later attachment is a duplicate.
+    assert_eq!(conversation.count_command_blocks_for_test(), 1);
+}

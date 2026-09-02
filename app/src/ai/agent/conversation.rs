@@ -272,6 +272,21 @@ fn usage_metadata_indicates_usage(metadata: &ConversationUsageMetadata) -> bool 
 /// that; the full AI transcript is unaffected and always restored in full.
 pub(crate) const MAX_RESTORED_COMMAND_BLOCKS: usize = 500;
 
+/// Decides whether a shell-command occurrence identified by `command_id` counts as a
+/// *new* block, given `seen_command_ids` (IDs already claimed by an earlier occurrence
+/// in this scan), claiming it (inserting into `seen_command_ids`) as a side effect when
+/// it does. An empty `command_id` can never be deduplicated against (matching legacy
+/// data recorded before command IDs existed), so it always counts and is never
+/// inserted.
+///
+/// Shared by [`AIConversation::extract_command_blocks_from_messages`] (which builds a
+/// full [`CommandBlockInfo`] for each new occurrence) and
+/// [`AIConversation::count_command_blocks_up_to`] (which only needs the count), so the
+/// two can never diverge on which occurrences are new versus duplicates.
+fn is_new_command_occurrence(seen_command_ids: &mut HashSet<String>, command_id: &str) -> bool {
+    command_id.is_empty() || seen_command_ids.insert(command_id.to_owned())
+}
+
 // basic info for creating a dummy command block based on an exchange's inputs
 pub(crate) struct CommandBlockInfo {
     pub(crate) command: String,
@@ -4070,12 +4085,11 @@ impl AIConversation {
                             },
                         )) = &cmd_result.result
                     {
-                        // Track the command_id so attachment/context blocks for the
-                        // same command are skipped (RunShellCommand blocks have
-                        // better timestamps).
-                        if !finished_command_id.is_empty() {
-                            seen_command_ids.insert(finished_command_id.clone());
-                        }
+                        // Claim the command_id so attachment/context blocks for the
+                        // same command are skipped later (RunShellCommand blocks have
+                        // better timestamps). A RunShellCommand occurrence is never
+                        // itself skipped as a duplicate, so the return value is unused.
+                        is_new_command_occurrence(seen_command_ids, finished_command_id);
 
                         // start_ts: prefer the block timestamp stored on ShellCommandFinished,
                         // falling back to the tool call message's proto timestamp.
@@ -4163,9 +4177,7 @@ impl AIConversation {
                 if let Some(api::attachment::Value::ExecutedShellCommand(cmd)) = &attachment.value {
                     // Skip if we've already seen this command_id (e.g. from a
                     // RunShellCommand tool call or a duplicate attachment).
-                    if !cmd.command_id.is_empty()
-                        && !seen_command_ids.insert(cmd.command_id.clone())
-                    {
+                    if !is_new_command_occurrence(seen_command_ids, &cmd.command_id) {
                         continue;
                     }
                     let start_ts = cmd
@@ -4204,9 +4216,10 @@ impl AIConversation {
                 for executed_shell_command in &context.executed_shell_commands {
                     if !executed_shell_command.command.is_empty() {
                         // Skip if we've already seen this command_id.
-                        if !executed_shell_command.command_id.is_empty()
-                            && !seen_command_ids.insert(executed_shell_command.command_id.clone())
-                        {
+                        if !is_new_command_occurrence(
+                            seen_command_ids,
+                            &executed_shell_command.command_id,
+                        ) {
                             continue;
                         }
                         let start_ts = executed_shell_command
@@ -4354,8 +4367,14 @@ impl AIConversation {
             return 0;
         };
 
+        let mut seen_command_ids = HashSet::new();
         let mut count = 0;
-        self.count_command_blocks_up_to(&api_task.messages, scan_cap, &mut count);
+        self.count_command_blocks_up_to(
+            &api_task.messages,
+            scan_cap,
+            &mut seen_command_ids,
+            &mut count,
+        );
         if count <= scan_cap {
             count
         } else if scan_cap == MAX_RESTORED_COMMAND_BLOCKS {
@@ -4365,12 +4384,37 @@ impl AIConversation {
         }
     }
 
-    /// Counts command blocks the way [`Self::extract_command_blocks_from_messages`] does,
-    /// stopping as soon as `*count` exceeds `limit`, and without building a
-    /// `CommandBlockInfo`, an exchange-timestamp index, or a full per-message-set
-    /// tool-call/result index. Recurses into summarization subagent subtasks the same way
-    /// `extract_command_blocks_from_messages` does, so a summarized-away command is still
-    /// counted.
+    /// Test-only helper exposing the raw, unbounded scan for parity checks against
+    /// [`Self::extract_command_blocks`]. Production callers always go through
+    /// [`Self::restored_block_count_up_to`], which clamps to
+    /// [`MAX_RESTORED_COMMAND_BLOCKS`].
+    #[cfg(test)]
+    pub(crate) fn count_command_blocks_for_test(&self) -> usize {
+        let Some(root_task) = self.get_root_task() else {
+            return 0;
+        };
+        let Some(api_task) = root_task.source() else {
+            return 0;
+        };
+
+        let mut seen_command_ids = HashSet::new();
+        let mut count = 0;
+        self.count_command_blocks_up_to(
+            &api_task.messages,
+            usize::MAX,
+            &mut seen_command_ids,
+            &mut count,
+        );
+        count
+    }
+
+    /// Counts command blocks the way [`Self::extract_command_blocks_from_messages`] does
+    /// -- including its `seen_command_ids` deduplication policy, via the shared
+    /// [`is_new_command_occurrence`] -- stopping as soon as `*count` exceeds `limit`, and
+    /// without building a `CommandBlockInfo`, an exchange-timestamp index, or a full
+    /// per-message-set tool-call/result index. Recurses into summarization subagent
+    /// subtasks the same way `extract_command_blocks_from_messages` does, so a
+    /// summarized-away command is still counted.
     ///
     /// Assumes a `RunShellCommand` tool call's result appears later in `messages` than the
     /// call itself, which holds for how these transcripts are produced; a call whose
@@ -4380,6 +4424,7 @@ impl AIConversation {
         &self,
         messages: &[api::Message],
         limit: usize,
+        seen_command_ids: &mut HashSet<String>,
         count: &mut usize,
     ) {
         let mut pending_run_shell_command_ids: HashSet<&str> = HashSet::new();
@@ -4397,7 +4442,12 @@ impl AIConversation {
                     if let Some(subtask) = self.task_store.get(&subtask_id)
                         && let Some(subtask_source) = subtask.source()
                     {
-                        self.count_command_blocks_up_to(&subtask_source.messages, limit, count);
+                        self.count_command_blocks_up_to(
+                            &subtask_source.messages,
+                            limit,
+                            seen_command_ids,
+                            count,
+                        );
                     }
                     continue;
                 }
@@ -4413,29 +4463,30 @@ impl AIConversation {
             if let Some(result) = message.tool_call_result()
                 && let Some(api::message::tool_call_result::Result::RunShellCommand(cmd_result)) =
                     &result.result
-                && matches!(
-                    cmd_result.result,
-                    Some(api::run_shell_command_result::Result::CommandFinished(_))
-                )
+                && let Some(api::run_shell_command_result::Result::CommandFinished(
+                    api::ShellCommandFinished {
+                        command_id: finished_command_id,
+                        ..
+                    },
+                )) = &cmd_result.result
                 && pending_run_shell_command_ids.remove(result.tool_call_id.as_str())
             {
+                // A RunShellCommand occurrence is never itself skipped as a duplicate;
+                // it only claims the id for later attachment/context occurrences.
+                is_new_command_occurrence(seen_command_ids, finished_command_id);
                 *count += 1;
             }
 
-            let attachment_count = match message.message.as_ref() {
-                Some(api::message::Message::UserQuery(user_query)) => user_query
-                    .referenced_attachments
-                    .values()
-                    .filter(|attachment| {
-                        matches!(
-                            attachment.value,
-                            Some(api::attachment::Value::ExecutedShellCommand(_))
-                        )
-                    })
-                    .count(),
-                _ => 0,
-            };
-            *count += attachment_count;
+            if let Some(api::message::Message::UserQuery(user_query)) = message.message.as_ref() {
+                for attachment in user_query.referenced_attachments.values() {
+                    if let Some(api::attachment::Value::ExecutedShellCommand(cmd)) =
+                        &attachment.value
+                        && is_new_command_occurrence(seen_command_ids, &cmd.command_id)
+                    {
+                        *count += 1;
+                    }
+                }
+            }
 
             let context = match message.message.as_ref() {
                 Some(api::message::Message::UserQuery(user_query)) => user_query.context.as_ref(),
@@ -4447,10 +4498,13 @@ impl AIConversation {
             if let Some(context) = context {
                 #[allow(deprecated)]
                 let executed_shell_commands = &context.executed_shell_commands;
-                *count += executed_shell_commands
-                    .iter()
-                    .filter(|cmd| !cmd.command.is_empty())
-                    .count();
+                for cmd in executed_shell_commands {
+                    if !cmd.command.is_empty()
+                        && is_new_command_occurrence(seen_command_ids, &cmd.command_id)
+                    {
+                        *count += 1;
+                    }
+                }
             }
         }
     }

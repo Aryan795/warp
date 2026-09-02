@@ -2193,8 +2193,8 @@ fn test_restore_missing_child_agent_panes_for_parent_bounds_aggregate_blocks_acr
 /// (`restored_block_count + 2`) consumes the remaining budget exactly, leaving zero
 /// blocks for a third (minimal) child. Undercounting each of the first two children by
 /// 1 block (the old `+ 1` bug) would free up exactly the 2 blocks the third child
-/// needs, wrongly admitting it and overshooting the budget by 2 blocks -- so this
-/// fails on the old formula and passes on the correct one.
+/// (real cost 1) needs, wrongly admitting it and overshooting the budget by 1 block --
+/// so this fails on the old formula and passes on the correct one.
 #[test]
 fn test_restore_missing_child_agent_panes_for_parent_rejects_third_child_at_exact_budget_boundary()
 {
