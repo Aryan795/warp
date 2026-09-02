@@ -60,6 +60,34 @@ pub(crate) fn terminate_process_group(process_group_id: u32) {
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+
+        if process_group_id < 2 {
+            log::warn!("Refusing to terminate process {process_group_id}: pid is below 2");
+            return;
+        }
+        // Windows has no POSIX process groups; `child.id()` is the process id.
+        // SAFETY: `process_group_id` is the pid of a process we spawned. The handle is used only
+        // to terminate that process and is closed before returning.
+        match unsafe { OpenProcess(PROCESS_TERMINATE, false, process_group_id) } {
+            Ok(handle) => {
+                let result = unsafe { TerminateProcess(handle, 1) };
+                let _ = unsafe { CloseHandle(handle) };
+                match result {
+                    Ok(()) => log::info!("Terminated process {process_group_id}"),
+                    Err(error) => {
+                        log::warn!("Failed to terminate process {process_group_id}: {error}")
+                    }
+                }
+            }
+            Err(error) => {
+                log::info!("Process {process_group_id} had already exited: {error}");
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = process_group_id;
 }
