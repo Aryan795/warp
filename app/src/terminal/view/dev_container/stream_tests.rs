@@ -857,6 +857,93 @@ fn stdout_cr_progress_reaches_sink_before_outcome_json() {
 }
 
 #[test]
+fn unterminated_outcome_json_at_eof_is_kept_for_attach_and_hidden() {
+    let part1 = b"{\"outcome\":\"success\",\"containerId\":\"abc\",".to_vec();
+    let part2 = b"\"remoteWorkspaceFolder\":\"/w\"}".to_vec();
+    let released = Arc::new(Mutex::new(usize::MAX));
+    let stdout = GatedReader {
+        chunks: vec![part1, part2],
+        next: 0,
+        released,
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+
+    let result = block_on(async {
+        drain_dev_container_pipes(stdout, EofReader, move |chunk| {
+            seen_cb.lock().unwrap().extend_from_slice(chunk);
+        })
+        .await
+        .expect("drain")
+    });
+
+    let displayed = String::from_utf8_lossy(&seen.lock().unwrap().clone()).into_owned();
+    assert!(
+        !displayed.contains(r#""outcome":"success""#),
+        "unterminated final status JSON must not reach the sink, got {displayed:?}"
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout.bytes);
+    let parsed: serde_json::Value = stdout
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str(line.trim()).ok())
+        .unwrap_or_else(|| panic!("expected attach JSON in stdout, got {stdout:?}"));
+    assert_eq!(parsed["outcome"], "success");
+    assert_eq!(parsed["containerId"], "abc");
+    assert_eq!(parsed["remoteWorkspaceFolder"], "/w");
+}
+
+#[test]
+fn held_outcome_is_released_when_unterminated_stdout_follows_before_eof() {
+    let outcome =
+        b"preamble\n{\"outcome\":\"success\",\"containerId\":\"abc\",\"remoteWorkspaceFolder\":\"/w\"}\n"
+            .to_vec();
+    let tail = b"tail-without-nl".to_vec();
+    let released = Arc::new(Mutex::new(1usize));
+    let stdout = GatedReader {
+        chunks: vec![outcome, tail],
+        next: 0,
+        released: released.clone(),
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+    let released_cb = released.clone();
+    let saw_held_before_eof = Arc::new(Mutex::new(false));
+    let saw_held_cb = saw_held_before_eof.clone();
+
+    let result = block_on(async {
+        drain_dev_container_pipes(stdout, EofReader, move |chunk| {
+            let text = {
+                let mut seen = seen_cb.lock().unwrap();
+                seen.extend_from_slice(chunk);
+                String::from_utf8_lossy(&seen).into_owned()
+            };
+            if text.contains("preamble") && !text.contains("tail-without-nl") {
+                *released_cb.lock().unwrap() = usize::MAX;
+            }
+            if text.contains(r#""outcome":"success""#) && text.contains("tail-without-nl") {
+                *saw_held_cb.lock().unwrap() = true;
+            }
+            if text.contains("tail-without-nl") {
+                assert!(
+                    text.contains(r#""outcome":"success""#),
+                    "held outcome must be visible before EOF, got {text:?}"
+                );
+            }
+        })
+        .await
+        .expect("drain")
+    });
+
+    assert!(
+        *saw_held_before_eof.lock().unwrap(),
+        "held outcome must be emitted when later unterminated stdout arrives"
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout.bytes);
+    assert!(stdout.contains(r#""outcome":"success""#), "got {stdout:?}");
+}
+
+#[test]
 fn drain_renders_first_marker_before_split_json_and_ansi_are_released() {
     let step = b"step-one\n".to_vec();
     let color = b"\x1b[31mred".to_vec();

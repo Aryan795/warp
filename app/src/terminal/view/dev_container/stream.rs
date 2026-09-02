@@ -255,6 +255,9 @@ where
         if n == 0 {
             break;
         }
+        if let Some(previous) = held_outcome.take() {
+            emit_output(&on_output, &mut normalizer, &previous);
+        }
         pending.extend_from_slice(&buf[..n]);
         while let Some(newline_at) = pending.iter().position(|&b| b == b'\n') {
             let record: Vec<u8> = pending.drain(..=newline_at).collect();
@@ -276,8 +279,11 @@ where
             pending.clear();
         }
     }
-    if !pending.is_empty() && !is_outcome_json_record(&pending) {
-        emit_output(&on_output, &mut normalizer, &pending);
+    if !pending.is_empty() {
+        append_complete_stdout_record(&mut complete, &pending);
+        if !is_outcome_json_record(&pending) {
+            emit_output(&on_output, &mut normalizer, &pending);
+        }
     }
     let trailing = normalizer.finish();
     if !trailing.is_empty() {
