@@ -19,7 +19,6 @@ use crate::terminal::{CommandExecutionStats, HistoryEntry};
 
 const CHUNK_SIZE: usize = 512;
 
-/// A history entry paired with its execution-count stats, per `History::command_execution_stats`.
 struct HistoryCandidate {
     entry: Arc<HistoryEntry>,
     stats: CommandExecutionStats,
