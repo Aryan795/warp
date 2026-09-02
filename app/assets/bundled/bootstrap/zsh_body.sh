@@ -755,6 +755,25 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
     warp_send_json_message "{ \"hook\": \"ExternalShellWidgetSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
   }
 
+  function warp_detect_ctrl_r_history () {
+    _WARP_EXTERNAL_CTRL_R_WIDGET=""
+    _WARP_BUILTIN_CTRL_R_WIDGET=""
+    local warp_ctrl_r_binding warp_ctrl_r_widget
+    warp_ctrl_r_binding="$(bindkey -M main '^R' 2>/dev/null)"
+    [[ "$warp_ctrl_r_binding" == '"^R" '* ]] || return
+    warp_ctrl_r_widget="${warp_ctrl_r_binding#\"^R\" }"
+    case "$warp_ctrl_r_widget" in
+      fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
+        _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
+        shell_plugins+=(external_ctrl_r_history)
+        ;;
+      history-incremental-search-backward|history-incremental-pattern-search-backward)
+        _WARP_BUILTIN_CTRL_R_WIDGET="$warp_ctrl_r_widget"
+        shell_plugins+=(builtin_ctrl_r_history)
+        ;;
+    esac
+  }
+
   # Runs the shell's own ctrl-t file-search widget as a foreground command.
   function warp_run_external_ctrl_t_widget () {
     local result=""
@@ -1416,26 +1435,8 @@ esac
     shell_plugins+=(vi)
   fi
 
-  # Detect whether ctrl-r has been rebound to fzf's or atuin's history widget.
-  _WARP_EXTERNAL_CTRL_R_WIDGET=""
-  _WARP_BUILTIN_CTRL_R_WIDGET=""
-  warp_ctrl_r_binding="$(bindkey -M main '^R' 2>/dev/null)"
-  if [[ "$warp_ctrl_r_binding" == '"^R" '* ]]; then
-    warp_ctrl_r_widget="${warp_ctrl_r_binding#\"^R\" }"
-    case "$warp_ctrl_r_widget" in
-      fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
-        _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
-        shell_plugins+=(external_ctrl_r_history)
-        ;;
-      *)
-        _WARP_BUILTIN_CTRL_R_WIDGET="${warp_ctrl_r_widget:-history-incremental-search-backward}"
-        shell_plugins+=(builtin_ctrl_r_history)
-        ;;
-    esac
-  else
-    _WARP_BUILTIN_CTRL_R_WIDGET="history-incremental-search-backward"
-    shell_plugins+=(builtin_ctrl_r_history)
-  fi
+  # Detect fzf/atuin vs built-in incremental history search on ^R.
+  warp_detect_ctrl_r_history
 
   # Detect whether ctrl-t has been rebound to fzf's file-search widget.
   _WARP_EXTERNAL_CTRL_T_WIDGET=""

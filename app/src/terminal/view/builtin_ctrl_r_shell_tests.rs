@@ -63,6 +63,48 @@ fn run_shell(program: &str, extra_args: &[&str], script: &str) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+fn run_bash_detect(setup: &str) -> String {
+    let source = read_bootstrap("bash_body.sh");
+    let version_fn = extract_function(&source, "warp_at_least_bash_version");
+    let detect_fn = extract_function(&source, "warp_detect_ctrl_r_history");
+    run_shell(
+        "bash",
+        &["--norc", "--noprofile"],
+        &format!(
+            r#"
+set -u
+shell_plugins=()
+WARP_IN_MSYS2=false
+{version_fn}
+{detect_fn}
+{setup}
+warp_detect_ctrl_r_history
+printf '%s\n' "${{shell_plugins[*]-}}"
+"#
+        ),
+    )
+}
+
+fn run_zsh_detect(setup: &str) -> String {
+    let source = read_bootstrap("zsh_body.sh");
+    let detect_fn = extract_function(&source, "warp_detect_ctrl_r_history");
+    run_shell(
+        "zsh",
+        &["-f"],
+        &format!(
+            r#"
+emulate -L zsh
+setopt nounset
+local -a shell_plugins
+{detect_fn}
+{setup}
+warp_detect_ctrl_r_history
+print -r -- "${{(j: :)shell_plugins}}"
+"#
+        ),
+    )
+}
+
 fn assert_selection_hook(stdout: &str, expected_buffer: &str) {
     assert!(
         stdout.contains(r#""hook": "ExternalShellWidgetSelection""#)
@@ -196,140 +238,91 @@ fn zsh_successful_selection_emits_external_shell_widget_selection() {
 }
 
 #[test]
-fn bash_detection_prefers_fzf_atuin_over_builtin() {
+fn bash_helper_uses_nounset_safe_draft_arg() {
     let source = read_bootstrap("bash_body.sh");
     assert!(
         source.contains(r#"[ -n "${1-}" ]"#),
         "bash helper must use nounset-safe ${{1-}}"
     );
-    let stdout = run_shell(
-        "bash",
-        &[],
-        r#"
-set -u
-shell_plugins=()
-_WARP_EXTERNAL_CTRL_R_WIDGET=""
-WARP_IN_MSYS2=false
-bind () {
-  if [ "$1" = -X ]; then
-    printf '%s\n' '"\C-r": "__fzf_history__"'
-  fi
-}
-warp_at_least_bash_version () { echo 1; }
-warp_ctrl_r_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-r"[ :] *"\(.*\)"$/\1/p')"
-case "$warp_ctrl_r_binding" in
-  __fzf_history__|__atuin_history)
-    _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_binding"
-    shell_plugins+=(external_ctrl_r_history)
-    ;;
-esac
-if [ -z "$_WARP_EXTERNAL_CTRL_R_WIDGET" ] && [ "$(warp_at_least_bash_version "4.0")" = "1" ]; then
-  shell_plugins+=(builtin_ctrl_r_history)
-fi
-printf '%s %s\n' "$_WARP_EXTERNAL_CTRL_R_WIDGET" "${shell_plugins[*]}"
-"#,
-    );
-    assert_eq!(stdout.trim(), "__fzf_history__ external_ctrl_r_history");
 }
 
 #[test]
-fn bash_detection_reports_builtin_when_no_external_widget() {
-    let stdout = run_shell(
-        "bash",
-        &[],
-        r#"
-set -u
-shell_plugins=()
-_WARP_EXTERNAL_CTRL_R_WIDGET=""
-bind () {
-  printf '%s\n' ''
-}
-warp_at_least_bash_version () { echo 1; }
-warp_ctrl_r_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-r"[ :] *"\(.*\)"$/\1/p')"
-case "$warp_ctrl_r_binding" in
-  __fzf_history__|__atuin_history)
-    _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_binding"
-    shell_plugins+=(external_ctrl_r_history)
-    ;;
-esac
-if [ -z "$_WARP_EXTERNAL_CTRL_R_WIDGET" ] && [ "$(warp_at_least_bash_version "4.0")" = "1" ]; then
-  shell_plugins+=(builtin_ctrl_r_history)
-fi
-printf '%s\n' "${shell_plugins[*]}"
-"#,
-    );
+fn bash_default_ctrl_r_emits_builtin_capability() {
+    let stdout = run_bash_detect("");
     assert_eq!(stdout.trim(), "builtin_ctrl_r_history");
 }
 
 #[test]
-fn zsh_detection_prefers_fzf_atuin_over_builtin() {
+fn bash_detection_prefers_fzf_atuin_over_builtin() {
+    let stdout = run_bash_detect(r#"bind -x '"\C-r": __fzf_history__'"#);
+    assert_eq!(stdout.trim(), "external_ctrl_r_history");
+}
+
+#[test]
+fn bash_custom_ctrl_r_binding_is_untagged() {
+    let stdout = run_bash_detect(r#"bind -x '"\C-r": echo custom'"#);
+    assert_eq!(stdout.trim(), "");
+}
+
+#[test]
+fn bash_unbound_ctrl_r_is_untagged() {
+    let stdout = run_bash_detect("bind -r \"\\C-r\"");
+    assert_eq!(stdout.trim(), "");
+}
+
+#[test]
+fn bash_older_than_4_skips_builtin_capability() {
+    let stdout = run_bash_detect("warp_at_least_bash_version () { echo 0; }");
+    assert_eq!(stdout.trim(), "");
+}
+
+#[test]
+fn bash_msys2_skips_ctrl_r_detection() {
+    let stdout = run_bash_detect("WARP_IN_MSYS2=true");
+    assert_eq!(stdout.trim(), "");
+}
+
+#[test]
+fn zsh_helper_uses_nounset_safe_draft_arg() {
     let source = read_bootstrap("zsh_body.sh");
     assert!(
         source.contains(r#"[[ -n "${1-}" ]]"#),
         "zsh helper must use nounset-safe ${{1-}}"
     );
-    let stdout = run_shell(
-        "zsh",
-        &[],
-        r#"
-emulate -L zsh
-setopt nounset
-local -a shell_plugins
-_WARP_EXTERNAL_CTRL_R_WIDGET=""
-_WARP_BUILTIN_CTRL_R_WIDGET=""
-warp_ctrl_r_binding='"^R" fzf-history-widget'
-if [[ "$warp_ctrl_r_binding" == '"^R" '* ]]; then
-  warp_ctrl_r_widget="${warp_ctrl_r_binding#\"^R\" }"
-  case "$warp_ctrl_r_widget" in
-    fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
-      _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
-      shell_plugins+=(external_ctrl_r_history)
-      ;;
-    *)
-      _WARP_BUILTIN_CTRL_R_WIDGET="${warp_ctrl_r_widget:-history-incremental-search-backward}"
-      shell_plugins+=(builtin_ctrl_r_history)
-      ;;
-  esac
-else
-  _WARP_BUILTIN_CTRL_R_WIDGET="history-incremental-search-backward"
-  shell_plugins+=(builtin_ctrl_r_history)
-fi
-print -r -- "$_WARP_EXTERNAL_CTRL_R_WIDGET ${shell_plugins[*]}"
-"#,
-    );
-    assert_eq!(stdout.trim(), "fzf-history-widget external_ctrl_r_history");
 }
 
 #[test]
-fn zsh_detection_reports_builtin_when_bindkey_is_missing() {
-    let stdout = run_shell(
-        "zsh",
-        &[],
+fn zsh_default_ctrl_r_emits_builtin_capability() {
+    let stdout = run_zsh_detect("");
+    assert_eq!(stdout.trim(), "builtin_ctrl_r_history");
+}
+
+#[test]
+fn zsh_detection_prefers_fzf_atuin_over_builtin() {
+    let stdout = run_zsh_detect(
         r#"
-emulate -L zsh
-setopt nounset
-local -a shell_plugins
-_WARP_EXTERNAL_CTRL_R_WIDGET=""
-_WARP_BUILTIN_CTRL_R_WIDGET=""
-warp_ctrl_r_binding=""
-if [[ "$warp_ctrl_r_binding" == '"^R" '* ]]; then
-  warp_ctrl_r_widget="${warp_ctrl_r_binding#\"^R\" }"
-  case "$warp_ctrl_r_widget" in
-    fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
-      _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
-      shell_plugins+=(external_ctrl_r_history)
-      ;;
-    *)
-      _WARP_BUILTIN_CTRL_R_WIDGET="${warp_ctrl_r_widget:-history-incremental-search-backward}"
-      shell_plugins+=(builtin_ctrl_r_history)
-      ;;
-  esac
-else
-  _WARP_BUILTIN_CTRL_R_WIDGET="history-incremental-search-backward"
-  shell_plugins+=(builtin_ctrl_r_history)
-fi
-print -r -- "${shell_plugins[*]}"
+fzf-history-widget() { }
+zle -N fzf-history-widget
+bindkey '^R' fzf-history-widget
 "#,
     );
-    assert_eq!(stdout.trim(), "builtin_ctrl_r_history");
+    assert_eq!(stdout.trim(), "external_ctrl_r_history");
+}
+
+#[test]
+fn zsh_custom_ctrl_r_binding_is_untagged() {
+    let stdout = run_zsh_detect(
+        r#"
+my-custom() { }
+zle -N my-custom
+bindkey '^R' my-custom
+"#,
+    );
+    assert_eq!(stdout.trim(), "");
+}
+
+#[test]
+fn zsh_undefined_ctrl_r_is_untagged() {
+    let stdout = run_zsh_detect(r#"bindkey -r '^R'"#);
+    assert_eq!(stdout.trim(), "");
 }

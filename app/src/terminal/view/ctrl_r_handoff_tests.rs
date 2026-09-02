@@ -16,7 +16,10 @@ fn builtin_handoff_is_off_when_the_flag_is_disabled() {
     let _flag = FeatureFlag::BuiltinShellHistoryHandoff.override_enabled(false);
 
     assert_eq!(
-        ctrl_r_history_handoff_kind(&plugins(&[]), ShellType::Bash),
+        ctrl_r_history_handoff_kind(
+            &plugins(&[BUILTIN_CTRL_R_HISTORY_PLUGIN_TAG]),
+            ShellType::Bash
+        ),
         None
     );
     assert_eq!(
@@ -32,15 +35,6 @@ fn builtin_handoff_is_off_when_the_flag_is_disabled() {
 fn builtin_handoff_selects_bash_and_zsh_when_the_flag_is_enabled() {
     let _flag = FeatureFlag::BuiltinShellHistoryHandoff.override_enabled(true);
 
-    // Flag-on plus bash/zsh is enough; bootstrap may not report the builtin plugin tag.
-    assert_eq!(
-        ctrl_r_history_handoff_kind(&plugins(&[]), ShellType::Bash),
-        Some(CtrlRHistoryHandoffKind::Builtin)
-    );
-    assert_eq!(
-        ctrl_r_history_handoff_kind(&plugins(&[]), ShellType::Zsh),
-        Some(CtrlRHistoryHandoffKind::Builtin)
-    );
     assert_eq!(
         ctrl_r_history_handoff_kind(
             &plugins(&[BUILTIN_CTRL_R_HISTORY_PLUGIN_TAG]),
@@ -49,7 +43,31 @@ fn builtin_handoff_selects_bash_and_zsh_when_the_flag_is_enabled() {
         Some(CtrlRHistoryHandoffKind::Builtin)
     );
     assert_eq!(
-        ctrl_r_history_handoff_kind(&plugins(&[]), ShellType::Fish),
+        ctrl_r_history_handoff_kind(
+            &plugins(&[BUILTIN_CTRL_R_HISTORY_PLUGIN_TAG]),
+            ShellType::Zsh
+        ),
+        Some(CtrlRHistoryHandoffKind::Builtin)
+    );
+    assert_eq!(
+        ctrl_r_history_handoff_kind(
+            &plugins(&[BUILTIN_CTRL_R_HISTORY_PLUGIN_TAG]),
+            ShellType::Fish
+        ),
+        None
+    );
+}
+
+#[test]
+fn builtin_handoff_requires_the_builtin_plugin_tag() {
+    let _flag = FeatureFlag::BuiltinShellHistoryHandoff.override_enabled(true);
+
+    assert_eq!(
+        ctrl_r_history_handoff_kind(&plugins(&[]), ShellType::Bash),
+        None
+    );
+    assert_eq!(
+        ctrl_r_history_handoff_kind(&plugins(&[]), ShellType::Zsh),
         None
     );
 }

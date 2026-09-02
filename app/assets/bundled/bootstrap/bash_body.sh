@@ -1007,6 +1007,44 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
         warp_send_json_message "{ \"hook\": \"ExternalShellWidgetSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
     }
 
+    warp_detect_ctrl_r_history () {
+        _WARP_EXTERNAL_CTRL_R_WIDGET=""
+        if [ "$WARP_IN_MSYS2" != false ]; then
+            return
+        fi
+        local warp_ctrl_r_binding
+        warp_ctrl_r_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-r"[ :] *"\(.*\)"$/\1/p')"
+        case "$warp_ctrl_r_binding" in
+          __fzf_history__|__atuin_history)
+            _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_binding"
+            shell_plugins+=(external_ctrl_r_history)
+            return
+            ;;
+        esac
+        # atuin >= 18.10 binds ctrl-r through the indirect dispatcher above rather than a plain
+        # `bind -x`. Instead use atuin's own init-time flag ($__atuin_bind_ctrl_r) plus
+        # __atuin_history being defined.
+        if [ "${__atuin_bind_ctrl_r-}" = true ] && declare -F __atuin_history >/dev/null; then
+            _WARP_EXTERNAL_CTRL_R_WIDGET="__atuin_history"
+            shell_plugins+=(external_ctrl_r_history)
+            return
+        fi
+        if [ -n "$warp_ctrl_r_binding" ]; then
+            return
+        fi
+        # `read -e -i` needs bash >= 4.0; skip the built-in path on older bash (including macOS 3.2).
+        if [ "$(warp_at_least_bash_version "4.0")" != "1" ]; then
+            return
+        fi
+        local warp_ctrl_r_readline
+        warp_ctrl_r_readline="$(bind -p 2>/dev/null | command -p sed -n 's/^"\\C-r":[[:space:]]*//p')"
+        case "$warp_ctrl_r_readline" in
+          reverse-search-history)
+            shell_plugins+=(builtin_ctrl_r_history)
+            ;;
+        esac
+    }
+
     # Runs the shell's own ctrl-t file-search widget as a foreground command.
     warp_run_external_ctrl_t_widget () {
         local result=""
@@ -1577,31 +1615,10 @@ esac
 
     shell_plugins=()
 
-    # Detect whether ctrl-r has been rebound to fzf's or atuin's bash history widget, so Warp
-    # can hand ctrl-r off to it.
-    _WARP_EXTERNAL_CTRL_R_WIDGET=""
+    # Detect fzf/atuin vs built-in reverse-search-history on Ctrl-R.
+    warp_detect_ctrl_r_history
+
     if [ "$WARP_IN_MSYS2" = false ]; then
-      warp_ctrl_r_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-r"[ :] *"\(.*\)"$/\1/p')"
-      case "$warp_ctrl_r_binding" in
-        __fzf_history__|__atuin_history)
-          _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_binding"
-          shell_plugins+=(external_ctrl_r_history)
-          ;;
-      esac
-      # atuin >= 18.10 binds ctrl-r through the indirect dispatcher above rather than a plain
-      # `bind -x`. Instead use atuin's own init-time flag ($__atuin_bind_ctrl_r) plus
-        # __atuin_history being defined.
-      if [ -z "$_WARP_EXTERNAL_CTRL_R_WIDGET" ] && [ "$__atuin_bind_ctrl_r" = true ] &&
-        declare -F __atuin_history >/dev/null; then
-        _WARP_EXTERNAL_CTRL_R_WIDGET="__atuin_history"
-        shell_plugins+=(external_ctrl_r_history)
-      fi
-
-      # Default Ctrl-R is reverse-i-search. Only skip the tag on bash < 4.0 (`read -e -i`).
-      if [ -z "$_WARP_EXTERNAL_CTRL_R_WIDGET" ] && [ "$(warp_at_least_bash_version "4.0")" = "1" ]; then
-        shell_plugins+=(builtin_ctrl_r_history)
-      fi
-
       _WARP_EXTERNAL_CTRL_T_WIDGET=""
       warp_ctrl_t_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-t"[ :] *"\(.*\)"$/\1/p')"
       case "$warp_ctrl_t_binding" in
