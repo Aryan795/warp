@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 #[cfg(feature = "local_tty")]
 use settings::Setting as _;
-#[cfg(feature = "local_tty")]
 use warp_core::SessionId;
 #[cfg(feature = "local_tty")]
 use warpui::{AppContext, ModelContext};
