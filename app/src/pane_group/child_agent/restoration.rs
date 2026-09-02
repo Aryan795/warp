@@ -43,6 +43,18 @@ const RESTORE_CHILD_SEED_FETCH_LIMIT: i32 = 100;
 /// nothing external happens to trigger a retry.
 const TRANSIENT_SEED_FETCH_RETRY_DELAY: Duration = Duration::from_secs(5);
 
+/// Max hidden child-agent panes newly created by one
+/// `restore_missing_child_agent_panes_for_parent` call. Each such pane gets
+/// its own restored `TerminalModel`/block list (capped independently by
+/// `MAX_RESTORED_COMMAND_BLOCKS`), so nothing otherwise bounds how many of
+/// these panes a single parent with many children creates in one burst —
+/// e.g. every child of a fullscreen agent-view pane restored on startup.
+/// Children beyond this cap are left unmaterialized and pick up the same
+/// lazy path pills already rely on: `ensure_hidden_child_agent_pane_for_conversation`
+/// materializes a specific child on demand (reveal, swap, open-in-new-tab/pane)
+/// regardless of this cap.
+pub(in crate::pane_group) const MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES: usize = 20;
+
 /// Returns true if a fetch dispatched at `dispatched_at` must be dropped
 /// instead of applied: its seed is gone, or a newer fetch has since been
 /// dispatched for the same parent (the seed was removed and a new one
@@ -68,11 +80,17 @@ impl PaneGroup {
     /// That function already calls this with `false` after linking children,
     /// so a fresh, still-empty result (a parent that legitimately has no
     /// children) doesn't immediately re-trigger its own seed and loop.
+    ///
+    /// `required_child_id`, when given, is always materialized regardless of
+    /// `MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES` — used by
+    /// `ensure_hidden_child_agent_pane_for_conversation` so an explicit reveal
+    /// of one child never fails just because siblings already filled the cap.
     pub(in crate::pane_group) fn restore_missing_child_agent_panes_for_parent(
         &mut self,
         parent_conversation_id: AIConversationId,
         parent_pane_id: PaneId,
         trigger_seed_if_empty: bool,
+        required_child_id: Option<AIConversationId>,
         ctx: &mut ViewContext<Self>,
     ) {
         let child_ids = BlocklistAIHistoryModel::as_ref(ctx)
@@ -104,6 +122,7 @@ impl PaneGroup {
             }
         }
 
+        let mut eagerly_restored_count = 0;
         for child_id in child_ids {
             if self
                 .child_agent_panes
@@ -114,6 +133,11 @@ impl PaneGroup {
             }
 
             if self.is_conversation_owned_outside_pane(child_id, parent_pane_id, ctx) {
+                continue;
+            }
+
+            let is_required = required_child_id == Some(child_id);
+            if !is_required && eagerly_restored_count >= MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES {
                 continue;
             }
 
@@ -130,6 +154,7 @@ impl PaneGroup {
             };
 
             self.create_hidden_child_agent_pane(child_conversation, parent_pane_id, ctx);
+            eagerly_restored_count += 1;
         }
     }
 
@@ -325,6 +350,7 @@ impl PaneGroup {
                 parent_conversation_id,
                 parent_pane_id,
                 false,
+                None,
                 ctx,
             );
         }
@@ -428,6 +454,7 @@ impl PaneGroup {
             parent_conversation_id,
             terminal_pane_id.into(),
             true,
+            None,
             ctx,
         );
     }
@@ -492,6 +519,7 @@ impl PaneGroup {
             parent_conversation_id,
             parent_pane_id,
             true,
+            Some(child_conversation_id),
             ctx,
         );
 

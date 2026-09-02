@@ -24,7 +24,9 @@ use warpui::windowing::state::ApplicationStage;
 use warpui::{App, ModelHandle};
 use watcher::HomeDirectoryWatcher;
 
-use super::child_agent::restoration::is_stale_ancestor_list_completion;
+use super::child_agent::restoration::{
+    MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES, is_stale_ancestor_list_completion,
+};
 use super::child_agent::{
     HiddenChildAgentConversationRequest, HiddenChildAgentTaskContext,
     create_hidden_child_agent_conversation,
@@ -1892,6 +1894,7 @@ fn test_create_missing_child_agent_panes_restores_remote_child_from_history_mode
                 parent_conversation_id,
                 parent_pane_id,
                 true,
+                None,
                 ctx,
             );
 
@@ -1910,6 +1913,54 @@ fn test_create_missing_child_agent_panes_restores_remote_child_from_history_mode
             );
             assert_eq!(active_conversation_id, Some(child_conversation_id));
             assert_eq!(panes.focused_pane_id(ctx), parent_pane_id);
+        });
+    });
+}
+
+/// Each hidden child-agent pane restores its own capped-but-nonzero
+/// `TerminalModel`/block list (`MAX_RESTORED_COMMAND_BLOCKS`). Without a
+/// bound on how many such panes one restore burst can create, a parent
+/// with many children (e.g. a large orchestration fan-out restored on
+/// startup) multiplies that per-pane cost by an unbounded number of panes.
+/// This fails on the pre-fix code, which eagerly restores every child
+/// found for the parent in a single pass.
+#[test]
+fn test_restore_missing_child_agent_panes_for_parent_bounds_eager_pane_creation() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_terminal_view_id = panes
+                .terminal_view_from_pane_id(parent_pane_id, ctx)
+                .expect("parent pane should have a terminal view")
+                .id();
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+
+            let total_children = MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES + 10;
+            for _ in 0..total_children {
+                restore_child_conversation_for_terminal_view(
+                    parent_terminal_view_id,
+                    parent_conversation_id,
+                    ctx,
+                );
+            }
+
+            panes.restore_missing_child_agent_panes_for_parent(
+                parent_conversation_id,
+                parent_pane_id,
+                true,
+                None,
+                ctx,
+            );
+
+            assert_eq!(
+                panes.child_agent_panes.len(),
+                MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES,
+                "a single restore burst must cap eager hidden-pane creation instead of \
+                 materializing a pane (and its own restored block list) for every child",
+            );
         });
     });
 }
