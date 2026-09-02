@@ -956,7 +956,10 @@ impl OneTimeModalModel {
     /// feature-intro popover was open when it resolved. Never starts a new
     /// claim; it only releases a win that's already been decided. Returns
     /// `true` when it displayed the modal.
-    fn maybe_display_pending_factories_launch_modal(&mut self, ctx: &mut ModelContext<Self>) -> bool {
+    fn maybe_display_pending_factories_launch_modal(
+        &mut self,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
         if !self.factories_launch_pending_display
             || self.is_any_modal_open()
             || self.active_feature_intro.is_some()
