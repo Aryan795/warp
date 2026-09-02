@@ -263,26 +263,13 @@ fn usage_metadata_indicates_usage(metadata: &ConversationUsageMetadata) -> bool 
         || metadata.was_summarized
 }
 
-/// Upper bound on the number of historical shell command blocks materialized when
-/// restoring AI conversation(s) into a terminal block list.
+/// Upper bound on the number of historical shell command blocks materialized per
+/// terminal surface when restoring AI conversation(s) into a terminal block list.
 ///
-/// Each restored command becomes a full terminal `Block`, which owns several full-size
-/// grid buffers (prompt, prompt+command, output, rprompt) sized to the pane's current
-/// rows x columns, not to the command's actual content. A conversation with an
-/// unbounded number of historical commands (e.g. a long-running CLI agent session with
-/// thousands of tool calls) would otherwise materialize thousands of these grids up
-/// front at restoration time. Restoring only the most recent commands bounds that
-/// memory usage; the full AI transcript (exchanges, tool calls, agent output) is
-/// unaffected and always restored in full.
-///
-/// This bound must be enforced exactly once per independently-restored block list,
-/// via [`AIConversation::cap_restored_command_blocks`]. [`AIConversation::to_serialized_blocklist_items`]
-/// applies it to a single conversation. Callers that flatten *every* conversation
-/// recorded for one terminal surface into a single block list (e.g. app startup) must
-/// instead collect each conversation's uncapped blocks via
-/// [`AIConversation::extract_serialized_command_blocks`], merge them, and apply this cap
-/// once to the combined total -- capping each conversation independently would still let
-/// the combined total grow unboundedly with the number of conversations on that surface.
+/// Each restored command becomes a full terminal `Block` with its own grid buffers, so
+/// a terminal surface with an unbounded command history would otherwise materialize
+/// unbounded memory at restoration time. Keeping only the most recent commands bounds
+/// that; the full AI transcript is unaffected and always restored in full.
 pub(crate) const MAX_RESTORED_COMMAND_BLOCKS: usize = 500;
 
 // basic info for creating a dummy command block based on an exchange's inputs

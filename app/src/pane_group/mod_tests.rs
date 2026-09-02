@@ -17,6 +17,7 @@ use session_sharing_protocol::common::SessionId;
 use shared_session::permissions_manager::SessionPermissionsManager;
 use uuid::Uuid;
 use warp_core::features::FeatureFlag;
+use warp_multi_agent_api as api;
 use warp_server_client::iap::IapManager;
 use warpui::platform::{WindowBounds, WindowStyle};
 use warpui::windowing::WindowManager;
@@ -25,7 +26,7 @@ use warpui::{App, ModelHandle};
 use watcher::HomeDirectoryWatcher;
 
 use super::child_agent::restoration::{
-    MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES, is_stale_ancestor_list_completion,
+    MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS, is_stale_ancestor_list_completion,
 };
 use super::child_agent::{
     HiddenChildAgentConversationRequest, HiddenChildAgentTaskContext,
@@ -480,6 +481,105 @@ fn restore_child_conversation_for_terminal_view(
     ctx: &mut ViewContext<PaneGroup>,
 ) -> AIConversationId {
     let mut child_conversation = AIConversation::new(false, false);
+    child_conversation.set_parent_conversation_id(parent_conversation_id);
+    restore_conversation_for_terminal_view(terminal_view_id, child_conversation, ctx)
+}
+
+/// Builds a restored conversation with `n` sequential `RunShellCommand`
+/// tool call/result pairs, so `to_serialized_blocklist_items` extracts
+/// exactly `n` command blocks (when `n <= MAX_RESTORED_COMMAND_BLOCKS`).
+fn conversation_with_n_run_shell_commands(n: usize) -> AIConversation {
+    let mut messages = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let tool_call_id = format!("call-{i}");
+        let command = format!("echo {i}");
+        messages.push(api::Message {
+            fetched_memories: vec![],
+            id: format!("tool-call-{i}"),
+            task_id: "root-task".to_string(),
+            server_message_data: String::new(),
+            citations: vec![],
+            message: Some(api::message::Message::ToolCall(api::message::ToolCall {
+                tool_call_id: tool_call_id.clone(),
+                tool: Some(api::message::tool_call::Tool::RunShellCommand(
+                    api::message::tool_call::RunShellCommand {
+                        command: command.clone(),
+                        is_read_only: false,
+                        uses_pager: false,
+                        citations: vec![],
+                        is_risky: false,
+                        wait_until_complete_value: None,
+                        risk_category: 0,
+                    },
+                )),
+            })),
+            request_id: "req".to_string(),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: i as i64,
+                nanos: 0,
+            }),
+        });
+        messages.push(api::Message {
+            fetched_memories: vec![],
+            id: format!("tool-result-{i}"),
+            task_id: "root-task".to_string(),
+            server_message_data: String::new(),
+            citations: vec![],
+            message: Some(api::message::Message::ToolCallResult(
+                api::message::ToolCallResult {
+                    tool_call_id,
+                    context: None,
+                    result: Some(api::message::tool_call_result::Result::RunShellCommand(
+                        #[allow(deprecated)]
+                        api::RunShellCommandResult {
+                            command: command.clone(),
+                            output: i.to_string(),
+                            exit_code: 0,
+                            result: Some(api::run_shell_command_result::Result::CommandFinished(
+                                api::ShellCommandFinished {
+                                    command_id: format!("command-{i}"),
+                                    output: i.to_string(),
+                                    exit_code: 0,
+                                    start_ts: None,
+                                    finish_ts: None,
+                                },
+                            )),
+                        },
+                    )),
+                },
+            )),
+            request_id: "req".to_string(),
+            timestamp: None,
+        });
+    }
+
+    AIConversation::new_restored(
+        AIConversationId::new(),
+        vec![api::Task {
+            id: "root-task".to_string(),
+            messages,
+            dependencies: None,
+            description: String::new(),
+            summary: String::new(),
+            server_data: String::new(),
+        }],
+        None,
+    )
+    .unwrap()
+}
+
+fn restore_child_conversation_with_run_shell_commands(
+    panes: &PaneGroup,
+    pane_id: PaneId,
+    parent_conversation_id: AIConversationId,
+    command_count: usize,
+    ctx: &mut ViewContext<PaneGroup>,
+) -> AIConversationId {
+    let terminal_view_id = panes
+        .terminal_view_from_pane_id(pane_id, ctx)
+        .expect("child pane should have a terminal view")
+        .id();
+    let mut child_conversation = conversation_with_n_run_shell_commands(command_count);
     child_conversation.set_parent_conversation_id(parent_conversation_id);
     restore_conversation_for_terminal_view(terminal_view_id, child_conversation, ctx)
 }
@@ -1923,35 +2023,43 @@ fn test_create_missing_child_agent_panes_restores_remote_child_from_history_mode
 }
 
 /// Each hidden child-agent pane restores its own capped-but-nonzero
-/// `TerminalModel`/block list (`MAX_RESTORED_COMMAND_BLOCKS`). Without a
-/// bound on how many such panes one restore burst can create, a parent
-/// with many children (e.g. a large orchestration fan-out restored on
-/// startup) multiplies that per-pane cost by an unbounded number of panes.
-/// This fails on the pre-fix code, which eagerly restores every child
-/// found for the parent in a single pass.
+/// `TerminalModel`/block list. A cap on pane *count* alone does not bound
+/// memory when children are large: at `MAX_RESTORED_COMMAND_BLOCKS` each, a
+/// modest number of eagerly-materialized panes still multiplies into
+/// gigabytes, so the aggregate budget must be measured in blocks, spanning
+/// the parent and every eagerly-restored child. The budget is also derived
+/// fresh each call from what is actually resident, not tracked as a
+/// per-call counter, so it must hold across repeated calls for the same
+/// parent (e.g. a pending ancestor-list re-list, or a later
+/// `reattach_panes` pass) rather than resetting and letting bursts add up
+/// past it. This fails on the pre-fix code, which eagerly restores every
+/// child found for the parent in a single pass with no budget at all.
 #[test]
-fn test_restore_missing_child_agent_panes_for_parent_bounds_eager_pane_creation() {
+fn test_restore_missing_child_agent_panes_for_parent_bounds_aggregate_blocks_across_calls() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         let pane_group = mock_pane_group(&mut app, Default::default());
 
         pane_group.update(&mut app, |panes, ctx| {
             let parent_pane_id = get_newly_created_pane_id(panes, &[]);
-            let parent_terminal_view_id = panes
-                .terminal_view_from_pane_id(parent_pane_id, ctx)
-                .expect("parent pane should have a terminal view")
-                .id();
             let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
 
-            let total_children = MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES + 10;
-            for _ in 0..total_children {
-                restore_child_conversation_for_terminal_view(
-                    parent_terminal_view_id,
+            // Five children, each with enough restored commands that three of them
+            // alone exceed the aggregate budget -- the max-children x max-commands
+            // shape the bound must actually hold under, not just an empty-pane count.
+            let per_child_commands = MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS / 3;
+            let child_count = 5;
+            for _ in 0..child_count {
+                restore_child_conversation_with_run_shell_commands(
+                    panes,
+                    parent_pane_id,
                     parent_conversation_id,
+                    per_child_commands,
                     ctx,
                 );
             }
 
+            // First pass, e.g. the initial startup restore.
             panes.restore_missing_child_agent_panes_for_parent(
                 parent_conversation_id,
                 parent_pane_id,
@@ -1959,12 +2067,27 @@ fn test_restore_missing_child_agent_panes_for_parent_bounds_eager_pane_creation(
                 None,
                 ctx,
             );
+            let materialized_after_first_pass = panes.child_agent_panes.len();
+            assert!(
+                materialized_after_first_pass < child_count,
+                "the aggregate budget must leave at least one cap-sized child \
+                 unmaterialized when children collectively exceed it",
+            );
 
+            // Second pass, simulating a re-entrant restore of the same parent.
+            panes.restore_missing_child_agent_panes_for_parent(
+                parent_conversation_id,
+                parent_pane_id,
+                true,
+                None,
+                ctx,
+            );
             assert_eq!(
                 panes.child_agent_panes.len(),
-                MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES,
-                "a single restore burst must cap eager hidden-pane creation instead of \
-                 materializing a pane (and its own restored block list) for every child",
+                materialized_after_first_pass,
+                "a second restore pass for the same parent must not eagerly materialize \
+                 more children just because a per-call counter would have reset -- the \
+                 budget must be derived from what's already resident, not reset each call",
             );
         });
     });

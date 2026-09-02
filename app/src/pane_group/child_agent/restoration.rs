@@ -7,10 +7,12 @@ use session_sharing_protocol::common::SessionId;
 use uuid::Uuid;
 use warp_errors::report_error;
 use warpui::r#async::Timer;
-use warpui::{SingletonEntity, ViewContext};
+use warpui::{AppContext, SingletonEntity, ViewContext};
 
 use super::{HiddenChildAgentTaskContext, apply_hidden_child_agent_task_context};
-use crate::ai::agent::conversation::{AIConversation, AIConversationId};
+use crate::ai::agent::conversation::{
+    AIConversation, AIConversationId, MAX_RESTORED_COMMAND_BLOCKS,
+};
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::ambient_agents::task::AmbientAgentTask;
@@ -43,17 +45,17 @@ const RESTORE_CHILD_SEED_FETCH_LIMIT: i32 = 100;
 /// nothing external happens to trigger a retry.
 const TRANSIENT_SEED_FETCH_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-/// Max hidden child-agent panes newly created by one
-/// `restore_missing_child_agent_panes_for_parent` call. Each such pane gets
-/// its own restored `TerminalModel`/block list (capped independently by
-/// `MAX_RESTORED_COMMAND_BLOCKS`), so nothing otherwise bounds how many of
-/// these panes a single parent with many children creates in one burst —
-/// e.g. every child of a fullscreen agent-view pane restored on startup.
-/// Children beyond this cap are left unmaterialized and pick up the same
-/// lazy path pills already rely on: `ensure_hidden_child_agent_pane_for_conversation`
-/// materializes a specific child on demand (reveal, swap, open-in-new-tab/pane)
-/// regardless of this cap.
-pub(in crate::pane_group) const MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES: usize = 20;
+/// Max cumulative restored command blocks resident across a parent pane and
+/// every hidden child-agent pane eagerly materialized for it in one burst.
+/// Each restored block is a real grid allocation (see
+/// `MAX_RESTORED_COMMAND_BLOCKS`), so a per-pane cap alone does not bound
+/// total memory: many eagerly-materialized panes, each independently near
+/// its own cap, still multiply into gigabytes. Reusing that same magnitude
+/// here keeps a parent's eagerly-warmed subtree to roughly one
+/// conversation's worth of memory; children that don't fit stay
+/// unmaterialized until revealed on demand.
+pub(in crate::pane_group) const MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS: usize =
+    MAX_RESTORED_COMMAND_BLOCKS;
 
 /// Returns true if a fetch dispatched at `dispatched_at` must be dropped
 /// instead of applied: its seed is gone, or a newer fetch has since been
@@ -81,10 +83,12 @@ impl PaneGroup {
     /// so a fresh, still-empty result (a parent that legitimately has no
     /// children) doesn't immediately re-trigger its own seed and loop.
     ///
-    /// `required_child_id`, when given, is always materialized regardless of
-    /// `MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES` — used by
-    /// `ensure_hidden_child_agent_pane_for_conversation` so an explicit reveal
-    /// of one child never fails just because siblings already filled the cap.
+    /// Eager materialization is bounded by `MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS`,
+    /// derived from blocks already resident on the parent and its already-materialized
+    /// children so the budget holds across repeated calls for the same parent instead
+    /// of resetting each time. `required_child_id`, when given, is always materialized
+    /// regardless of that budget, so an explicit request to reveal one child never
+    /// fails just because siblings already exhausted it.
     pub(in crate::pane_group) fn restore_missing_child_agent_panes_for_parent(
         &mut self,
         parent_conversation_id: AIConversationId,
@@ -122,7 +126,19 @@ impl PaneGroup {
             }
         }
 
-        let mut eagerly_restored_count = 0;
+        // Derived (not tracked separately) from every pane already resident for this
+        // parent, so the budget reflects the true current footprint across repeated
+        // calls -- e.g. a pending ancestor-list re-list, or a later `reattach_panes`
+        // pass -- instead of resetting each time and letting bursts add up past it.
+        let mut resident_blocks = self.resident_block_count(parent_pane_id, ctx);
+        for &child_id in &child_ids {
+            if let Some(&pane_id) = self.child_agent_panes.get(&child_id)
+                && self.has_pane_id(pane_id)
+            {
+                resident_blocks += self.resident_block_count(pane_id, ctx);
+            }
+        }
+
         for child_id in child_ids {
             if self
                 .child_agent_panes
@@ -136,26 +152,57 @@ impl PaneGroup {
                 continue;
             }
 
-            let is_required = required_child_id == Some(child_id);
-            if !is_required && eagerly_restored_count >= MAX_EAGERLY_RESTORED_CHILD_AGENT_PANES {
-                continue;
-            }
-
-            let child_conversation = BlocklistAIHistoryModel::as_ref(ctx)
+            // Peek without removing from the restored store yet: whether this child
+            // gets materialized this pass depends on the budget check below, and a
+            // conversation taken out of the store to size it up would otherwise
+            // vanish for a later pass if skipped here.
+            let history_conversation = BlocklistAIHistoryModel::as_ref(ctx)
                 .conversation(&child_id)
-                .cloned()
-                .or_else(|| {
-                    RestoredAgentConversations::handle(ctx)
-                        .update(ctx, |store, _| store.take_conversation(&child_id))
-                });
-            let Some(child_conversation) = child_conversation else {
+                .cloned();
+            let from_restored_store = history_conversation.is_none();
+            let Some(child_conversation) = history_conversation.or_else(|| {
+                RestoredAgentConversations::handle(ctx)
+                    .update(ctx, |store, _| store.get_conversation(&child_id).cloned())
+            }) else {
                 log::warn!("Child conversation {child_id:?} not found in memory or restored store");
                 continue;
             };
 
+            let is_required = required_child_id == Some(child_id);
+            // +1 for the trailing active block every hidden child pane gets
+            // regardless of restored content.
+            let candidate_blocks = child_conversation.to_serialized_blocklist_items().len() + 1;
+            if !is_required
+                && resident_blocks + candidate_blocks > MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS
+            {
+                continue;
+            }
+
+            if from_restored_store {
+                RestoredAgentConversations::handle(ctx).update(ctx, |store, _| {
+                    store.take_conversation(&child_id);
+                });
+            }
+
             self.create_hidden_child_agent_pane(child_conversation, parent_pane_id, ctx);
-            eagerly_restored_count += 1;
+            resident_blocks += candidate_blocks;
         }
+    }
+
+    /// Number of blocks resident in `pane_id`'s terminal model, or 0 if the pane
+    /// doesn't exist or isn't a terminal pane.
+    fn resident_block_count(&self, pane_id: PaneId, ctx: &AppContext) -> usize {
+        self.terminal_view_from_pane_id(pane_id, ctx)
+            .map(|terminal_view| {
+                terminal_view
+                    .as_ref(ctx)
+                    .model
+                    .lock()
+                    .block_list()
+                    .blocks()
+                    .len()
+            })
+            .unwrap_or(0)
     }
 
     /// Rebuilds the parent→child conversation index for a restored cloud agent
