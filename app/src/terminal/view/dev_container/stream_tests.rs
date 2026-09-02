@@ -211,10 +211,12 @@ fn drain_marks_stdout_oversized_past_one_mib() {
     });
 }
 
+#[cfg(unix)]
 fn pid_is_alive(pid: i32) -> bool {
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }
 
+#[cfg(unix)]
 fn wait_for_pid_file(path: &std::path::Path) -> i32 {
     use instant::Instant;
 
@@ -234,6 +236,7 @@ fn wait_for_pid_file(path: &std::path::Path) -> i32 {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn reader_error_kills_process_group_descendants() {
     use command::r#async::Command;

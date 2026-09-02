@@ -1193,6 +1193,7 @@ impl PaneGroup {
         })
     }
 
+    #[cfg(feature = "local_tty")]
     pub(crate) fn has_pane(&self, pane_id: PaneId) -> bool {
         self.pane_contents.contains_key(&pane_id)
     }
