@@ -221,6 +221,39 @@ fn interpret_dev_container_up_output_uses_bounded_stderr_tail_fallback() {
 }
 
 #[test]
+fn interpret_dev_container_up_output_extracts_text_from_jsonl_stderr() {
+    let banner = serde_json::json!({
+        "type": "text",
+        "level": 3,
+        "timestamp": 1,
+        "text": "[cli] @devcontainers/cli 0.89.0",
+    });
+    let error = serde_json::json!({
+        "type": "text",
+        "level": 5,
+        "timestamp": 2,
+        "text": "Cannot connect to the Docker daemon",
+    });
+    let stderr = format!("{banner}\n{error}\n");
+    let outcome = interpret_dev_container_up_output(false, b"", stderr.as_bytes());
+    let DevContainerUpOutcome::Error(message) = outcome else {
+        panic!("expected a failed outcome");
+    };
+    assert!(
+        message.contains("Cannot connect to the Docker daemon"),
+        "JSONL text events must surface in the fallback, got {message:?}"
+    );
+    assert!(
+        !message.contains("@devcontainers/cli"),
+        "CLI version banner is not the failure cause, got {message:?}"
+    );
+    assert!(
+        !message.contains("\"type\":"),
+        "raw JSONL envelopes must not appear in the fallback, got {message:?}"
+    );
+}
+
+#[test]
 fn discover_dev_container_configs_finds_nothing_when_no_devcontainer_json_exists() {
     let workspace = tempfile::tempdir().expect("create temp workspace");
     assert!(discover_dev_container_configs(workspace.path()).is_empty());

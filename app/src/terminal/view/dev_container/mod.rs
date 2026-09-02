@@ -8,13 +8,13 @@
 //! `crate::terminal::local_tty::dev_container`).
 
 #[cfg(feature = "local_tty")]
+mod jsonl;
+#[cfg(feature = "local_tty")]
 mod kill;
 #[cfg(feature = "local_tty")]
 mod newline;
 #[cfg(feature = "local_tty")]
 pub(crate) mod operation;
-#[cfg(feature = "local_tty")]
-mod progress;
 #[cfg(feature = "local_tty")]
 pub(crate) mod registry;
 #[cfg(feature = "local_tty")]
@@ -1040,15 +1040,38 @@ fn leftover_stdout_lines(stdout: &[u8]) -> Option<String> {
 #[cfg(feature = "local_tty")]
 fn useful_stderr_lines(stderr: &[u8]) -> Option<String> {
     let stderr_text = String::from_utf8_lossy(stderr);
-    let lines: Vec<&str> = stderr_text
+    let lines: Vec<String> = stderr_text
         .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.contains("@devcontainers/cli"))
+        .filter_map(display_stderr_line)
         .collect();
     if lines.is_empty() {
         None
     } else {
         Some(lines[lines.len().saturating_sub(20)..].join("\n"))
+    }
+}
+
+#[cfg(feature = "local_tty")]
+fn display_stderr_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if event_type == "progress" || event_type == "stop" {
+            return None;
+        }
+        let text = value.get("text").and_then(|v| v.as_str())?.trim();
+        if text.is_empty() || text.contains("@devcontainers/cli") {
+            return None;
+        }
+        return Some(text.to_owned());
+    }
+    if trimmed.contains("@devcontainers/cli") {
+        None
+    } else {
+        Some(trimmed.to_owned())
     }
 }
 

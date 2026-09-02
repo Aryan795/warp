@@ -9,12 +9,11 @@ use futures_util::future::{try_join, try_join3};
 use futures_util::io::AsyncReadExt;
 use parking_lot::Mutex;
 
+use super::jsonl::JsonlDecoder;
 pub(crate) use super::kill::ProcessGroupKillOnDrop;
 #[cfg(test)]
 pub(crate) use super::kill::take_process_group_terminations;
-use super::newline::NewlineNormalizer;
 use super::operation::DevContainerBuildCancel;
-use super::progress::ProgressCollapser;
 
 pub(crate) const STDOUT_LIMIT: usize = 1024 * 1024;
 const STDERR_TAIL_LIMIT: usize = 8 * 1024;
@@ -42,7 +41,7 @@ pub(crate) fn dev_container_up_command(
         .arg("--config")
         .arg(config_file)
         .arg("--log-format")
-        .arg("text")
+        .arg("json")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -198,8 +197,7 @@ where
     F: FnMut(&[u8]),
 {
     let mut buf = [0_u8; 8192];
-    let mut collapser = ProgressCollapser::new();
-    let mut normalizer = NewlineNormalizer::new();
+    let mut decoder = JsonlDecoder::new();
     let mut stderr_tail = Vec::new();
     loop {
         let n = stderr.read(&mut buf).await?;
@@ -207,13 +205,10 @@ where
             break;
         }
         append_bounded_tail(&mut stderr_tail, &buf[..n]);
-        let collapsed = collapser.push(&buf[..n]);
-        let normalized = normalizer.push(&collapsed);
-        (on_stderr.lock())(&normalized);
+        let decoded = decoder.push(&buf[..n]);
+        (on_stderr.lock())(&decoded);
     }
-    let collapsed = collapser.finish();
-    let mut trailing = normalizer.push(&collapsed);
-    trailing.extend(normalizer.finish());
+    let trailing = decoder.finish();
     if !trailing.is_empty() {
         (on_stderr.lock())(&trailing);
     }
@@ -222,16 +217,12 @@ where
 
 #[cfg(test)]
 pub(crate) fn transform_dev_container_stderr(chunks: &[&[u8]]) -> Vec<u8> {
-    let mut collapser = ProgressCollapser::new();
-    let mut normalizer = NewlineNormalizer::new();
+    let mut decoder = JsonlDecoder::new();
     let mut out = Vec::new();
     for chunk in chunks {
-        let collapsed = collapser.push(chunk);
-        out.extend(normalizer.push(&collapsed));
+        out.extend(decoder.push(chunk));
     }
-    let collapsed = collapser.finish();
-    out.extend(normalizer.push(&collapsed));
-    out.extend(normalizer.finish());
+    out.extend(decoder.finish());
     out
 }
 
