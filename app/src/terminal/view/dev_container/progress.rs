@@ -2,6 +2,7 @@
 //! new LF line. CR overwrites the previous snapshot for the same vertex.
 
 const ERASE_TO_EOL: &[u8] = b"\x1b[K";
+const PENDING_LINE_CAP: usize = 512;
 
 const PROGRESS_VERBS: &[&[u8]] = &[
     b"extracting",
@@ -17,39 +18,92 @@ const PROGRESS_VERBS: &[&[u8]] = &[
 ];
 
 pub(crate) struct ProgressCollapser {
-    buf: Vec<u8>,
+    pending: Vec<u8>,
     last_identity: Option<Vec<u8>>,
     progress_open: bool,
+    pass_through_until_lf: bool,
+    held_cr: bool,
 }
 
 impl ProgressCollapser {
     pub(crate) fn new() -> Self {
         Self {
-            buf: Vec::new(),
+            pending: Vec::new(),
             last_identity: None,
             progress_open: false,
+            pass_through_until_lf: false,
+            held_cr: false,
         }
     }
 
     pub(crate) fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        while let Some(line) = take_lf_line(&mut self.buf) {
-            self.emit_line(&line, &mut out);
+        for &b in chunk {
+            self.push_byte(b, &mut out);
         }
         out
     }
 
     pub(crate) fn finish(mut self) -> Vec<u8> {
         let mut out = Vec::new();
-        if !self.buf.is_empty() {
-            let line = std::mem::take(&mut self.buf);
+        if self.held_cr || !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
             self.emit_line(&line, &mut out);
         }
         if self.progress_open {
             out.push(b'\n');
         }
         out
+    }
+
+    fn push_byte(&mut self, b: u8, out: &mut Vec<u8>) {
+        if self.pass_through_until_lf {
+            out.push(b);
+            if b == b'\n' {
+                self.pass_through_until_lf = false;
+            }
+            return;
+        }
+
+        if b == b'\n' {
+            self.held_cr = false;
+            let line = std::mem::take(&mut self.pending);
+            self.emit_line(&line, out);
+            return;
+        }
+
+        if b == b'\r' {
+            if self.held_cr {
+                self.flush_held_cr_line(out);
+            }
+            self.held_cr = true;
+            return;
+        }
+
+        if self.held_cr {
+            self.flush_held_cr_line(out);
+        }
+
+        self.pending.push(b);
+        if self.pending.len() >= PENDING_LINE_CAP || !pending_may_be_progress(&self.pending) {
+            self.begin_pass_through(out);
+        }
+    }
+
+    fn flush_held_cr_line(&mut self, out: &mut Vec<u8>) {
+        self.held_cr = false;
+        let line = std::mem::take(&mut self.pending);
+        self.emit_line(&line, out);
+    }
+
+    fn begin_pass_through(&mut self, out: &mut Vec<u8>) {
+        if self.progress_open {
+            out.push(b'\n');
+            self.progress_open = false;
+            self.last_identity = None;
+        }
+        out.append(&mut self.pending);
+        self.pass_through_until_lf = true;
     }
 
     fn emit_line(&mut self, line: &[u8], out: &mut Vec<u8>) {
@@ -79,14 +133,81 @@ impl ProgressCollapser {
     }
 }
 
-fn take_lf_line(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let i = buf.iter().position(|&b| b == b'\n')?;
-    let mut line: Vec<u8> = buf.drain(..=i).collect();
-    line.pop();
-    if line.last() == Some(&b'\r') {
-        line.pop();
+fn pending_may_be_progress(pending: &[u8]) -> bool {
+    let rest = match timestamp_rest(pending) {
+        Some(rest) => rest,
+        None => return true,
+    };
+    may_be_buildkit_progress(rest) || may_be_classic_layer_progress(rest)
+}
+
+fn timestamp_rest(line: &[u8]) -> Option<&[u8]> {
+    if line.first() != Some(&b'[') {
+        return Some(line);
     }
-    Some(line)
+    let end = line.iter().position(|&b| b == b']')?;
+    let rest = &line[end + 1..];
+    Some(rest.strip_prefix(b" ").unwrap_or(rest))
+}
+
+fn may_be_buildkit_progress(line: &[u8]) -> bool {
+    if line.is_empty() {
+        return true;
+    }
+    if line[0] != b'#' {
+        return false;
+    }
+    let rest = &line[1..];
+    if rest.is_empty() {
+        return true;
+    }
+    let digits_end = rest
+        .iter()
+        .position(|&b| !b.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if digits_end == 0 {
+        return false;
+    }
+    if digits_end == rest.len() {
+        return true;
+    }
+    if rest[digits_end] != b' ' {
+        return false;
+    }
+    let after_id = &rest[digits_end + 1..];
+    if after_id.is_empty() {
+        return true;
+    }
+    match after_id.iter().position(|&b| b == b' ') {
+        None => is_progress_verb_prefix(after_id),
+        Some(verb_end) => is_progress_verb(&after_id[..verb_end]),
+    }
+}
+
+fn may_be_classic_layer_progress(line: &[u8]) -> bool {
+    if line.is_empty() {
+        return true;
+    }
+    match line.iter().position(|&b| b == b':') {
+        None => line.iter().all(|b| b.is_ascii_hexdigit()),
+        Some(colon) => {
+            let id = &line[..colon];
+            if id.len() < 12 || !id.iter().all(|b| b.is_ascii_hexdigit()) {
+                return false;
+            }
+            let mut rest = &line[colon + 1..];
+            if rest.first() == Some(&b' ') {
+                rest = &rest[1..];
+            }
+            if rest.is_empty() {
+                return true;
+            }
+            match rest.iter().position(|&b| b == b' ') {
+                None => is_progress_verb_prefix(rest),
+                Some(verb_end) => is_progress_verb(&rest[..verb_end]),
+            }
+        }
+    }
 }
 
 fn progress_identity(line: &[u8]) -> Option<Vec<u8>> {
@@ -155,6 +276,12 @@ fn is_progress_verb(verb: &[u8]) -> bool {
     PROGRESS_VERBS
         .iter()
         .any(|candidate| verb.eq_ignore_ascii_case(candidate))
+}
+
+fn is_progress_verb_prefix(verb: &[u8]) -> bool {
+    PROGRESS_VERBS.iter().any(|candidate| {
+        verb.len() <= candidate.len() && candidate[..verb.len()].eq_ignore_ascii_case(verb)
+    })
 }
 
 #[cfg(test)]

@@ -74,3 +74,54 @@ fn collapses_across_chunk_boundaries() {
             .any(|w| w == b"4.6MB / 52.40MB")
     );
 }
+
+#[test]
+fn streams_cap_exceeding_progress_looking_line_without_lf() {
+    let mut line = b"#15 extracting sha256:abc ".to_vec();
+    line.resize(600, b'x');
+    let mut collapser = ProgressCollapser::new();
+    let pushed = collapser.push(&line);
+    assert_eq!(
+        pushed,
+        line,
+        "a cap-exceeding no-LF line must stream through, got {} bytes",
+        pushed.len()
+    );
+    assert!(
+        collapser.finish().is_empty(),
+        "finish must not invent a trailing snapshot after pass-through"
+    );
+}
+
+#[test]
+fn collapses_cr_only_classic_layer_snapshots() {
+    let out = collapse(&[b"17a39c0ba978: Downloading 1MB\r17a39c0ba978: Downloading 2MB\r"]);
+    assert_eq!(
+        overwrite_count(&out),
+        1,
+        "CR-only snapshots for the same layer must overwrite, got {out:?}"
+    );
+    assert!(
+        out.windows(b"Downloading 2MB".len())
+            .any(|w| w == b"Downloading 2MB")
+    );
+}
+
+#[test]
+fn recovers_same_vertex_collapse_after_pass_through() {
+    let mut collapser = ProgressCollapser::new();
+    let noise = vec![b'g'; 600];
+    let streamed = collapser.push(&noise);
+    assert_eq!(streamed, noise, "non-progress bytes must stream before LF");
+
+    let rest = b"\n#15 extracting sha256:abc 1MB / 2MB\n#15 extracting sha256:abc 2MB / 2MB\n";
+    let mut out = streamed;
+    out.extend(collapser.push(rest));
+    out.extend(collapser.finish());
+    assert_eq!(
+        overwrite_count(&out),
+        1,
+        "collapse must resume after pass-through, got {out:?}"
+    );
+    assert!(out.windows(b"2MB / 2MB".len()).any(|w| w == b"2MB / 2MB"));
+}
