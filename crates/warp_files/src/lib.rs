@@ -584,9 +584,9 @@ impl FileModel {
     /// **Line ending normalization**: `\n` and `\r\n` line endings are normalized
     /// to `\n` (LF) in the returned content. Classic Mac `\r`-only line endings
     /// are **not** recognized as line separators because only `\n` separates lines.
-    /// A trailing newline at the end of the file is preserved so that round-tripping
-    /// content through this reader and writing it back does not silently drop the
-    /// final newline.
+    /// A trailing newline at the end of the file is preserved when it fits within
+    /// the byte budget so that round-tripping content through this reader and writing
+    /// it back does not silently drop the final newline.
     ///
     /// Lines are scanned in buffered chunks so allocation does not grow with
     /// unterminated content beyond the remaining byte budget.
@@ -610,12 +610,10 @@ impl FileModel {
             max_bytes,
         );
 
-        let mut line_buf = Vec::new();
         let mut utf8_pending = Vec::new();
         loop {
-            line_buf.clear();
             let max_buffered_line_bytes = accumulator.remaining_bytes().saturating_add(1);
-            let mut exceeded_byte_budget = false;
+            let mut line_buf = text_file_reader::BoundedLineBuffer::new(max_buffered_line_bytes);
             let mut has_newline = false;
             let mut read_any_bytes = false;
 
@@ -643,15 +641,7 @@ impl FileModel {
                     }
                 }
 
-                if !exceeded_byte_budget {
-                    let remaining_capacity = max_buffered_line_bytes.saturating_sub(line_buf.len());
-                    if line_bytes.len() > remaining_capacity {
-                        exceeded_byte_budget = true;
-                        line_buf.clear();
-                    } else {
-                        line_buf.extend_from_slice(line_bytes);
-                    }
-                }
+                line_buf.extend_from_slice(line_bytes);
 
                 reader.consume_unpin(bytes_consumed);
                 read_any_bytes = true;
@@ -668,13 +658,13 @@ impl FileModel {
                 return Ok(TextFileReadResult::NotText);
             }
 
-            if exceeded_byte_budget {
+            if line_buf.exceeded_byte_budget() {
                 accumulator.push_truncated_line(has_newline);
             } else {
-                if line_buf.last() == Some(&b'\r') {
+                if line_buf.last() == Some(b'\r') {
                     line_buf.pop();
                 }
-                let line = String::from_utf8(std::mem::take(&mut line_buf))
+                let line = String::from_utf8(line_buf.into_bytes())
                     .expect("line bytes were validated as UTF-8");
                 accumulator.push_line(line, has_newline);
             }
