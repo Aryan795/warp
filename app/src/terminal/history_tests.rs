@@ -984,7 +984,9 @@ fn append_restored_command_doesnt_overwrite_rich_history() {
 fn command_execution_stats_reflects_persisted_history() {
     App::test((), |mut app| async move {
         let session = Arc::new(Session::new(
-            SessionInfo::new_for_test().with_id(0),
+            SessionInfo::new_for_test()
+                .with_id(0)
+                .with_shell_type(ShellType::Bash),
             Arc::new(TestCommandExecutor::default()),
         ));
 
@@ -1040,7 +1042,9 @@ fn command_execution_stats_reflects_persisted_history() {
 fn command_execution_stats_pwd_known_count_excludes_pwd_less_executions() {
     App::test((), |mut app| async move {
         let session = Arc::new(Session::new(
-            SessionInfo::new_for_test().with_id(0),
+            SessionInfo::new_for_test()
+                .with_id(0)
+                .with_shell_type(ShellType::Bash),
             Arc::new(TestCommandExecutor::default()),
         ));
 
@@ -1204,7 +1208,9 @@ fn append_commands_updates_execution_stats_live() {
 fn append_restored_commands_does_not_double_count_execution_stats() {
     App::test((), |mut app| async move {
         let session = Arc::new(Session::new(
-            SessionInfo::new_for_test().with_id(0),
+            SessionInfo::new_for_test()
+                .with_id(0)
+                .with_shell_type(ShellType::Bash),
             Arc::new(TestCommandExecutor::default()),
         ));
 
