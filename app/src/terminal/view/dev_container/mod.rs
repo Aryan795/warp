@@ -334,12 +334,44 @@ impl TerminalView {
         let Some(operation) = self.dev_container_build.clone() else {
             return;
         };
-        let title = operation.read(ctx, |operation, _| operation.header_title());
+        let (title, secondary) = operation.read(ctx, |operation, _| {
+            (operation.header_title(), operation.header_secondary())
+        });
         self.pane_configuration.update(ctx, |pane_config, ctx| {
             pane_config.set_title(title, ctx);
-            pane_config.set_title_secondary(String::new(), ctx);
+            pane_config.set_title_secondary(secondary, ctx);
             pane_config.notify_header_content_changed(ctx);
         });
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn arm_silence_watch(&self, ctx: &mut ViewContext<Self>) {
+        let Some(operation) = self.dev_container_build.clone() else {
+            return;
+        };
+        let operation_id = operation.read(ctx, |operation, _| operation.operation_id());
+        let attempt_id = operation.read(ctx, |operation, _| operation.attempt_id());
+        let delay = operation::BUILD_SILENCE_THRESHOLD;
+        ctx.spawn(
+            async move {
+                warpui::r#async::Timer::after(delay).await;
+            },
+            move |me, _, ctx| {
+                if !me.is_current_dev_container_attempt(operation_id, attempt_id, ctx) {
+                    return;
+                }
+                let Some(operation) = &me.dev_container_build else {
+                    return;
+                };
+                if operation.read(ctx, |operation, _| {
+                    operation.status() != operation::DevContainerBuildStatus::Running
+                }) {
+                    return;
+                }
+                me.sync_dev_container_build_header(ctx);
+                me.arm_silence_watch(ctx);
+            },
+        );
     }
 
     #[cfg(all(test, feature = "local_tty"))]
@@ -430,6 +462,7 @@ impl TerminalView {
             operation.read(ctx, |operation, _| operation.workspace_folder().clone());
         let config_file = operation.read(ctx, |operation, _| operation.config_file().clone());
         let cancel = operation.read(ctx, |operation, _| operation.cancel_handle());
+        self.arm_silence_watch(ctx);
 
         let cli_future = resolve_devcontainer_cli_path(ctx);
         let docker_future = resolve_docker_cli_path(ctx);
@@ -532,10 +565,19 @@ impl TerminalView {
         let processor = Arc::new(Mutex::new(Processor::new()));
         let model = self.model.clone();
         let event_proxy = self.model.lock().event_proxy.clone();
+        let last_output = self
+            .dev_container_build
+            .as_ref()
+            .map(|operation| operation.read(ctx, |operation, _| operation.last_output_clock()));
         let up_future = async move {
             let command = stream::dev_container_up_command(&cli, &workspace_folder, &config_file);
             let (drain, exit_success) =
                 stream::drain_dev_container_child(command, Some(&cancel), move |chunk| {
+                    if !chunk.is_empty()
+                        && let Some(last_output) = &last_output
+                    {
+                        *last_output.lock() = instant::Instant::now();
+                    }
                     processor
                         .lock()
                         .parse_bytes(&mut *model.lock(), chunk, &mut std::io::sink());

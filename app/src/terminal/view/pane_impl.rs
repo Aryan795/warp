@@ -278,10 +278,9 @@ impl TerminalView {
     fn pane_header_title_and_secondary(&self, app: &AppContext) -> (String, String) {
         #[cfg(feature = "local_tty")]
         if let Some(operation) = &self.dev_container_build {
-            return (
-                operation.read(app, |operation, _| operation.header_title()),
-                String::new(),
-            );
+            return operation.read(app, |operation, _| {
+                (operation.header_title(), operation.header_secondary())
+            });
         }
         let pane_config = self.pane_configuration.as_ref(app);
         (
@@ -491,22 +490,28 @@ impl TerminalView {
             right_row.add_child(content);
         }
         #[cfg(feature = "local_tty")]
-        if self.dev_container_build.as_ref().is_some_and(|operation| {
-            operation.read(app, |operation, _| operation.shows_retry_and_close())
-        }) {
-            right_row.add_child(self.render_dev_container_header_button(
-                "Retry",
-                TerminalAction::RetryDevContainerBuild,
-                self.mouse_states.dev_container_retry.clone(),
-                app,
-            ));
-            right_row.add_child(self.render_dev_container_header_button(
-                "Close",
-                TerminalAction::Close,
-                self.mouse_states.dev_container_close.clone(),
-                app,
-            ));
-            icon_button_count += 2;
+        if let Some(operation) = &self.dev_container_build {
+            let (show_retry, show_close) = operation.read(app, |operation, _| {
+                (operation.shows_retry(), operation.shows_close())
+            });
+            if show_retry {
+                right_row.add_child(self.render_dev_container_header_button(
+                    "Retry",
+                    TerminalAction::RetryDevContainerBuild,
+                    self.mouse_states.dev_container_retry.clone(),
+                    app,
+                ));
+                icon_button_count += 1;
+            }
+            if show_close {
+                right_row.add_child(self.render_dev_container_header_button(
+                    "Close",
+                    TerminalAction::Close,
+                    self.mouse_states.dev_container_close.clone(),
+                    app,
+                ));
+                icon_button_count += 1;
+            }
         }
         let sharing_element = header_ctx.sharing_controls(app, icon_color, button_size);
         let has_sharing_element = sharing_element.is_some();

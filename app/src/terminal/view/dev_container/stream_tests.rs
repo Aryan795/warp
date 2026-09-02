@@ -283,6 +283,7 @@ time.sleep(30)
     let _ = std::fs::remove_file(pid_file);
 }
 
+#[cfg(unix)]
 #[test]
 fn drain_reaches_failed_without_waiting_for_descendant_holding_pipes() {
     use command::r#async::Command;
@@ -322,6 +323,83 @@ os._exit(1)
                 .windows(b"marker-before-exit".len())
                 .any(|window| window == b"marker-before-exit")
         );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn drain_reaches_success_without_waiting_for_descendant_holding_pipes() {
+    use command::r#async::Command;
+    use instant::Instant;
+
+    block_on(async {
+        let mut command = Command::new_with_process_group("python3");
+        command
+            .arg("-c")
+            .arg(
+                r#"
+import os, time
+pid = os.fork()
+if pid == 0:
+    time.sleep(30)
+    os._exit(0)
+os.write(2, b"Generated translation files for all integrations\n")
+os.write(1, b'{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"/w"}\n')
+os._exit(0)
+"#,
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let started = Instant::now();
+        let (drain, success) = super::drain_dev_container_child(command, None, |_| {})
+            .await
+            .expect("drain after successful parent exit");
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "descendant holding pipes must not pin drain after success: {:?}",
+            started.elapsed()
+        );
+        assert!(success);
+        assert!(
+            drain
+                .stderr_tail
+                .windows(b"Generated translation files for all integrations".len())
+                .any(|window| window == b"Generated translation files for all integrations")
+        );
+    });
+}
+
+#[test]
+fn drain_stays_pending_while_child_is_silent_but_alive() {
+    use command::r#async::Command;
+    use futures::future::{self, Either};
+
+    block_on(async {
+        let mut command = Command::new_with_process_group("python3");
+        command
+            .arg("-c")
+            .arg(
+                r#"
+import os, time, sys
+sys.stderr.write("Generated translation files for all integrations\n")
+sys.stderr.flush()
+time.sleep(30)
+"#,
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let drain = super::drain_dev_container_child(command, None, |_| {});
+        let timeout = async {
+            warpui::r#async::Timer::after(std::time::Duration::from_millis(400)).await;
+        };
+        match future::select(Box::pin(drain), Box::pin(timeout)).await {
+            Either::Left(_) => {
+                panic!("drain completed while the child was still alive")
+            }
+            Either::Right(_) => {}
+        }
     });
 }
 

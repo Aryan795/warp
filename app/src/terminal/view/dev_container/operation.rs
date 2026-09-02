@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use instant::Instant;
 use parking_lot::Mutex;
 use uuid::Uuid;
 use warpui::{Entity, ModelContext};
@@ -17,6 +19,8 @@ pub(crate) enum DevContainerBuildPhase {
     Staging,
     Attach,
 }
+
+pub(crate) const BUILD_SILENCE_THRESHOLD: Duration = Duration::from_secs(120);
 
 impl DevContainerBuildPhase {
     pub(crate) fn label(self) -> &'static str {
@@ -124,6 +128,7 @@ pub(crate) struct DevContainerBuildOperation {
     phase: DevContainerBuildPhase,
     status: DevContainerBuildStatus,
     cancel: DevContainerBuildCancel,
+    last_output_at: Arc<Mutex<Instant>>,
 }
 
 impl DevContainerBuildOperation {
@@ -139,6 +144,7 @@ impl DevContainerBuildOperation {
             phase: DevContainerBuildPhase::Build,
             status: DevContainerBuildStatus::Running,
             cancel: DevContainerBuildCancel::new(),
+            last_output_at: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
@@ -189,8 +195,32 @@ impl DevContainerBuildOperation {
         }
     }
 
-    pub(crate) fn shows_retry_and_close(&self) -> bool {
+    pub(crate) fn header_secondary(&self) -> String {
+        if self.status != DevContainerBuildStatus::Running {
+            return String::new();
+        }
+        silence_subtitle(self.last_output_at.lock().elapsed()).unwrap_or_default()
+    }
+
+    pub(crate) fn last_output_clock(&self) -> Arc<Mutex<Instant>> {
+        self.last_output_at.clone()
+    }
+
+    pub(crate) fn shows_retry(&self) -> bool {
         self.status == DevContainerBuildStatus::Failed
+    }
+
+    pub(crate) fn shows_close(&self) -> bool {
+        matches!(
+            self.status,
+            DevContainerBuildStatus::Running
+                | DevContainerBuildStatus::Failed
+                | DevContainerBuildStatus::Cancelling
+        )
+    }
+
+    pub(crate) fn shows_retry_and_close(&self) -> bool {
+        self.shows_retry()
     }
 
     pub(crate) fn cancel_handle(&self) -> DevContainerBuildCancel {
@@ -248,9 +278,18 @@ impl DevContainerBuildOperation {
         self.phase = DevContainerBuildPhase::Build;
         self.status = DevContainerBuildStatus::Running;
         self.cancel = DevContainerBuildCancel::new();
+        *self.last_output_at.lock() = Instant::now();
         ctx.notify();
         self.attempt_id
     }
+}
+
+pub(crate) fn silence_subtitle(elapsed: Duration) -> Option<String> {
+    if elapsed < BUILD_SILENCE_THRESHOLD {
+        return None;
+    }
+    let minutes = elapsed.as_secs() / 60;
+    Some(format!("No output for {minutes}m"))
 }
 
 impl Entity for DevContainerBuildOperation {

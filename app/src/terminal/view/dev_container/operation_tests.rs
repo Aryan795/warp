@@ -1,6 +1,10 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
-use super::{DevContainerBuildOperation, DevContainerBuildPhase, DevContainerBuildStatus};
+use super::{
+    BUILD_SILENCE_THRESHOLD, DevContainerBuildOperation, DevContainerBuildPhase,
+    DevContainerBuildStatus, silence_subtitle,
+};
 use crate::terminal::view::dev_container::registry::DevContainerBuildKey;
 
 fn key() -> DevContainerBuildKey {
@@ -48,4 +52,42 @@ fn retry_increments_attempt_and_resets_running() {
     assert_eq!(op.status(), DevContainerBuildStatus::Running);
     assert!(op.is_current_attempt(first_id, first_attempt + 1));
     assert!(!op.is_current_attempt(first_id, first_attempt));
+}
+
+#[test]
+fn silence_subtitle_is_none_below_threshold() {
+    assert_eq!(silence_subtitle(Duration::from_secs(0)), None);
+    assert_eq!(
+        silence_subtitle(BUILD_SILENCE_THRESHOLD - Duration::from_secs(1)),
+        None
+    );
+}
+
+#[test]
+fn silence_subtitle_names_elapsed_minutes_at_threshold() {
+    assert_eq!(
+        silence_subtitle(BUILD_SILENCE_THRESHOLD).as_deref(),
+        Some("No output for 2m")
+    );
+    assert_eq!(
+        silence_subtitle(Duration::from_secs(180)).as_deref(),
+        Some("No output for 3m")
+    );
+}
+
+#[test]
+fn running_build_shows_close_without_retry() {
+    let op = DevContainerBuildOperation::new(key());
+    assert!(op.shows_close());
+    assert!(!op.shows_retry());
+    assert_eq!(op.header_secondary(), "");
+}
+
+#[test]
+fn failed_build_clears_silence_subtitle() {
+    let mut op = DevContainerBuildOperation::new(key());
+    op.status = DevContainerBuildStatus::Failed;
+    assert!(op.shows_retry());
+    assert!(op.shows_close());
+    assert_eq!(op.header_secondary(), "");
 }
