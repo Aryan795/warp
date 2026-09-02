@@ -27,7 +27,6 @@ use warpui::{AppContext, ModelContext, SingletonEntity};
 use super::common::{
     EnvironmentChoice, ResolveConfigurationError, RunCloudEnvironmentPlan, parse_ambient_task_id,
 };
-use super::config_file::LoadedAgentConfigSnapshotFile;
 use crate::ServerApiProvider;
 use crate::ai::agent::{UserQueryMode, extract_user_query_mode};
 use crate::ai::agent_sdk::driver::attachments::{
@@ -199,16 +198,20 @@ fn sort_order_from_arg(arg: SortOrderArg) -> RunSortOrder {
     }
 }
 
-fn merge_run_cloud_config(
-    loaded_file: Option<&LoadedAgentConfigSnapshotFile>,
-    cli: AgentConfigSnapshot,
+fn run_cloud_spawn_config(
+    mut config: AgentConfigSnapshot,
+    model_id: Option<String>,
     no_environment: bool,
-) -> AgentConfigSnapshot {
-    let mut merged = super::config_file::merge_with_precedence(loaded_file, cli);
+) -> Option<AgentConfigSnapshot> {
+    config.model_id = model_id;
     if no_environment {
-        merged.environment_id = None;
+        config.environment_id = None;
     }
-    merged
+    if config.is_empty() {
+        None
+    } else {
+        Some(config)
+    }
 }
 
 fn resolve_run_cloud_environment(
@@ -494,7 +497,7 @@ impl AmbientAgentRunner {
                 codex_auth_secret_name: args.codex_auth_secret.clone(),
             });
 
-            let merged_config = merge_run_cloud_config(
+            let merged_config = super::config_file::merge_with_precedence(
                 loaded_file.as_ref(),
                 AgentConfigSnapshot {
                     name: args.name,
@@ -517,7 +520,6 @@ impl AmbientAgentRunner {
                     harness_auth_secrets,
                     additional_source_repos: None,
                 },
-                no_environment,
             );
 
             // We must wait until after workspace metadata is refreshed to check available LLMs.
@@ -547,15 +549,7 @@ impl AmbientAgentRunner {
                 }
             };
 
-            let config = {
-                let mut config = merged_config;
-                config.model_id = model_id;
-                if config.is_empty() {
-                    None
-                } else {
-                    Some(config)
-                }
-            };
+            let config = run_cloud_spawn_config(merged_config, model_id, no_environment);
 
             // For ambient runs, skill is passed to the server and resolved in the remote environment
             let skill = if skill_enabled {

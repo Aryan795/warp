@@ -593,7 +593,7 @@ fn non_tty_unnamed_without_env_flags_requires_explicit_choice() {
 }
 
 #[test]
-fn no_environment_omits_spawn_environment_id_when_config_file_sets_one() {
+fn no_environment_omits_file_environment_from_spawn_request() {
     let plan = RunCloudEnvironmentPlan::from_args(&run_cloud_env_args(None, true), true, false)
         .expect("--no-environment should skip the selector");
     assert_eq!(
@@ -605,22 +605,40 @@ fn no_environment_omits_spawn_environment_id_when_config_file_sets_one() {
 
     let loaded = LoadedAgentConfigSnapshotFile {
         file: AgentConfigSnapshotFile {
+            name: Some("from-file".to_string()),
             environment_id: Some("env-from-file".to_string()),
             ..Default::default()
         },
     };
-    let cli = AgentConfigSnapshot {
-        environment_id: None,
-        ..Default::default()
+    let merged = super::super::config_file::merge_with_precedence(
+        Some(&loaded),
+        AgentConfigSnapshot {
+            environment_id: None,
+            ..Default::default()
+        },
+    );
+    assert_eq!(merged.environment_id.as_deref(), Some("env-from-file"));
+
+    let request = SpawnAgentRequest {
+        prompt: Some("hello".to_string()),
+        mode: UserQueryMode::Normal,
+        config: run_cloud_spawn_config(merged, None, true),
+        title: None,
+        team: None,
+        agent_identity_uid: Some("agent_123".to_string()),
+        skill: None,
+        attachments: vec![],
+        interactive: None,
+        parent_run_id: None,
+        runtime_skills: vec![],
+        referenced_attachments: vec![],
+        conversation_id: None,
+        initial_snapshot_token: None,
+        snapshot_disabled: None,
+        orchestration_handoff: None,
     };
-    assert_eq!(
-        merge_run_cloud_config(Some(&loaded), cli.clone(), false)
-            .environment_id
-            .as_deref(),
-        Some("env-from-file"),
-    );
-    assert_eq!(
-        merge_run_cloud_config(Some(&loaded), cli, true).environment_id,
-        None
-    );
+    let json = serde_json::to_value(&request).unwrap();
+
+    assert_eq!(json["config"]["name"], "from-file");
+    assert!(json["config"].get("environment_id").is_none());
 }
