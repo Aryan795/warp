@@ -12,9 +12,21 @@ use super::{
 };
 use crate::server::experiments::ServerExperiments;
 use crate::server::server_api::auth::MockAuthClient;
+use crate::test_util::assert_eventually;
 use crate::test_util::terminal::{add_window_with_terminal, initialize_app_for_terminal_view};
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::CustomerType;
+
+/// Waits until the Factories launch modal's in-flight impression claim (see
+/// `OneTimeModalModel::pending_factories_launch_claim`) has resolved, instead of
+/// sleeping for a fixed duration and hoping the background claim task and its
+/// callback have both run by then.
+async fn wait_for_factories_launch_claim_to_resolve(app: &mut App) {
+    assert_eventually!(
+        app.read(|ctx| !OneTimeModalModel::as_ref(ctx).pending_factories_launch_claim),
+        "expected the Factories launch modal claim to resolve"
+    );
+}
 
 #[test]
 fn wait_until_auto_handoff_sleep_modal_closed_tracks_modal_state() {
@@ -592,7 +604,7 @@ fn factories_launch_modal_eligible_with_the_real_configured_booking_url() {
             });
         });
 
-        warpui::r#async::Timer::after(std::time::Duration::from_millis(100)).await;
+        wait_for_factories_launch_claim_to_resolve(&mut app).await;
 
         terminal.update(&mut app, |_, ctx| {
             let window_id = ctx.window_id();
@@ -680,7 +692,7 @@ fn factories_launch_modal_requires_winning_the_server_claim() {
         });
 
         // Let the spawned claim future resolve.
-        warpui::r#async::Timer::after(std::time::Duration::from_millis(100)).await;
+        wait_for_factories_launch_claim_to_resolve(&mut app).await;
 
         terminal.update(&mut app, |_, ctx| {
             let window_id = ctx.window_id();
@@ -731,7 +743,7 @@ fn factories_launch_modal_network_error_does_not_burn_the_impression() {
             });
         });
 
-        warpui::r#async::Timer::after(std::time::Duration::from_millis(100)).await;
+        wait_for_factories_launch_claim_to_resolve(&mut app).await;
 
         terminal.update(&mut app, |_, ctx| {
             let window_id = ctx.window_id();
@@ -766,7 +778,7 @@ fn factories_launch_modal_network_error_does_not_burn_the_impression() {
             });
         });
 
-        warpui::r#async::Timer::after(std::time::Duration::from_millis(100)).await;
+        wait_for_factories_launch_claim_to_resolve(&mut app).await;
 
         terminal.update(&mut app, |_, ctx| {
             let window_id = ctx.window_id();
@@ -777,6 +789,125 @@ fn factories_launch_modal_network_error_does_not_burn_the_impression() {
                     "the retry should succeed once connectivity is restored"
                 );
                 assert!(AISettings::as_ref(ctx).is_feature_intro_seen(FACTORIES_LAUNCH_SEEN_KEY));
+            });
+        });
+    });
+}
+
+/// Users who already saw the old, non-blocking `FeatureIntroModal` popover
+/// version of this announcement have `"factories_launch"` persisted in
+/// `seen_feature_intro_ids` (the exact key this modal's dedicated code path
+/// still reads via `FACTORIES_LAUNCH_SEEN_KEY`). This writes the literal
+/// string rather than referencing that constant, so the test still catches
+/// a future accidental rename of the constant silently breaking the
+/// continuity guarantee it exists to protect: nobody who saw the popover
+/// should ever see the modal too.
+#[test]
+fn factories_launch_modal_suppressed_by_legacy_popover_seen_marker() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
+
+        terminal.update(&mut app, |_, ctx| {
+            prepare_factories_launch_eligible(ctx);
+            AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                settings.mark_feature_intro_seen("factories_launch", ctx);
+            });
+
+            // A MockAuthClient with no configured expectations panics if called,
+            // so this also proves no claim is even attempted.
+            let auth_client = MockAuthClient::new();
+            ServerApiProvider::handle(ctx).update(ctx, |provider, _ctx| {
+                provider.set_auth_client_for_test(Arc::new(auth_client));
+            });
+
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                assert!(
+                    !model.check_and_trigger_factories_launch_modal(ctx),
+                    "a user who already saw the popover must not be re-announced via the modal"
+                );
+                assert!(!model.is_factories_launch_modal_open());
+                assert!(!model.pending_factories_launch_claim);
+            });
+        });
+    });
+}
+
+/// Regression test: while the Factories launch modal's impression claim is
+/// in flight, its slot must be reserved so a competing recheck (e.g. from an
+/// `AIRequestUsageModel` or `ExperimentsUpdated` event) cannot open a
+/// different modal underneath a winning claim. See
+/// `OneTimeModalModel::pending_factories_launch_claim`.
+#[test]
+fn factories_launch_claim_in_flight_reserves_the_modal_slot() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let _flag = FeatureFlag::FactoriesLaunchModal.override_enabled(true);
+        let key = FeatureIntroId::CustomModelRouter.as_key();
+
+        terminal.update(&mut app, |_, ctx| {
+            let window_id = ctx.window_id();
+            prepare_factories_launch_eligible(ctx);
+
+            let mut auth_client = MockAuthClient::new();
+            auth_client
+                .expect_claim_feature_intro_impression()
+                .withf(|intro_key| intro_key == FACTORIES_LAUNCH_SEEN_KEY)
+                .times(1)
+                .return_once(|_| Ok(true));
+            ServerApiProvider::handle(ctx).update(ctx, |provider, _ctx| {
+                provider.set_auth_client_for_test(Arc::new(auth_client));
+            });
+
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                model.update_target_window_id(window_id, ctx);
+                model.has_completed_initial_modal_checks = true;
+
+                assert!(model.check_and_trigger_factories_launch_modal(ctx));
+                assert!(
+                    model.pending_factories_launch_claim,
+                    "the claim should still be in flight"
+                );
+                assert!(
+                    model.is_any_modal_open(),
+                    "an in-flight claim must reserve the modal slot"
+                );
+
+                // A competing recheck firing while the claim is in flight must not
+                // open a different modal into the reserved slot.
+                model.maybe_check_and_trigger_feature_intro_modal(ctx);
+                assert!(
+                    !AISettings::as_ref(ctx).is_feature_intro_seen(key),
+                    "a competing feature intro must not be consumed while the Factories \
+                     claim is pending"
+                );
+                assert!(model.active_feature_intro().is_none());
+            });
+        });
+
+        wait_for_factories_launch_claim_to_resolve(&mut app).await;
+
+        terminal.update(&mut app, |_, ctx| {
+            let window_id = ctx.window_id();
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                model.update_target_window_id(window_id, ctx);
+                assert!(
+                    model.is_factories_launch_modal_open(),
+                    "the winning claim should open the modal now that it's no longer pending"
+                );
+
+                // The reserved slot is now occupied by the actual modal, so a
+                // competing recheck still must not sneak a different modal in.
+                model.maybe_check_and_trigger_feature_intro_modal(ctx);
+                assert!(!AISettings::as_ref(ctx).is_feature_intro_seen(key));
+
+                // Once Factories is dismissed, the slot frees up and the intro
+                // that was deferred throughout can finally show.
+                model.mark_factories_launch_modal_dismissed(ctx);
+                model.maybe_check_and_trigger_feature_intro_modal(ctx);
+                assert!(AISettings::as_ref(ctx).is_feature_intro_seen(key));
             });
         });
     });

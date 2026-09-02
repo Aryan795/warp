@@ -63,9 +63,14 @@ pub struct OneTimeModalModel {
     /// participates in `is_any_modal_open`.
     is_factories_launch_modal_open: bool,
     /// Set while awaiting the atomic, cross-device impression claim for the
-    /// Factories launch modal. Prevents a recheck that fires while the claim
-    /// is in flight (e.g. from an `ExperimentsUpdated` event) from starting a
-    /// second, redundant claim.
+    /// Factories launch modal. Included in `is_any_modal_open` so the modal's
+    /// slot is reserved for the whole claim round-trip: without this, a
+    /// recheck of another modal (e.g. from an `AIRequestUsageModel` or
+    /// `ExperimentsUpdated` event) could see no modal open yet and show its
+    /// own modal, only for a winning claim to then open Factories on top of
+    /// it, unfocused and unable to receive Escape. Also prevents a recheck
+    /// that fires while the claim is in flight from starting a second,
+    /// redundant claim.
     pending_factories_launch_claim: bool,
     /// Whether the HOA onboarding flow is currently being shown.
     is_hoa_onboarding_open: bool,
@@ -441,7 +446,9 @@ impl OneTimeModalModel {
         self.check_and_trigger_build_plan_migration_modal(ctx);
     }
 
-    /// Returns true if any one-time modal is currently open.
+    /// Returns true if any one-time modal is currently open, or if the
+    /// Factories launch modal's slot is reserved for an in-flight impression
+    /// claim (see `pending_factories_launch_claim`).
     pub fn is_any_modal_open(&self) -> bool {
         (self.is_oz_launch_modal_open
             || self.is_openwarp_launch_modal_open
@@ -451,6 +458,7 @@ impl OneTimeModalModel {
             || self.is_build_plan_migration_modal_open
             || self.is_free_ai_removal_modal_open
             || self.is_factories_launch_modal_open
+            || self.pending_factories_launch_claim
             || self.is_hoa_onboarding_open)
             && self.target_window_id.is_some()
     }

@@ -982,6 +982,23 @@ fn query_for_rewind_prefill(inputs: &[AIAgentInput]) -> Option<String> {
     inputs.iter().find_map(AIAgentInput::display_query)
 }
 
+/// The Factories launch modal CTA's navigation target, re-validated at click time
+/// rather than trusting the URL that was current when the modal opened: a metadata
+/// refresh in between could have cleared the URL or replaced it with the Contact
+/// Sales fallback the eligibility gate exists to reject, and this is the last point
+/// that can catch that. Returns `None` when there is no such URL to navigate to.
+fn factories_launch_modal_cta_click_target(
+    ctx: &AppContext,
+    user_email: Option<&str>,
+) -> Option<String> {
+    let user_workspaces = UserWorkspaces::as_ref(ctx);
+    if !user_workspaces.has_validated_factories_launch_modal_cta_url() {
+        return None;
+    }
+    let cta_url = user_workspaces.factories_launch_modal_cta_url();
+    Some(with_email_id_prefill(&cta_url, user_email))
+}
+
 /// Snapshot of a tab used to move it between workspaces or into a new window.
 /// Built by `Workspace::tab_transfer_info_at_index` and consumed by
 /// `insert_transferred_tab_at_index`. Captures the pane group handle, visual
@@ -19138,9 +19155,19 @@ impl Workspace {
             }
             FactoriesLaunchModalEvent::GetEarlyAccess => {
                 send_telemetry_from_ctx!(FactoriesLaunchModalTelemetryEvent::CtaClicked, ctx);
-                let cta_url = UserWorkspaces::as_ref(ctx).factories_launch_modal_cta_url();
-                let url = with_email_id_prefill(&cta_url, self.auth_state.user_email().as_deref());
-                ctx.open_url(&url);
+                match factories_launch_modal_cta_click_target(
+                    ctx,
+                    self.auth_state.user_email().as_deref(),
+                ) {
+                    Some(url) => {
+                        ctx.open_url(&url);
+                    }
+                    None => {
+                        log::warn!(
+                            "Factories launch modal CTA URL is no longer valid at click time; not navigating"
+                        );
+                    }
+                }
             }
         }
 
