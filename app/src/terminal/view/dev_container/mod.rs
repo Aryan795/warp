@@ -1128,13 +1128,26 @@ fn append_unique_failure_part(parts: &mut Vec<String>, extra: Option<String>) {
     let Some(extra) = extra else {
         return;
     };
-    if parts
+    let existing: Vec<&str> = parts
         .iter()
-        .any(|part| extra.contains(part) || part.contains(&extra))
-    {
+        .flat_map(|part| part.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let novel: Vec<&str> = extra
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            !existing
+                .iter()
+                .any(|part| line == part || line.contains(part) || part.contains(line))
+        })
+        .collect();
+    if novel.is_empty() {
         return;
     }
-    parts.push(extra);
+    parts.push(novel.join("\n"));
 }
 
 /// Args for a preflight `docker exec` that checks the same things the real
