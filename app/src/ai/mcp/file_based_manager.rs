@@ -9,7 +9,7 @@ use warp_core::features::FeatureFlag;
 use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
-use super::file_mcp_watcher::FileMCPConfigDiagnostic;
+use super::file_mcp_watcher::{FileMCPConfigDiagnostic, PendingScan};
 use super::{FileMCPWatcher, FileMCPWatcherEvent, MCPProvider};
 use crate::ai::mcp::ParsedTemplatableMCPServerResult;
 use crate::ai::mcp::templatable_installation::TemplatableMCPServerInstallation;
@@ -43,6 +43,23 @@ pub struct FileBasedMCPManager {
     defer_global_warp_autostart: bool,
     /// Whether deferred global Warp servers may now be started.
     global_warp_servers_activated: bool,
+    /// Readiness latch exposed through [`Self::initial_global_scan_result`].
+    initial_global_scan_state: InitialGlobalMcpScanState,
+}
+
+/// State of the one-time initial global home-config MCP scan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum InitialGlobalMcpScanState {
+    /// The scan is still settling; accumulates the global servers auto-start requested so far.
+    Pending(Vec<Uuid>),
+    /// The scan settled; carries the UUIDs actually auto-start requested while it ran.
+    Complete(Vec<Uuid>),
+}
+
+impl Default for InitialGlobalMcpScanState {
+    fn default() -> Self {
+        Self::Pending(Vec::new())
+    }
 }
 
 impl FileBasedMCPManager {
@@ -67,6 +84,7 @@ impl FileBasedMCPManager {
             config_diagnostics_by_path: Default::default(),
             defer_global_warp_autostart,
             global_warp_servers_activated: !defer_global_warp_autostart,
+            initial_global_scan_state: Default::default(),
         }
     }
 
@@ -107,9 +125,40 @@ impl FileBasedMCPManager {
                     .insert(diagnostic.config_path.clone(), diagnostic.clone());
                 ctx.emit(FileBasedMCPManagerEvent::ConfigDiagnosticChanged);
             }
-            FileMCPWatcherEvent::CloudEnvMcpScanComplete { repo_path } => {
+            FileMCPWatcherEvent::ScanComplete(PendingScan::CloudEnvRepo(repo_path)) => {
                 self.handle_cloud_environment_scan_complete(repo_path, ctx);
             }
+            FileMCPWatcherEvent::ScanComplete(PendingScan::InitialGlobal) => {
+                self.complete_initial_global_scan(ctx);
+            }
+        }
+    }
+
+    /// Freezes the first-turn wait set accumulated while the scan was pending. Idempotent: a
+    /// second call is a no-op rather than clobbering the frozen set.
+    fn complete_initial_global_scan(&mut self, ctx: &mut ModelContext<Self>) {
+        let InitialGlobalMcpScanState::Pending(auto_started) = &mut self.initial_global_scan_state
+        else {
+            return;
+        };
+        let wait_server_uuids = std::mem::take(auto_started);
+        log::info!(
+            "Initial global file-based MCP scan complete: {} auto-started server(s) to await before the first turn",
+            wait_server_uuids.len()
+        );
+        self.initial_global_scan_state =
+            InitialGlobalMcpScanState::Complete(wait_server_uuids.clone());
+        ctx.emit(FileBasedMCPManagerEvent::InitialGlobalMcpScanComplete { wait_server_uuids });
+    }
+
+    /// Returns the frozen initial-global-scan wait set, or `None` while the scan is pending.
+    ///
+    /// The watcher runs during application initialization, so a driver created later can miss
+    /// the transient completion event. This cached result preserves the settled snapshot.
+    pub fn initial_global_scan_result(&self) -> Option<Vec<Uuid>> {
+        match &self.initial_global_scan_state {
+            InitialGlobalMcpScanState::Complete(uuids) => Some(uuids.clone()),
+            InitialGlobalMcpScanState::Pending(_) => None,
         }
     }
 
@@ -202,8 +251,8 @@ impl FileBasedMCPManager {
         }
     }
 
-    /// Applies a parsed list of MCP servers
-    /// spawning new servers and removing servers that are no longer present.
+    /// Applies a parsed list of MCP servers, spawning new servers and removing servers that
+    /// are no longer present.
     fn apply_parsed_servers(
         &mut self,
         root_path: PathBuf,
@@ -407,6 +456,17 @@ impl FileBasedMCPManager {
                 log::info!(
                     "Auto-spawning file-based MCP server '{server_name}' ({installation_uuid})"
                 );
+                if let InitialGlobalMcpScanState::Pending(awaited) =
+                    &mut self.initial_global_scan_state
+                    && matches!(
+                        server_type,
+                        FileBasedMCPServerType::GlobalWarp
+                            | FileBasedMCPServerType::GlobalThirdParty
+                    )
+                    && !awaited.contains(&installation_uuid)
+                {
+                    awaited.push(installation_uuid);
+                }
                 auto_started_uuids.push(installation_uuid);
                 to_spawn.push(installation);
             }
@@ -426,8 +486,8 @@ impl FileBasedMCPManager {
         ctx: &mut ModelContext<Self>,
     ) {
         let mcp_enabled = AISettings::as_ref(ctx).is_file_based_mcp_enabled(ctx);
-        // FileMCPWatcher emits CloudEnvMcpScanComplete only after emitting ConfigParsed
-        // for every provider config in this repo scan. Each ConfigParsed call records
+        // FileMCPWatcher emits ScanComplete for a cloud-environment repo only after emitting
+        // ConfigParsed for every provider config in this repo scan. Each ConfigParsed call records
         // the UUIDs actually emitted through SpawnServers in
         // pending_scan_auto_started_servers_by_root, so this remove() returns the wait set
         // for this completed scan.
@@ -740,6 +800,12 @@ pub enum FileBasedMCPManagerEvent {
         repo_path: PathBuf,
         #[allow(dead_code)]
         detected_servers: Vec<CloudEnvMcpScanServer>,
+        wait_server_uuids: Vec<Uuid>,
+    },
+    /// The one-time initial global home-config scan settled. `AgentDriver` awaits
+    /// [`FileBasedMCPManager::initial_global_scan_result`] instead of only listening for
+    /// this event, since it can fire long before a given run's driver ever subscribes.
+    InitialGlobalMcpScanComplete {
         wait_server_uuids: Vec<Uuid>,
     },
 }
