@@ -1320,7 +1320,7 @@ pub struct StagingProcessGroupKillOnDrop {
 }
 
 impl StagingProcessGroupKillOnDrop {
-    pub fn new(process_group_id: u32) -> Self {
+    pub(crate) fn new(process_group_id: u32) -> Self {
         Self {
             process_group_id: Arc::new(Mutex::new(Some(process_group_id))),
         }
