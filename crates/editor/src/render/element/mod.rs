@@ -854,38 +854,34 @@ impl<V: EditorView> RichTextElement<V> {
         let mut ordered_list_numbering = model.viewport_list_numbering();
         let scroll_data = self.vertical_scroll_data(app);
         let text_layout = TextLayout::for_materialization(layout_ctx, app, model);
-        model.materialize_viewport(
+        let viewport_items = model.materialize_viewport(
             &text_layout,
             scroll_data.visible_px,
             model.viewport().width(),
             scroll_data.scroll_start,
         );
 
-        let content = model.content();
-        let viewport_items = content.viewport_items(
-            scroll_data.visible_px,
-            model.viewport().width(),
-            scroll_data.scroll_start,
-        );
-
         let blocks = viewport_items
-            .map(|(item, block)| {
+            .into_iter()
+            .map(|item| {
+                let block = item.block().clone();
+                let is_ordered_list = matches!(block, BlockItem::OrderedList { .. });
                 let renderable_block = match block {
                     BlockItem::Paragraph(_) => RenderableParagraph::new(item).finish(),
                     BlockItem::TextBlock { .. } => RenderableTextBlock::new(item).finish(),
                     BlockItem::Header { .. } => RenderableHeader::new(item).finish(),
                     BlockItem::UnorderedList { indent_level, .. } => {
-                        RenderableBulletList::new(*indent_level, styles, item).finish()
+                        RenderableBulletList::new(indent_level, styles, item).finish()
                     }
                     BlockItem::TaskList {
                         complete,
                         mouse_state,
                         ..
                     } => RenderableTaskList::new(
-                        *complete,
+                        complete,
                         styles,
                         item,
-                        mouse_state.clone(),
+                        mouse_state,
                         self.parent_view.clone(),
                     )
                     .finish(),
@@ -895,8 +891,8 @@ impl<V: EditorView> RichTextElement<V> {
                         ..
                     } => {
                         let indent = indent_level.as_usize();
-                        let number = ordered_list_numbering.advance(indent, *number).label_index;
-                        RenderableOrderedListItem::new(*indent_level, item, number).finish()
+                        let number = ordered_list_numbering.advance(indent, number).label_index;
+                        RenderableOrderedListItem::new(indent_level, item, number).finish()
                     }
                     BlockItem::RunnableCodeBlock { .. } => {
                         // For layout purposes, the start marker for the command block is considered
@@ -926,8 +922,7 @@ impl<V: EditorView> RichTextElement<V> {
                         decoration,
                         text_decoration,
                         ..
-                    } => RenderableTemporaryBlock::new(item, *decoration, text_decoration.clone())
-                        .finish(),
+                    } => RenderableTemporaryBlock::new(item, decoration, text_decoration).finish(),
                     BlockItem::HorizontalRule(_) => HorizontalRule::new(item).finish(),
                     BlockItem::Image { .. } => RenderableImage::new(item).finish(),
                     BlockItem::Table { .. } => RenderableTable::new(item).finish(),
@@ -952,7 +947,7 @@ impl<V: EditorView> RichTextElement<V> {
                     }
                 };
 
-                if !matches!(block, BlockItem::OrderedList { .. }) {
+                if !is_ordered_list {
                     ordered_list_numbering.reset();
                 }
 
