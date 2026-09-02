@@ -89,16 +89,8 @@ fn test_large_temporary_diff_uses_deferred_paragraphs() {
 
 #[test]
 fn test_large_multiline_code_block_bounds_retained_layout_during_processing() {
-    // Regression test for the gap left by `test_large_temporary_diff_uses_deferred_paragraphs`
-    // above: that test only exercises many separate one-line `LayoutTask`s, each finishing (and
-    // thus releasing any cached frame) before the next starts. A single large multiline code
-    // block is laid out as *one* `LayoutTask::Text`, so every one of its paragraphs is produced
-    // within a single call to `layout_text_block`, with `TextLayout::finish_cache_frame` (which
-    // rotates out the shared `LayoutCache`) only running once the *entire* enclosing parallel
-    // chunk completes -- i.e. not yet, at the point this test inspects the cache. Before the fix,
-    // every deferred paragraph's full frame stayed strongly cached in the shared `LayoutCache`
-    // for the whole call, so retained payload grew with the block's paragraph count instead of
-    // staying bounded.
+    // A single multiline task can produce unbounded distinct frames inside one task, bypassing
+    // the per-chunk task and character bounds.
     App::test((), |app| async move {
         app.read(|ctx| {
             let layout_cache = LayoutCache::new();

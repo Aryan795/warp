@@ -1280,11 +1280,6 @@ fn paragraph_from_layout(
     minimum_height: Option<Pixels>,
 ) -> Paragraph {
     if layout.supports_deferred_paragraphs() {
-        // The full frame is only needed transiently, to derive the compact representation that
-        // `Paragraph::new_deferred` actually retains. Shape it through a throwaway cache instead
-        // of the shared one so it's released immediately, rather than staying strongly cached
-        // until the enclosing parallel chunk finishes (which, for a single large multiline block,
-        // could mean every paragraph in that block is retained in full at once).
         let frame =
             layout.layout_text_uncached(&line.text, &paragraph_styles, &spacing, &line.style_runs);
         Paragraph::new_deferred(
