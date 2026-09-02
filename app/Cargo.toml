@@ -1038,6 +1038,7 @@ ctrl_c_cancels_third_party_harness = []
 shell_widget_handoff = []
 builtin_shell_history_handoff = []
 history_search_ranking_v2 = []
+stored_screenshots = []
 
 [package.metadata.bundle.bin.warp-oss]
 category = "public.app-category.developer-tools"
