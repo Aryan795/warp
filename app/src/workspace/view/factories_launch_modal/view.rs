@@ -23,10 +23,9 @@ use crate::view_components::action_button::{
 /// `openwarp_launch_modal`, Warp's other two centered launch modals.
 const MODAL_WIDTH: f32 = 420.;
 const HERO_HEIGHT: f32 = 92.;
-// Interim placeholder: this asset is sized for the old 340x110 popover card
-// and gets cropped to fit here via `cover()`. Swap in a 420x92-native asset
-// (840x184 at 2x) once one is designed for this modal.
-const HERO_IMAGE_PATH: &str = "async/png/onboarding/factories_launch_intro_banner.png";
+// 1680x368, exactly 4x this box's 420x92 logical size, so `cover()` scales it
+// without cropping.
+const HERO_IMAGE_PATH: &str = "async/png/onboarding/factories_launch_banner.png";
 const OFFER_TEXT: &str =
     "Get hands-on implementation support and up to $10K in Factory usage during Early Access.";
 const OFFER_EMPHASIS: &str = "up to $10K";
