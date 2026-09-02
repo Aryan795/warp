@@ -584,6 +584,32 @@ fn restore_child_conversation_with_run_shell_commands(
     restore_conversation_for_terminal_view(terminal_view_id, child_conversation, ctx)
 }
 
+/// Sums resident blocks across `parent_pane_id` and every hidden child-agent pane
+/// materialized for it, reading each pane's live `TerminalModel` directly rather than a
+/// predicted count.
+fn total_resident_blocks(
+    panes: &PaneGroup,
+    parent_pane_id: PaneId,
+    ctx: &mut ViewContext<PaneGroup>,
+) -> usize {
+    let mut pane_ids = vec![parent_pane_id];
+    pane_ids.extend(panes.child_agent_panes.values().copied());
+
+    let mut total = 0;
+    for pane_id in pane_ids {
+        if let Some(terminal_view) = panes.terminal_view_from_pane_id(pane_id, ctx) {
+            total += terminal_view
+                .as_ref(ctx)
+                .model
+                .lock()
+                .block_list()
+                .blocks()
+                .len();
+        }
+    }
+    total
+}
+
 fn restore_child_conversation_with_task_context_for_terminal_view(
     terminal_view_id: EntityId,
     parent_conversation_id: AIConversationId,
@@ -1958,8 +1984,11 @@ fn finish_seed_child_conversations_from_task_gives_up_when_parent_has_no_termina
     });
 }
 
+/// An explicitly-requested (required) remote child -- e.g. a pill-click reveal -- must
+/// still resolve and live-attach correctly, even though remote children are otherwise
+/// left out of eager restoration bursts (see the fan-out test below).
 #[test]
-fn test_create_missing_child_agent_panes_restores_remote_child_from_history_model() {
+fn test_required_remote_child_agent_pane_restores_from_history_model() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         let pane_group = mock_pane_group(&mut app, Default::default());
@@ -1972,7 +2001,7 @@ fn test_create_missing_child_agent_panes_restores_remote_child_from_history_mode
 
             assert!(
                 !panes.child_agent_panes.contains_key(&child_conversation_id),
-                "child pane should not exist before startup restoration runs",
+                "child pane should not exist before restoration runs",
             );
 
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, _| {
@@ -1999,7 +2028,7 @@ fn test_create_missing_child_agent_panes_restores_remote_child_from_history_mode
                 parent_conversation_id,
                 parent_pane_id,
                 true,
-                None,
+                Some(child_conversation_id),
                 ctx,
             );
 
@@ -2007,7 +2036,7 @@ fn test_create_missing_child_agent_panes_restores_remote_child_from_history_mode
                 .child_agent_panes
                 .get(&child_conversation_id)
                 .copied()
-                .expect("startup restoration should recreate the remote child pane");
+                .expect("an explicitly required remote child should still be restored");
             let (ambient_task_id, is_agent_running, active_conversation_id) =
                 ambient_child_session_state(panes, child_pane_id, ctx);
 
@@ -2022,6 +2051,54 @@ fn test_create_missing_child_agent_panes_restores_remote_child_from_history_mode
     });
 }
 
+/// Remote children route to an async transcript-hydration path whose eventual cost (up to
+/// `MAX_RESTORED_COMMAND_BLOCKS` once loaded) is invisible to this synchronous budget. A
+/// large ancestor-list fan-out (the server allows up to 100 direct children per parent)
+/// must not eagerly dispatch that hydration for every one of them; each stays unmaterialized
+/// until explicitly revealed. This fails on code that eagerly materializes remote children
+/// whenever their (near-empty) placeholder conversation happens to fit the budget.
+#[test]
+fn test_restore_missing_child_agent_panes_for_parent_leaves_remote_children_for_explicit_reveal() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_terminal_view_id = panes
+                .terminal_view_from_pane_id(parent_pane_id, ctx)
+                .expect("parent pane should have a terminal view")
+                .id();
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+
+            for _ in 0..20 {
+                let task_id = new_ambient_agent_task_id();
+                restore_remote_child_conversation_for_terminal_view(
+                    parent_terminal_view_id,
+                    parent_conversation_id,
+                    task_id,
+                    ctx,
+                );
+            }
+
+            panes.restore_missing_child_agent_panes_for_parent(
+                parent_conversation_id,
+                parent_pane_id,
+                true,
+                None,
+                ctx,
+            );
+
+            assert!(
+                panes.child_agent_panes.is_empty(),
+                "remote children must not be eagerly hydrated -- their eventual transcript \
+                 cost isn't visible to the synchronous budget and can only be bounded by \
+                 leaving them to explicit reveal",
+            );
+        });
+    });
+}
+
 /// Each hidden child-agent pane restores its own capped-but-nonzero
 /// `TerminalModel`/block list. A cap on pane *count* alone does not bound
 /// memory when children are large: at `MAX_RESTORED_COMMAND_BLOCKS` each, a
@@ -2032,8 +2109,11 @@ fn test_create_missing_child_agent_panes_restores_remote_child_from_history_mode
 /// per-call counter, so it must hold across repeated calls for the same
 /// parent (e.g. a pending ancestor-list re-list, or a later
 /// `reattach_panes` pass) rather than resetting and letting bursts add up
-/// past it. This fails on the pre-fix code, which eagerly restores every
-/// child found for the parent in a single pass with no budget at all.
+/// past it. Asserts the actual terminal-model block sum (not a predicted
+/// count) never exceeds the budget, so an inaccurate per-candidate cost
+/// estimate would still be caught. This fails on the pre-fix code, which
+/// eagerly restores every child found for the parent in a single pass with
+/// no budget at all.
 #[test]
 fn test_restore_missing_child_agent_panes_for_parent_bounds_aggregate_blocks_across_calls() {
     App::test((), |mut app| async move {
@@ -2073,6 +2153,12 @@ fn test_restore_missing_child_agent_panes_for_parent_bounds_aggregate_blocks_acr
                 "the aggregate budget must leave at least one cap-sized child \
                  unmaterialized when children collectively exceed it",
             );
+            assert!(
+                total_resident_blocks(panes, parent_pane_id, ctx)
+                    <= MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS,
+                "the real total block count across the parent and every materialized \
+                 child must fit the budget, not just a predicted count",
+            );
 
             // Second pass, simulating a re-entrant restore of the same parent.
             panes.restore_missing_child_agent_panes_for_parent(
@@ -2088,6 +2174,12 @@ fn test_restore_missing_child_agent_panes_for_parent_bounds_aggregate_blocks_acr
                 "a second restore pass for the same parent must not eagerly materialize \
                  more children just because a per-call counter would have reset -- the \
                  budget must be derived from what's already resident, not reset each call",
+            );
+            assert!(
+                total_resident_blocks(panes, parent_pane_id, ctx)
+                    <= MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS,
+                "the real total block count must still fit the budget after a second, \
+                 re-entrant restore pass",
             );
         });
     });
@@ -2460,20 +2552,18 @@ fn test_entering_remote_parent_agent_view_lazily_restores_local_hidden_child_pan
     });
 }
 
+/// Entering a (remote) parent's fullscreen agent view materializes missing *local*
+/// children (see the sibling local-child test above), but must not eagerly dispatch a
+/// remote child's async transcript hydration just because the parent became visible --
+/// only an explicit reveal of that specific child does.
 #[test]
-fn test_entering_remote_parent_agent_view_lazily_restores_remote_hidden_child_pane() {
+fn test_entering_remote_parent_agent_view_leaves_remote_hidden_child_pane_for_explicit_reveal() {
     let _agent_view = FeatureFlag::AgentView.override_enabled(true);
 
     App::test((), |mut app| async move {
         initialize_app(&mut app);
         let pane_group = mock_pane_group(&mut app, Default::default());
-        let (
-            parent_pane_id,
-            remote_child_conversation_id,
-            remote_child_task_id,
-            initial_pane_count,
-            initial_visible_pane_count,
-        ) = pane_group.update(&mut app, |panes, ctx| {
+        let remote_child_conversation_id = pane_group.update(&mut app, |panes, ctx| {
             let parent_pane_id = get_newly_created_pane_id(panes, &[]);
             let root_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
             let remote_parent_task_id = new_ambient_agent_task_id();
@@ -2492,8 +2582,6 @@ fn test_entering_remote_parent_agent_view_lazily_restores_remote_hidden_child_pa
                 remote_child_task_id,
                 ctx,
             );
-            let initial_pane_count = panes.pane_count();
-            let initial_visible_pane_count = panes.visible_pane_count();
 
             assert!(
                 !panes
@@ -2501,7 +2589,6 @@ fn test_entering_remote_parent_agent_view_lazily_restores_remote_hidden_child_pa
                     .contains_key(&remote_child_conversation_id)
             );
 
-            // Attachable task so the lazily-restored remote child live-attaches.
             AgentConversationsModel::handle(ctx).update(ctx, |model, _| {
                 model.insert_task_for_test(attachable_ambient_agent_task(remote_child_task_id));
             });
@@ -2512,37 +2599,17 @@ fn test_entering_remote_parent_agent_view_lazily_restores_remote_hidden_child_pa
                 remote_parent_conversation_id,
                 ctx,
             );
-            (
-                parent_pane_id,
-                remote_child_conversation_id,
-                remote_child_task_id,
-                initial_pane_count,
-                initial_visible_pane_count,
-            )
+            remote_child_conversation_id
         });
 
-        pane_group.update(&mut app, |panes, ctx| {
-            let child_pane_id = panes
-                .child_agent_panes
-                .get(&remote_child_conversation_id)
-                .copied()
-                .expect(
-                    "remote parent fullscreen restore should materialize the missing remote child pane",
-                );
-            let (ambient_task_id, is_agent_running, active_conversation_id) =
-                ambient_child_session_state(panes, child_pane_id, ctx);
-
-            assert!(panes.has_pane_id(child_pane_id));
-            assert_eq!(panes.pane_count(), initial_pane_count);
-            assert_eq!(panes.visible_pane_count(), initial_visible_pane_count);
-            assert!(!panes.panes.is_pane_in_tree(child_pane_id));
-            assert_eq!(panes.focused_pane_id(ctx), parent_pane_id);
-            assert_eq!(ambient_task_id, Some(remote_child_task_id));
+        pane_group.update(&mut app, |panes, _ctx| {
             assert!(
-                is_agent_running,
-                "remote child restore should reconnect to the existing ambient session",
+                !panes
+                    .child_agent_panes
+                    .contains_key(&remote_child_conversation_id),
+                "entering the parent's fullscreen view must not eagerly hydrate a remote \
+                 child's transcript",
             );
-            assert_eq!(active_conversation_id, Some(remote_child_conversation_id));
         });
     });
 }

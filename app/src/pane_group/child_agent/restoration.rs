@@ -83,12 +83,8 @@ impl PaneGroup {
     /// so a fresh, still-empty result (a parent that legitimately has no
     /// children) doesn't immediately re-trigger its own seed and loop.
     ///
-    /// Eager materialization is bounded by `MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS`,
-    /// derived from blocks already resident on the parent and its already-materialized
-    /// children so the budget holds across repeated calls for the same parent instead
-    /// of resetting each time. `required_child_id`, when given, is always materialized
-    /// regardless of that budget, so an explicit request to reveal one child never
-    /// fails just because siblings already exhausted it.
+    /// `required_child_id`, when given, is always materialized regardless of
+    /// `MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS`.
     pub(in crate::pane_group) fn restore_missing_child_agent_panes_for_parent(
         &mut self,
         parent_conversation_id: AIConversationId,
@@ -126,10 +122,6 @@ impl PaneGroup {
             }
         }
 
-        // Derived (not tracked separately) from every pane already resident for this
-        // parent, so the budget reflects the true current footprint across repeated
-        // calls -- e.g. a pending ancestor-list re-list, or a later `reattach_panes`
-        // pass -- instead of resetting each time and letting bursts add up past it.
         let mut resident_blocks = self.resident_block_count(parent_pane_id, ctx);
         for &child_id in &child_ids {
             if let Some(&pane_id) = self.child_agent_panes.get(&child_id)
@@ -152,10 +144,8 @@ impl PaneGroup {
                 continue;
             }
 
-            // Peek without removing from the restored store yet: whether this child
-            // gets materialized this pass depends on the budget check below, and a
-            // conversation taken out of the store to size it up would otherwise
-            // vanish for a later pass if skipped here.
+            let is_required = required_child_id == Some(child_id);
+
             let history_conversation = BlocklistAIHistoryModel::as_ref(ctx)
                 .conversation(&child_id)
                 .cloned();
@@ -168,13 +158,34 @@ impl PaneGroup {
                 continue;
             };
 
-            let is_required = required_child_id == Some(child_id);
-            // +1 for the trailing active block every hidden child pane gets
-            // regardless of restored content.
-            let candidate_blocks = child_conversation.to_serialized_blocklist_items().len() + 1;
+            // Remote and shared-session-viewer children route to an async hydration
+            // path that can later restore a full transcript of its own; that cost is
+            // invisible to this synchronous budget, so eager materialization is never
+            // attempted for them.
             if !is_required
-                && resident_blocks + candidate_blocks > MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS
+                && (child_conversation.is_remote_child()
+                    || child_conversation.is_viewing_shared_session())
             {
+                continue;
+            }
+
+            let remaining_budget =
+                MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS.saturating_sub(resident_blocks);
+            // A fresh pane already holds one block before any restoration; restoring
+            // at least one command adds the restored items plus a further trailing
+            // active block.
+            let restored_block_count =
+                child_conversation.restored_block_count_up_to(if is_required {
+                    MAX_RESTORED_COMMAND_BLOCKS
+                } else {
+                    remaining_budget.saturating_sub(2)
+                });
+            let candidate_blocks = if restored_block_count == 0 {
+                1
+            } else {
+                restored_block_count + 2
+            };
+            if !is_required && candidate_blocks > remaining_budget {
                 continue;
             }
 

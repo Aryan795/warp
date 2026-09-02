@@ -3935,6 +3935,14 @@ impl AIConversation {
     ///
     /// Returns CommandBlockInfo with command, output, exit_code, and optional ai_metadata.
     fn extract_command_blocks(&self) -> Vec<CommandBlockInfo> {
+        self.extract_command_blocks_up_to(None)
+    }
+
+    /// Like [`Self::extract_command_blocks`], but stops scanning once more than `limit`
+    /// blocks have been found (`None` scans everything). Lets a caller that only needs to
+    /// know whether the count exceeds some threshold avoid unbounded work for a
+    /// conversation with a very large historical command count.
+    fn extract_command_blocks_up_to(&self, limit: Option<usize>) -> Vec<CommandBlockInfo> {
         let mut command_blocks = Vec::new();
 
         // Get the root task's API messages.
@@ -3965,6 +3973,7 @@ impl AIConversation {
             &message_id_to_exchange,
             &mut command_blocks,
             &mut seen_command_ids,
+            limit,
         );
 
         command_blocks
@@ -3974,12 +3983,16 @@ impl AIConversation {
     ///
     /// This recurses when it encounters a summarization subagent call, producing the list
     /// of command blocks as it would have been had no summarization ever occurred.
+    /// Stops once `command_blocks` has grown past `limit` (see
+    /// [`Self::extract_command_blocks_up_to`]).
+    #[allow(clippy::too_many_arguments)]
     fn extract_command_blocks_from_messages(
         &self,
         messages: &[api::Message],
         message_id_to_exchange: &HashMap<&str, &AIAgentExchange>,
         command_blocks: &mut Vec<CommandBlockInfo>,
         seen_command_ids: &mut HashSet<String>,
+        limit: Option<usize>,
     ) {
         // Build a map from tool_call_id to (RunShellCommandResult, result_message_id, result_proto_timestamp)
         // for efficient lookup within this message set.
@@ -4008,6 +4021,10 @@ impl AIConversation {
             .collect();
 
         for message in messages {
+            if limit.is_some_and(|limit| command_blocks.len() > limit) {
+                return;
+            }
+
             let message_id = message.id.clone();
 
             if let Some(tool_call) = message.tool_call() {
@@ -4026,6 +4043,7 @@ impl AIConversation {
                             message_id_to_exchange,
                             command_blocks,
                             seen_command_ids,
+                            limit,
                         );
                     }
                     // Don't process this message further - it's just a subagent call.
@@ -4314,6 +4332,22 @@ impl AIConversation {
     /// cap still lets the merged total grow unboundedly with the conversation count.
     pub fn to_serialized_blocklist_items(&self) -> Vec<SerializedBlockListItem> {
         Self::cap_restored_command_blocks(self.extract_serialized_command_blocks(), Some(self.id()))
+    }
+
+    /// Equivalent to `to_serialized_blocklist_items().len()`, without building or
+    /// serializing any command block, as long as that count is at most `cap`. Returns
+    /// `cap + 1` when the true count exceeds `cap`, without scanning further to find out
+    /// by how much.
+    pub(crate) fn restored_block_count_up_to(&self, cap: usize) -> usize {
+        let scan_cap = cap.min(MAX_RESTORED_COMMAND_BLOCKS);
+        let raw_count = self.extract_command_blocks_up_to(Some(scan_cap)).len();
+        if raw_count <= scan_cap {
+            raw_count
+        } else if scan_cap == MAX_RESTORED_COMMAND_BLOCKS {
+            MAX_RESTORED_COMMAND_BLOCKS + 1
+        } else {
+            cap + 1
+        }
     }
 
     /// Caps `items` at [`MAX_RESTORED_COMMAND_BLOCKS`], keeping the most recent, and
