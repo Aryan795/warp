@@ -278,11 +278,7 @@ impl TerminalView {
         if let Some(operation) = &self.dev_container_build {
             return (
                 operation.read(app, |operation, _| operation.header_title()),
-                operation
-                    .read(app, |operation, _| {
-                        operation.header_error().map(str::to_owned)
-                    })
-                    .unwrap_or_default(),
+                String::new(),
             );
         }
         let pane_config = self.pane_configuration.as_ref(app);

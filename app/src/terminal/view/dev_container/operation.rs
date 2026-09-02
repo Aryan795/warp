@@ -149,10 +149,6 @@ impl DevContainerBuildOperation {
         self.status
     }
 
-    pub(crate) fn failure(&self) -> Option<&DevContainerBuildFailure> {
-        self.failure.as_ref()
-    }
-
     pub(crate) fn header_title(&self) -> String {
         let workspace = self
             .workspace_folder
@@ -170,10 +166,6 @@ impl DevContainerBuildOperation {
                 format!("{} · {}", workspace, self.phase().label())
             }
         }
-    }
-
-    pub(crate) fn header_error(&self) -> Option<&str> {
-        self.failure().map(|failure| failure.message.as_str())
     }
 
     pub(crate) fn shows_retry_and_close(&self) -> bool {

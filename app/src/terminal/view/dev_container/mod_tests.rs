@@ -59,7 +59,8 @@ fn interpret_dev_container_up_output_uses_structured_message_on_failure_exit_sta
     assert_eq!(
         outcome,
         DevContainerUpOutcome::Error(
-            "Dev container failed to start: Command failed: docker pull nope:latest".to_owned()
+            "Dev container failed to start:\nCommand failed: docker pull nope:latest\nsome stderr noise"
+                .to_owned()
         )
     );
 }
@@ -70,7 +71,9 @@ fn interpret_dev_container_up_output_falls_back_to_stderr_tail_when_unparseable(
 
     assert_eq!(
         outcome,
-        DevContainerUpOutcome::Error("Dev container failed to start:\nboom".to_owned())
+        DevContainerUpOutcome::Error(
+            "Dev container failed to start:\nnot json at all\nboom".to_owned()
+        )
     );
 }
 
@@ -84,7 +87,7 @@ fn interpret_dev_container_up_output_errors_when_success_exit_but_outcome_is_err
     assert_eq!(
         outcome,
         DevContainerUpOutcome::Error(
-            "Dev container failed to start: something went wrong".to_owned()
+            "Dev container failed to start:\nsomething went wrong".to_owned()
         )
     );
 }
@@ -96,7 +99,7 @@ fn dev_container_up_failure_message_prefers_structured_description_over_stderr()
 
     assert_eq!(
         message,
-        "Dev container failed to start: no space left on device"
+        "Dev container failed to start:\nno space left on device\nirrelevant stderr"
     );
 }
 
@@ -107,7 +110,7 @@ fn dev_container_up_failure_message_falls_back_to_stderr_tail_and_trims_blank_li
 
     assert_eq!(
         message,
-        "Dev container failed to start:\nline one\nline two"
+        "Dev container failed to start:\nnot json\nline one\nline two"
     );
 }
 
@@ -181,6 +184,28 @@ fn interpret_dev_container_up_output_errors_on_missing_or_incomplete_stdout() {
         interpret_dev_container_up_output(true, b"{\"outcome\":", b""),
         DevContainerUpOutcome::Error(_)
     ));
+}
+
+#[test]
+fn interpret_docker_ps_probe_failure_keeps_command_and_underlying_stderr() {
+    let stdout = r#"{"outcome":"error","message":"Command failed: docker ps -q --filter label=devcontainer.local_folder=/private/tmp/ha-core --filter label=devcontainer.config_file=/private/tmp/ha-core/.devcontainer/devcontainer.json"}"#;
+    let stderr = "[2026-09-02T00:43:15.960Z] @devcontainers/cli 0.89.0. Node.js v24.17.0. darwin 25.6.0 arm64.\nCannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n";
+    let outcome = interpret_dev_container_up_output(false, stdout.as_bytes(), stderr.as_bytes());
+    let DevContainerUpOutcome::Error(message) = outcome else {
+        panic!("expected a failed outcome");
+    };
+    assert!(
+        message.contains("Command failed: docker ps"),
+        "structured CLI wrapper must be kept, got {message:?}"
+    );
+    assert!(
+        message.contains("Cannot connect to the Docker daemon"),
+        "underlying docker stderr must not be discarded, got {message:?}"
+    );
+    assert!(
+        !message.contains("@devcontainers/cli"),
+        "CLI version banner is not the failure cause, got {message:?}"
+    );
 }
 
 #[test]

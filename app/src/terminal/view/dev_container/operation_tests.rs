@@ -16,7 +16,7 @@ fn new_operation_starts_in_build_running() {
     assert_eq!(op.phase(), DevContainerBuildPhase::Build);
     assert_eq!(op.status(), DevContainerBuildStatus::Running);
     assert_eq!(op.attempt_id(), 1);
-    assert!(op.failure().is_none());
+    assert!(op.failure.is_none());
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn retry_increments_attempt_and_clears_failure() {
     assert_eq!(op.attempt_id(), first_attempt + 1);
     assert_eq!(op.phase(), DevContainerBuildPhase::Build);
     assert_eq!(op.status(), DevContainerBuildStatus::Running);
-    assert!(op.failure().is_none());
+    assert!(op.failure.is_none());
     assert!(op.is_current_attempt(first_id, first_attempt + 1));
     assert!(!op.is_current_attempt(first_id, first_attempt));
 }

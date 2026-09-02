@@ -339,12 +339,9 @@ impl TerminalView {
             return;
         };
         let title = operation.read(ctx, |operation, _| operation.header_title());
-        let error = operation.read(ctx, |operation, _| {
-            operation.header_error().map(str::to_owned)
-        });
         self.pane_configuration.update(ctx, |pane_config, ctx| {
             pane_config.set_title(title, ctx);
-            pane_config.set_title_secondary(error.unwrap_or_default(), ctx);
+            pane_config.set_title_secondary(String::new(), ctx);
             pane_config.notify_header_content_changed(ctx);
         });
     }
@@ -493,13 +490,28 @@ impl TerminalView {
         };
         let key = operation.read(ctx, |operation, _| operation.key().clone());
         operation.update(ctx, |operation, ctx| {
-            operation.fail(phase, message, ctx);
+            operation.fail(phase, message.clone(), ctx);
         });
         registry::DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
             registry.mark_failed(&key);
         });
+        self.append_dev_container_failure_to_grid(&message);
         self.sync_dev_container_build_header(ctx);
         ctx.notify();
+    }
+
+    #[cfg(feature = "local_tty")]
+    fn append_dev_container_failure_to_grid(&self, message: &str) {
+        use warp_terminal::model::ansi::Processor;
+
+        let event_proxy = self.model.lock().event_proxy.clone();
+        {
+            let mut model = self.model.lock();
+            let mut processor = Processor::new();
+            let bytes = format!("\r\n{message}\r\n");
+            processor.parse_bytes(&mut *model, bytes.as_bytes(), &mut std::io::sink());
+        }
+        event_proxy.send_wakeup_event();
     }
 
     #[cfg(feature = "local_tty")]
@@ -925,23 +937,77 @@ fn interpret_dev_container_up_output(
     }
 }
 
-/// Builds the error-toast message for a failed (or unparseable) `devcontainer
-/// up`, preferring the structured `message`/`description` from its final
-/// JSON status line and falling back to the tail of stderr when that's
-/// unavailable.
+/// Builds the user-facing failure body for a failed (or unparseable) `devcontainer
+/// up`, preferring structured `message`/`description` from its final JSON status
+/// line and including leftover stdout or useful stderr when they add detail.
 #[cfg(feature = "local_tty")]
 fn dev_container_up_failure_message(stdout: &[u8], stderr: &[u8]) -> String {
-    let structured_message = parse_dev_container_up_stdout(stdout).and_then(|result| {
-        result
-            .message
-            .or(result.description)
-            .map(|detail| format!("Dev container failed to start: {detail}"))
-    });
-    structured_message.unwrap_or_else(|| {
-        let stderr_text = String::from_utf8_lossy(stderr);
-        let tail = tail_lines(&stderr_text, 20);
-        format!("Dev container failed to start:\n{tail}")
-    })
+    let structured = parse_dev_container_up_stdout(stdout)
+        .and_then(|result| result.message.or(result.description));
+    let extra_stdout = leftover_stdout_lines(stdout);
+    let extra_stderr = useful_stderr_lines(stderr);
+
+    let mut parts = Vec::new();
+    if let Some(structured) = structured {
+        parts.push(structured);
+    }
+    append_unique_failure_part(&mut parts, extra_stdout);
+    append_unique_failure_part(&mut parts, extra_stderr);
+    if parts.is_empty() {
+        "Dev container failed to start.".to_owned()
+    } else {
+        format!("Dev container failed to start:\n{}", parts.join("\n"))
+    }
+}
+
+#[cfg(feature = "local_tty")]
+fn leftover_stdout_lines(stdout: &[u8]) -> Option<String> {
+    let stdout_text = String::from_utf8_lossy(stdout);
+    let mut lines: Vec<&str> = stdout_text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines
+        .last()
+        .is_some_and(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+    {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines[lines.len().saturating_sub(20)..].join("\n"))
+    }
+}
+
+#[cfg(feature = "local_tty")]
+fn useful_stderr_lines(stderr: &[u8]) -> Option<String> {
+    let stderr_text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = stderr_text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.contains("@devcontainers/cli"))
+        .collect();
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines[lines.len().saturating_sub(20)..].join("\n"))
+    }
+}
+
+#[cfg(feature = "local_tty")]
+fn append_unique_failure_part(parts: &mut Vec<String>, extra: Option<String>) {
+    let Some(extra) = extra else {
+        return;
+    };
+    if parts
+        .iter()
+        .any(|part| extra.contains(part) || part.contains(&extra))
+    {
+        return;
+    }
+    parts.push(extra);
 }
 
 /// Args for a preflight `docker exec` that checks the same things the real
@@ -1021,6 +1087,16 @@ fn discover_dev_container_configs(workspace_folder: &Path) -> Vec<PathBuf> {
     }
 
     configs
+}
+
+#[cfg(all(test, feature = "local_tty"))]
+pub(crate) fn failure_message_for_test(exit_success: bool, stdout: &[u8], stderr: &[u8]) -> String {
+    match interpret_dev_container_up_output(exit_success, stdout, stderr) {
+        DevContainerUpOutcome::Error(message) => message,
+        DevContainerUpOutcome::ReadyToAttach { .. } => {
+            panic!("expected a failed Dev Container outcome")
+        }
+    }
 }
 
 #[cfg(all(test, feature = "local_tty"))]

@@ -87,6 +87,75 @@ fn drain_marks_stdout_oversized_past_one_mib() {
     });
 }
 
+fn pid_is_alive(pid: i32) -> bool {
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+}
+
+fn wait_for_pid_file(path: &std::path::Path) -> i32 {
+    use instant::Instant;
+
+    let started = Instant::now();
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && let Ok(pid) = contents.trim().parse::<i32>()
+            && pid > 1
+        {
+            return pid;
+        }
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "descendant pid file was not written"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn reader_error_kills_process_group_descendants() {
+    use command::r#async::Command;
+
+    let pid_file = std::env::temp_dir().join(format!("dc-desc-{}", uuid::Uuid::new_v4()));
+    block_on(async {
+        let mut command = Command::new_with_process_group("python3");
+        command
+            .arg("-c")
+            .arg(format!(
+                r#"
+import os, time
+pid = os.fork()
+if pid == 0:
+    open({pid_file:?}, "w").write(str(os.getpid()))
+    time.sleep(30)
+    os._exit(0)
+time.sleep(30)
+"#
+            ))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().expect("spawn");
+        let process_group_id = child.id();
+        let descendant = wait_for_pid_file(&pid_file);
+        assert!(pid_is_alive(descendant), "descendant must start alive");
+        let result = super::join_drain_and_status(
+            process_group_id,
+            async { Err(io::Error::other("reader failed")) },
+            async { child.status().await },
+        )
+        .await;
+        assert!(result.is_err(), "reader failure must surface");
+        let started = instant::Instant::now();
+        while pid_is_alive(descendant) {
+            assert!(
+                started.elapsed().as_secs() < 5,
+                "descendant must not survive a reader error"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    });
+    let _ = std::fs::remove_file(pid_file);
+}
+
 #[test]
 fn drain_reaches_failed_without_waiting_for_descendant_holding_pipes() {
     use command::r#async::Command;

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use uuid::Uuid;
-use warpui::{AppContext, Entity, SingletonEntity, WeakViewHandle, WindowId};
+use warpui::{AppContext, Entity, SingletonEntity, ViewContext, WeakViewHandle, WindowId};
 
 use crate::pane_group::{PaneGroup, PaneId};
 
@@ -20,7 +20,6 @@ pub(crate) enum DevContainerBuildSurfaceStatus {
 
 #[derive(Clone)]
 pub(crate) struct DevContainerBuildLocator {
-    #[allow(dead_code)]
     pub window_id: WindowId,
     pub pane_group: WeakViewHandle<PaneGroup>,
     pub pane_id: PaneId,
@@ -31,6 +30,17 @@ impl DevContainerBuildLocator {
         self.pane_group
             .upgrade(ctx)
             .is_some_and(|pane_group| pane_group.read(ctx, |group, _| group.has_pane(self.pane_id)))
+    }
+
+    pub(crate) fn focus_in_owner(&self, ctx: &mut ViewContext<PaneGroup>) {
+        if self.window_id != ctx.window_id() {
+            ctx.windows().show_window_and_focus_app(self.window_id);
+        }
+        if let Some(pane_group) = self.pane_group.upgrade(ctx) {
+            pane_group.update(ctx, |group, ctx| {
+                group.focus_pane_by_id(self.pane_id, ctx);
+            });
+        }
     }
 }
 

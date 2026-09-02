@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io;
 use std::path::Path;
 use std::process::{Output, Stdio};
@@ -44,6 +45,16 @@ pub(crate) fn dev_container_up_command(
     command
 }
 
+struct ProcessGroupKillOnDrop {
+    process_group_id: u32,
+}
+
+impl Drop for ProcessGroupKillOnDrop {
+    fn drop(&mut self) {
+        terminate_process_group(self.process_group_id);
+    }
+}
+
 pub(crate) fn terminate_process_group(process_group_id: u32) {
     #[cfg(unix)]
     {
@@ -77,10 +88,10 @@ where
 {
     let mut child = command.spawn()?;
     let process_group_id = child.id();
+    let _kill_group = ProcessGroupKillOnDrop { process_group_id };
     if let Some(cancel) = cancel
         && !cancel.register_process_group(process_group_id)
     {
-        terminate_process_group(process_group_id);
         let _ = child.status().await;
         return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
     }
@@ -98,8 +109,16 @@ where
         terminate_process_group(process_group_id);
         io::Result::Ok(status)
     };
-    let (drain, status): (DevContainerDrain, std::process::ExitStatus) =
-        try_join(drain_fut, status_fut).await?;
+    join_drain_and_status(process_group_id, drain_fut, status_fut).await
+}
+
+async fn join_drain_and_status(
+    process_group_id: u32,
+    drain_fut: impl Future<Output = io::Result<DevContainerDrain>>,
+    status_fut: impl Future<Output = io::Result<std::process::ExitStatus>>,
+) -> io::Result<(DevContainerDrain, bool)> {
+    let _kill_group = ProcessGroupKillOnDrop { process_group_id };
+    let (drain, status) = try_join(drain_fut, status_fut).await?;
     Ok((drain, status.success()))
 }
 
@@ -113,8 +132,8 @@ pub(crate) async fn run_cancellable_process_group_command(
         .kill_on_drop(true);
     let mut child = command.spawn()?;
     let process_group_id = child.id();
+    let _kill_group = ProcessGroupKillOnDrop { process_group_id };
     if !cancel.register_process_group(process_group_id) {
-        terminate_process_group(process_group_id);
         let _ = child.status().await;
         return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
     }
@@ -133,8 +152,7 @@ pub(crate) async fn run_cancellable_process_group_command(
         terminate_process_group(process_group_id);
         io::Result::Ok(status)
     };
-    let (stdout, stderr, status): (Vec<u8>, Vec<u8>, std::process::ExitStatus) =
-        try_join3(stdout_fut, stderr_fut, status_fut).await?;
+    let (stdout, stderr, status) = try_join3(stdout_fut, stderr_fut, status_fut).await?;
     Ok(Output {
         status,
         stdout,

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{DirBuilder, File};
+use std::future::Future;
 use std::mem::MaybeUninit;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
@@ -1309,6 +1310,16 @@ pub trait ProcessGroupCancel: Send + Sync {
     fn is_cancelled(&self) -> bool;
 }
 
+struct StagingProcessGroupKillOnDrop {
+    process_group_id: u32,
+}
+
+impl Drop for StagingProcessGroupKillOnDrop {
+    fn drop(&mut self) {
+        terminate_staging_process_group(self.process_group_id);
+    }
+}
+
 fn terminate_staging_process_group(process_group_id: u32) {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
@@ -1329,6 +1340,18 @@ fn terminate_staging_process_group(process_group_id: u32) {
 
 fn cancelled_staging_error() -> Error {
     Error::msg("cancelled")
+}
+
+async fn join_staging_pipes_and_status(
+    process_group_id: u32,
+    stdout_fut: impl Future<Output = io::Result<Vec<u8>>>,
+    stderr_fut: impl Future<Output = io::Result<Vec<u8>>>,
+    status_fut: impl Future<Output = io::Result<std::process::ExitStatus>>,
+) -> Result<(Vec<u8>, Vec<u8>, std::process::ExitStatus)> {
+    let _kill_group = StagingProcessGroupKillOnDrop { process_group_id };
+    try_join3(stdout_fut, stderr_fut, status_fut)
+        .await
+        .map_err(Error::from)
 }
 
 /// Runs `docker <args>` (or podman, etc. — whatever `docker_path` resolves
@@ -1388,8 +1411,8 @@ async fn run_dev_container_docker_output(
         .kill_on_drop(true);
     let mut child = command.spawn().map_err(Error::from)?;
     let process_group_id = child.id();
+    let _kill_group = StagingProcessGroupKillOnDrop { process_group_id };
     if !cancel.register_process_group(process_group_id) {
-        terminate_staging_process_group(process_group_id);
         let _ = child.status().await;
         return Err(cancelled_staging_error());
     }
@@ -1418,9 +1441,8 @@ async fn run_dev_container_docker_output(
         terminate_staging_process_group(process_group_id);
         io::Result::Ok(status)
     };
-    let (stdout, stderr, status) = try_join3(stdout_fut, stderr_fut, status_fut)
-        .await
-        .map_err(Error::from)?;
+    let (stdout, stderr, status) =
+        join_staging_pipes_and_status(process_group_id, stdout_fut, stderr_fut, status_fut).await?;
     Ok(Output {
         status,
         stdout,

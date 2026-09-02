@@ -26,12 +26,16 @@ impl PaneGroup {
             config_file,
         };
 
-        let existing_pane_id = DevContainerBuildRegistry::handle(ctx).read(ctx, |registry, _| {
-            registry.get(&key).map(|entry| entry.locator.pane_id)
+        let existing_locator = DevContainerBuildRegistry::handle(ctx).read(ctx, |registry, _| {
+            registry.get(&key).map(|entry| entry.locator.clone())
         });
-        if let Some(pane_id) = existing_pane_id {
-            if self.has_pane(pane_id) {
-                self.focus_pane_by_id(pane_id, ctx);
+        if let Some(locator) = existing_locator {
+            if self.has_pane(locator.pane_id) {
+                self.focus_pane_by_id(locator.pane_id, ctx);
+                return;
+            }
+            if locator.is_live(ctx) {
+                locator.focus_in_owner(ctx);
                 return;
             }
             DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
@@ -69,7 +73,11 @@ impl PaneGroup {
         match claim {
             DevContainerBuildClaim::Existing { locator, .. } => {
                 self.close_pane(pane_id, ctx);
-                self.focus_pane_by_id(locator.pane_id, ctx);
+                if self.has_pane(locator.pane_id) {
+                    self.focus_pane_by_id(locator.pane_id, ctx);
+                } else {
+                    locator.focus_in_owner(ctx);
+                }
             }
             DevContainerBuildClaim::Claimed { .. } => {
                 if !self.has_pane(pane_id) {
