@@ -232,7 +232,6 @@ fn exit_waits_until_rejected_in_flight_start_is_reaped() {
         std::thread::yield_now();
     }
     assert!(STATE.lock().exiting, "exit must have committed exiting");
-    std::thread::sleep(Duration::from_millis(100));
     assert!(
         !exit_thread.is_finished(),
         "exit must not return while an in-flight start still holds a child"
@@ -256,6 +255,60 @@ fn exit_waits_until_rejected_in_flight_start_is_reaped() {
             "exit must not return before the rejected child is reaped"
         );
     }
+    reset_state_for_tests();
+}
+
+#[test]
+#[serial]
+fn exit_returns_if_in_flight_init_exceeds_reap_timeout() {
+    reset_state_for_tests();
+
+    let mut child = spawn_long_lived_process();
+    assert!(
+        child
+            .try_wait()
+            .expect("try_wait on a live child")
+            .is_none(),
+        "test setup must have a still-running child"
+    );
+
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let start_thread = std::thread::spawn(move || {
+        init_with_child_stalled_for_tests(child, release_rx);
+    });
+
+    let wait_for_in_flight = instant::Instant::now();
+    while in_flight_inits() == 0 {
+        assert!(
+            wait_for_in_flight.elapsed() < Duration::from_secs(2),
+            "in-flight init never registered"
+        );
+        std::thread::yield_now();
+    }
+
+    let started = instant::Instant::now();
+    uninit_before_exit();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= REAP_TIMEOUT - Duration::from_millis(100),
+        "exit must wait up to the reap bound for a wedged start"
+    );
+    assert!(
+        elapsed < REAP_TIMEOUT + Duration::from_secs(2),
+        "exit must return after the reap bound so the sidecar can drain"
+    );
+    assert!(
+        in_flight_inits() > 0,
+        "timeout must not wait for the stalled start to finish"
+    );
+    assert!(
+        !start_thread.is_finished(),
+        "stalled start must still be holding the child"
+    );
+
+    release_tx.send(()).expect("start thread should be waiting");
+    start_thread.join().expect("start thread should finish");
     reset_state_for_tests();
 }
 

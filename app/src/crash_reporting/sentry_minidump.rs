@@ -68,8 +68,8 @@ impl Drop for InFlightInit {
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How long to wait for the minidump child process to be reaped after `kill()`, before giving
-/// up. Bounds both [`MinidumpGuard::reap_blocking`] and the background reaper spawned by
-/// [`Drop for MinidumpGuard`](Drop), so a wedged child can never hang either path indefinitely.
+/// up. Bounds [`MinidumpGuard::reap_blocking`], background reapers, and the in-flight-init wait
+/// in [`uninit_before_exit`], so a wedged child or start cannot hang exit indefinitely.
 const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Poll interval used while waiting for the minidump child process to be reaped.
@@ -152,14 +152,25 @@ pub fn uninit() {
 /// afterward.
 ///
 /// Also joins any background reapers started by earlier [`uninit`] calls, so a live disable
-/// followed immediately by process exit still reaps within [`REAP_TIMEOUT`]. Waits for any
-/// `init` that has already begun so a rejected start is reaped before this returns.
+/// followed immediately by process exit still reaps within [`REAP_TIMEOUT`]. Waits up to that
+/// same bound for any `init` that has already begun; if start is still wedged afterward, this
+/// returns so the sidecar can drain.
 pub fn uninit_before_exit() {
     let (maybe_guard, reapers) = {
         let mut state = STATE.lock();
         state.exiting = true;
+        let deadline = instant::Instant::now() + REAP_TIMEOUT;
         while state.in_flight_inits > 0 {
-            STATE_CV.wait(&mut state);
+            let now = instant::Instant::now();
+            if now >= deadline {
+                log::warn!("Timed out waiting for in-flight minidump init before exit");
+                break;
+            }
+            let remaining = deadline - now;
+            if STATE_CV.wait_for(&mut state, remaining).timed_out() && state.in_flight_inits > 0 {
+                log::warn!("Timed out waiting for in-flight minidump init before exit");
+                break;
+            }
         }
         (state.guard.take(), std::mem::take(&mut state.reapers))
     };
