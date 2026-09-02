@@ -6,6 +6,9 @@ pub mod block_onboarding;
 pub(crate) mod blocklist_filter;
 mod bookmarks;
 mod context_menu;
+#[cfg(test)]
+#[path = "view/ctrl_r_handoff_tests.rs"]
+mod ctrl_r_handoff_tests;
 pub mod init;
 pub mod inline_banner;
 pub mod load_ai_conversation;
@@ -723,6 +726,12 @@ const WARP_MD_PATH: &str = "WARP.md";
 /// name used in `app/assets/bundled/bootstrap/zsh_body.sh`.
 const EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG: &str = "external_ctrl_r_history";
 
+/// `shell_plugins` tag reported by bootstrap when `^R` is still the shell's built-in incremental
+/// history search (bash Readline / zsh ZLE). Independent of [`EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG`];
+/// bootstrap reports at most one of the two. Must match the tag name used in
+/// `app/assets/bundled/bootstrap/zsh_body.sh`.
+const BUILTIN_CTRL_R_HISTORY_PLUGIN_TAG: &str = "builtin_ctrl_r_history";
+
 /// `shell_plugins` tag reported by bootstrap when the shell's `^T` binding has been rebound away
 /// from its default line-editor binding to an external file-search widget (e.g. fzf). Independent
 /// of [`EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG`] -- a shell can have either, both, or neither, since
@@ -735,10 +744,48 @@ const EXTERNAL_CTRL_T_FILE_PLUGIN_TAG: &str = "external_ctrl_t_file";
 /// `app/assets/bundled/bootstrap/zsh_body.sh`.
 const EXTERNAL_CTRL_R_HELPER_COMMAND: &str = "warp_run_external_ctrl_r_widget";
 
+/// Name of the bootstrap-installed shell function invoked to hand ctrl-r off to bash/zsh built-in
+/// incremental history search. Must match the function name defined in
+/// `app/assets/bundled/bootstrap/zsh_body.sh`.
+const BUILTIN_CTRL_R_HELPER_COMMAND: &str = "warp_run_builtin_ctrl_r_widget";
+
 /// Name of the bootstrap-installed shell function invoked to hand ctrl-t off to the shell's own
 /// external file-search widget. Must match the function name defined in
 /// `app/assets/bundled/bootstrap/zsh_body.sh`.
 const EXTERNAL_CTRL_T_HELPER_COMMAND: &str = "warp_run_external_ctrl_t_widget";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CtrlRHistoryHandoffKind {
+    External,
+    Builtin,
+}
+
+fn ctrl_r_history_handoff_kind(
+    plugins: &HashSet<String>,
+    shell_type: ShellType,
+) -> Option<CtrlRHistoryHandoffKind> {
+    if FeatureFlag::ShellWidgetHandoff.is_enabled()
+        && plugins.contains(EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG)
+    {
+        return Some(CtrlRHistoryHandoffKind::External);
+    }
+    if FeatureFlag::BuiltinShellHistoryHandoff.is_enabled()
+        && plugins.contains(BUILTIN_CTRL_R_HISTORY_PLUGIN_TAG)
+        && matches!(shell_type, ShellType::Bash | ShellType::Zsh)
+    {
+        return Some(CtrlRHistoryHandoffKind::Builtin);
+    }
+    None
+}
+
+fn builtin_ctrl_r_helper_command(draft: &str) -> String {
+    let first_line = draft.split('\n').next().unwrap_or(draft);
+    format!(
+        "{} {}",
+        BUILTIN_CTRL_R_HELPER_COMMAND,
+        hex::encode(first_line.as_bytes())
+    )
+}
 
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_CONTEXT_KEY: &str = "LongRunningRequestedCommand";
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_USER_TOOK_OVER_CONTEXT_KEY: &str =
@@ -9218,7 +9265,9 @@ impl TerminalView {
     /// If ctrl-r was pressed at an idle prompt on a session whose shell has rebound `^R` away
     /// from its default reverse-history-search widget (reported via the
     /// [`EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG`] shell plugin tag, e.g. by fzf or atuin), hands the
-    /// keypress off to that widget instead of opening Warp's own command search.
+    /// keypress off to that widget instead of opening Warp's own command search. If that tag is
+    /// absent and [`BUILTIN_CTRL_R_HISTORY_PLUGIN_TAG`] is present, hands off to bash/zsh built-in
+    /// incremental history search when [`FeatureFlag::BuiltinShellHistoryHandoff`] is enabled.
     ///
     /// Returns `true` if the handoff was triggered, in which case the caller should not open
     /// Warp's command search.
@@ -9226,34 +9275,47 @@ impl TerminalView {
         &mut self,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
-        if !FeatureFlag::ShellWidgetHandoff.is_enabled() || self.is_long_running() {
+        if self.is_long_running() {
             return false;
         }
         let Some(session_id) = self.active_block_session_id() else {
             return false;
         };
-        let has_external_ctrl_r_widget =
-            self.sessions
-                .as_ref(ctx)
-                .get(session_id)
-                .is_some_and(|session| {
-                    session
-                        .shell()
-                        .plugins()
-                        .contains(EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG)
-                });
-        if !has_external_ctrl_r_widget || self.model.lock().is_alt_screen_active() {
+        let Some(handoff_kind) = self
+            .sessions
+            .as_ref(ctx)
+            .get(session_id)
+            .and_then(|session| {
+                ctrl_r_history_handoff_kind(session.shell().plugins(), session.shell().shell_type())
+            })
+        else {
+            return false;
+        };
+        if self.model.lock().is_alt_screen_active() {
             return false;
         }
-
-        self.input.update(ctx, |input, ctx| {
-            input.trigger_external_shell_widget_handoff(
-                EXTERNAL_CTRL_R_HELPER_COMMAND,
-                ShellWidgetApplyMode::Replace,
-                false, /* capture_cursor */
-                ctx,
-            )
-        })
+        match handoff_kind {
+            CtrlRHistoryHandoffKind::External => self.input.update(ctx, |input, ctx| {
+                input.trigger_external_shell_widget_handoff(
+                    EXTERNAL_CTRL_R_HELPER_COMMAND,
+                    ShellWidgetApplyMode::Replace,
+                    false, /* capture_cursor */
+                    ctx,
+                )
+            }),
+            CtrlRHistoryHandoffKind::Builtin => {
+                let draft = self.input.read(ctx, |input, ctx| input.buffer_text(ctx));
+                let helper = builtin_ctrl_r_helper_command(&draft);
+                self.input.update(ctx, |input, ctx| {
+                    input.trigger_external_shell_widget_handoff(
+                        &helper,
+                        ShellWidgetApplyMode::Replace,
+                        false, /* capture_cursor */
+                        ctx,
+                    )
+                })
+            }
+        }
     }
 
     /// If ctrl-t was pressed at an idle prompt on a session whose shell has rebound `^T` to an
@@ -12994,7 +13056,8 @@ impl TerminalView {
                 }
             }
             ModelEvent::ExternalShellWidgetSelection(data) => {
-                if FeatureFlag::ShellWidgetHandoff.is_enabled()
+                if (FeatureFlag::ShellWidgetHandoff.is_enabled()
+                    || FeatureFlag::BuiltinShellHistoryHandoff.is_enabled())
                     && let Some(session_id) = data.session_id.map(SessionId::from)
                 {
                     self.input.update(ctx, |input, _ctx| {

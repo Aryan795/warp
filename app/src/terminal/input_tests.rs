@@ -2230,6 +2230,50 @@ fn ctrl_t_apply_mode_forks_between_splice_and_replace_for_the_same_draft() {
 }
 
 #[test]
+fn builtin_ctrl_r_helper_starts_a_replace_handoff() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let terminal = add_window_with_bootstrapped_terminal(&mut app, None, None).await;
+        let input = terminal.read(&app, |view, _| view.input().clone());
+
+        input.update(&mut app, |input, ctx| {
+            input.replace_buffer_content("draft", ctx);
+        });
+
+        let started = input.update(&mut app, |input, ctx| {
+            input.trigger_external_shell_widget_handoff(
+                "warp_run_builtin_ctrl_r_widget 6472616674",
+                ShellWidgetApplyMode::Replace,
+                false,
+                ctx,
+            )
+        });
+        assert!(started, "the builtin handoff command should have started");
+
+        input.read(&app, |input, _ctx| {
+            let handoff = input
+                .pending_shell_widget_handoff
+                .as_ref()
+                .expect("pending handoff should be recorded");
+            assert_eq!(handoff.apply_mode, ShellWidgetApplyMode::Replace);
+            assert_eq!(handoff.original_buffer, "draft");
+            assert_eq!(handoff.selection, None);
+        });
+    });
+}
+
+#[test]
+fn builtin_shell_history_handoff_flag_is_disabled_by_default() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        assert!(
+            !FeatureFlag::BuiltinShellHistoryHandoff.is_enabled(),
+            "BuiltinShellHistoryHandoff must default to disabled in the test harness"
+        );
+    });
+}
+
+#[test]
 fn ctrl_t_binding_is_ineligible_when_shell_widget_handoff_flag_is_disabled() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);

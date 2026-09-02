@@ -103,3 +103,56 @@ fn split_kill_buffer_write_returns_none_when_the_kill_buffer_is_not_the_prefix()
     assert!(!not_prefixed.starts_with(kill_buffer));
     assert!(split_kill_buffer_write(&not_prefixed, ShellType::PowerShell).is_none());
 }
+
+#[test]
+fn bash_builtin_ctrl_r_helper_queues_ctrl_r_after_enter() {
+    let command = " warp_run_builtin_ctrl_r_widget 67697420737461747573";
+
+    let bytes = bytes_to_execute_command(command, ShellType::Bash, false);
+
+    let mut expected = ShellType::Bash.kill_buffer_bytes().to_vec();
+    expected.extend_from_slice(command.as_bytes());
+    expected.extend_from_slice(ShellType::Bash.execute_command_bytes());
+    expected.push(escape_sequences::C0::DC2);
+    assert_eq!(bytes, expected);
+    assert_eq!(*bytes.last().unwrap(), escape_sequences::C0::DC2);
+    assert_ne!(
+        bytes[bytes.len() - 2],
+        escape_sequences::C0::DC2,
+        "Ctrl-R must follow execute_command_bytes, not precede them"
+    );
+}
+
+#[test]
+fn zsh_builtin_ctrl_r_helper_does_not_queue_ctrl_r() {
+    let command = " warp_run_builtin_ctrl_r_widget 67697420737461747573";
+
+    let bytes = bytes_to_execute_command(command, ShellType::Zsh, false);
+
+    let mut expected = ShellType::Zsh.kill_buffer_bytes().to_vec();
+    expected.extend_from_slice(command.as_bytes());
+    expected.extend_from_slice(ShellType::Zsh.execute_command_bytes());
+    assert_eq!(bytes, expected);
+    assert!(!bytes.contains(&escape_sequences::C0::DC2));
+}
+
+#[test]
+fn external_ctrl_r_helper_does_not_queue_ctrl_r() {
+    let command = " warp_run_external_ctrl_r_widget";
+
+    let bytes = bytes_to_execute_command(command, ShellType::Bash, false);
+
+    assert!(
+        !bytes.contains(&escape_sequences::C0::DC2),
+        "fzf/atuin handoff must not receive a queued Ctrl-R"
+    );
+}
+
+#[test]
+fn builtin_ctrl_r_helper_name_does_not_match_a_prefix_of_another_command() {
+    let command = " warp_run_builtin_ctrl_r_widget_extra";
+
+    let bytes = bytes_to_execute_command(command, ShellType::Bash, false);
+
+    assert!(!bytes.contains(&escape_sequences::C0::DC2));
+}

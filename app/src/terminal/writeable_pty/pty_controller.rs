@@ -32,6 +32,8 @@ use crate::terminal::{SizeUpdate, TerminalModel, bootstrap};
 
 /// Byte sequence to emulate the user pressing ENTER, used to execute a command in the shell.
 const COMMAND_ENTER: &[u8] = &[escape_sequences::C0::CR, escape_sequences::C0::LF];
+/// Must match the bootstrap function in `bash_body.sh` / `zsh_body.sh`.
+const BUILTIN_CTRL_R_HELPER_COMMAND: &str = "warp_run_builtin_ctrl_r_widget";
 /// Used to let the shell know we are switching to the PS1 prompt via a bindkey \ep. This will
 /// restore the PS1 from the saved PS1 value (we had unset the PS1 for Warp prompt).
 const SWITCH_TO_PS1_ESCAPE_SEQUENCE: &[u8] = &[escape_sequences::C0::ESC, b'p'];
@@ -823,7 +825,26 @@ fn bytes_to_execute_command(
         command_bytes.extend(command_without_escapes.as_bytes());
     }
     command_bytes.extend(shell_type.execute_command_bytes().to_vec());
+    command_bytes.extend(queued_followup_bytes_after_command(&command, shell_type));
     command_bytes
+}
+
+/// Bash `read -e` only consumes reverse-i-search once Readline is active, so Ctrl-R must follow
+/// the helper command's Enter rather than being included in the command text.
+fn queued_followup_bytes_after_command(command: &str, shell_type: ShellType) -> &'static [u8] {
+    if shell_type == ShellType::Bash && command_invokes_builtin_ctrl_r_helper(command) {
+        &[escape_sequences::C0::DC2]
+    } else {
+        &[]
+    }
+}
+
+fn command_invokes_builtin_ctrl_r_helper(command: &str) -> bool {
+    let rest = command.trim_start();
+    rest == BUILTIN_CTRL_R_HELPER_COMMAND
+        || rest
+            .strip_prefix(BUILTIN_CTRL_R_HELPER_COMMAND)
+            .is_some_and(|suffix| suffix.starts_with(|c: char| c.is_ascii_whitespace()))
 }
 
 /// Returns a vector containing the given `bytes` wrapped in bracketed paste start and end

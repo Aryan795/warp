@@ -990,6 +990,9 @@ pub enum FeatureFlag {
     /// fuzzy-match score against the whole query as a single pattern. Disabling this is a full
     /// return to the pre-APP-5650 history search behavior, not an approximation of it.
     HistorySearchRankingV2,
+
+    /// Hands Ctrl-R to bash Readline / zsh ZLE incremental history search.
+    BuiltinShellHistoryHandoff,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =

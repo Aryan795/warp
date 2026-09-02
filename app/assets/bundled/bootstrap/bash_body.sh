@@ -993,6 +993,20 @@ if [ -z "$WARP_BOOTSTRAPPED" ]; then
         warp_send_json_message "{ \"hook\": \"ExternalShellWidgetSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
     }
 
+    # Re-enters Readline with the Warp draft so built-in reverse-i-search can run. Warp queues
+    # Ctrl-R after this command's Enter; `read -e` does not add the result to history.
+    warp_run_builtin_ctrl_r_widget () {
+        local result=""
+        local draft=""
+        if [ -n "$1" ]; then
+            draft="$(warp_hex_decode_string "$1")"
+            draft="${draft%%$'\n'*}"
+        fi
+        IFS= read -r -e -i "$draft" result
+        local warp_escaped_selection="$(warp_escape_json "$result")"
+        warp_send_json_message "{ \"hook\": \"ExternalShellWidgetSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
+    }
+
     # Runs the shell's own ctrl-t file-search widget as a foreground command.
     warp_run_external_ctrl_t_widget () {
         local result=""
@@ -1446,9 +1460,9 @@ esac
     # HISTIGNORE value which may been set in an RC file sourced above. It is important to
     # ensure that this happens _after_ the user's RC files have been sourced.
     if [[ ! -z $HISTIGNORE ]]; then
-        HISTIGNORE="*warp_run_generator_command*:*warp_run_external_ctrl_r_widget*:*warp_run_external_ctrl_t_widget*:$HISTIGNORE"
+        HISTIGNORE="*warp_run_generator_command*:*warp_run_external_ctrl_r_widget*:*warp_run_builtin_ctrl_r_widget*:*warp_run_external_ctrl_t_widget*:$HISTIGNORE"
     else
-        HISTIGNORE="*warp_run_generator_command*:*warp_run_external_ctrl_r_widget*:*warp_run_external_ctrl_t_widget*"
+        HISTIGNORE="*warp_run_generator_command*:*warp_run_external_ctrl_r_widget*:*warp_run_builtin_ctrl_r_widget*:*warp_run_external_ctrl_t_widget*"
     fi
 
     # If the user has PROMPT_COMMAND set in their bootstrap scripts,
@@ -1581,6 +1595,16 @@ esac
         declare -F __atuin_history >/dev/null; then
         _WARP_EXTERNAL_CTRL_R_WIDGET="__atuin_history"
         shell_plugins+=(external_ctrl_r_history)
+      fi
+
+      # `read -e -i` needs bash >= 4.0; skip the built-in path on older bash (including macOS 3.2).
+      if [ -z "$_WARP_EXTERNAL_CTRL_R_WIDGET" ] && [ "$(warp_at_least_bash_version "4.0")" = "1" ]; then
+        warp_ctrl_r_readline="$(bind -p 2>/dev/null | command -p sed -n 's/^"\\C-r": //p')"
+        case "$warp_ctrl_r_readline" in
+          reverse-search-history)
+            shell_plugins+=(builtin_ctrl_r_history)
+            ;;
+        esac
       fi
 
       _WARP_EXTERNAL_CTRL_T_WIDGET=""

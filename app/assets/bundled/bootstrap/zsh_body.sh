@@ -736,6 +736,25 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
     warp_send_json_message "{ \"hook\": \"ExternalShellWidgetSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
   }
 
+  # Re-enters ZLE with history (`vared -h`) and starts the bound incremental search widget
+  # from an init widget, so Warp does not need to queue a Ctrl-R byte.
+  function warp_run_builtin_ctrl_r_widget () {
+    local result=""
+    local draft=""
+    if [[ -n "$1" ]]; then
+      draft="$(warp_hex_decode_string "$1")"
+      draft="${draft%%$'\n'*}"
+    fi
+    result="$draft"
+    function warp_builtin_history_search_init {
+      zle "${_WARP_BUILTIN_CTRL_R_WIDGET:-history-incremental-search-backward}"
+    }
+    zle -N warp_builtin_history_search_init
+    vared -h -i warp_builtin_history_search_init result
+    local warp_escaped_selection="$(warp_escape_json "$result")"
+    warp_send_json_message "{ \"hook\": \"ExternalShellWidgetSelection\", \"value\": { \"buffer\": \"$warp_escaped_selection\", \"session_id\": $WARP_SESSION_ID } }"
+  }
+
   # Runs the shell's own ctrl-t file-search widget as a foreground command.
   function warp_run_external_ctrl_t_widget () {
     local result=""
@@ -1322,6 +1341,7 @@ esac
   # on the zshaddhistory hook.
   _warp_zshaddhistory() {
     _is_warp_generator_command "$1" && [[ "$1" != *"warp_run_external_ctrl_r_widget"* ]] && \
+      [[ "$1" != *"warp_run_builtin_ctrl_r_widget"* ]] && \
       [[ "$1" != *"warp_run_external_ctrl_t_widget"* ]]
   }
 
@@ -1398,6 +1418,7 @@ esac
 
   # Detect whether ctrl-r has been rebound to fzf's or atuin's history widget.
   _WARP_EXTERNAL_CTRL_R_WIDGET=""
+  _WARP_BUILTIN_CTRL_R_WIDGET=""
   warp_ctrl_r_binding="$(bindkey -M main '^R' 2>/dev/null)"
   if [[ "$warp_ctrl_r_binding" == '"^R" '* ]]; then
     warp_ctrl_r_widget="${warp_ctrl_r_binding#\"^R\" }"
@@ -1405,6 +1426,10 @@ esac
       fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
         _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
         shell_plugins+=(external_ctrl_r_history)
+        ;;
+      history-incremental-search-backward|history-incremental-pattern-search-backward)
+        _WARP_BUILTIN_CTRL_R_WIDGET="$warp_ctrl_r_widget"
+        shell_plugins+=(builtin_ctrl_r_history)
         ;;
     esac
   fi
