@@ -14,6 +14,7 @@ pub(crate) use super::kill::ProcessGroupKillOnDrop;
 pub(crate) use super::kill::take_process_group_terminations;
 use super::newline::NewlineNormalizer;
 use super::operation::DevContainerBuildCancel;
+use super::progress::ProgressCollapser;
 
 pub(crate) const STDOUT_LIMIT: usize = 1024 * 1024;
 const STDERR_TAIL_LIMIT: usize = 8 * 1024;
@@ -197,6 +198,7 @@ where
     F: FnMut(&[u8]),
 {
     let mut buf = [0_u8; 8192];
+    let mut collapser = ProgressCollapser::new();
     let mut normalizer = NewlineNormalizer::new();
     let mut stderr_tail = Vec::new();
     loop {
@@ -205,14 +207,32 @@ where
             break;
         }
         append_bounded_tail(&mut stderr_tail, &buf[..n]);
-        let normalized = normalizer.push(&buf[..n]);
+        let collapsed = collapser.push(&buf[..n]);
+        let normalized = normalizer.push(&collapsed);
         (on_stderr.lock())(&normalized);
     }
-    let trailing = normalizer.finish();
+    let collapsed = collapser.finish();
+    let mut trailing = normalizer.push(&collapsed);
+    trailing.extend(normalizer.finish());
     if !trailing.is_empty() {
         (on_stderr.lock())(&trailing);
     }
     Ok(stderr_tail)
+}
+
+#[cfg(test)]
+pub(crate) fn transform_dev_container_stderr(chunks: &[&[u8]]) -> Vec<u8> {
+    let mut collapser = ProgressCollapser::new();
+    let mut normalizer = NewlineNormalizer::new();
+    let mut out = Vec::new();
+    for chunk in chunks {
+        let collapsed = collapser.push(chunk);
+        out.extend(normalizer.push(&collapsed));
+    }
+    let collapsed = collapser.finish();
+    out.extend(normalizer.push(&collapsed));
+    out.extend(normalizer.finish());
+    out
 }
 
 fn append_bounded_tail(tail: &mut Vec<u8>, chunk: &[u8]) {

@@ -14,6 +14,8 @@ mod newline;
 #[cfg(feature = "local_tty")]
 pub(crate) mod operation;
 #[cfg(feature = "local_tty")]
+mod progress;
+#[cfg(feature = "local_tty")]
 pub(crate) mod registry;
 #[cfg(feature = "local_tty")]
 mod stream;

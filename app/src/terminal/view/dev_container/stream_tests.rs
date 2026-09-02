@@ -4,9 +4,14 @@ use std::sync::{Arc, Mutex};
 
 use futures_lite::future::block_on;
 use warp_terminal::model::ansi::Processor;
+use warpui::r#async::executor::Background;
 
 use super::{STDOUT_LIMIT, drain_dev_container_pipes};
+use crate::terminal::SizeInfo;
+use crate::terminal::color::{self, Colors};
+use crate::terminal::event_listener::ChannelEventListener;
 use crate::terminal::model::terminal_model::TerminalModel;
+use crate::terminal::model::test_utils::block_size;
 use crate::terminal::view::dev_container::newline::NewlineNormalizer;
 
 #[test]
@@ -388,6 +393,63 @@ fn failure_details_with_bare_lf_render_left_aligned() {
             "failure details must start at column 0, got {line:?}"
         );
     }
+}
+
+fn wide_terminal_model() -> TerminalModel {
+    let mut sizes = block_size();
+    sizes.size = SizeInfo::new_without_font_metrics(24, 160);
+    TerminalModel::new_for_test(
+        sizes,
+        color::List::from(&Colors::default()),
+        ChannelEventListener::new_for_test(),
+        Arc::new(Background::default()),
+        false,
+        None,
+        false,
+        false,
+        None,
+    )
+}
+
+#[test]
+fn superseded_progress_snapshots_do_not_accumulate_in_the_grid() {
+    let mut model = wide_terminal_model();
+    model.start_commandless_output_block();
+    let mut processor = Processor::new();
+    let bytes = super::transform_dev_container_stderr(&[
+        b"[cli] @devcontainers/cli 0.89.0\n",
+        b"[2026-09-02T00:43:15.960Z] #15 extracting sha256:abc 1.5MB / 52.40MB\n",
+        b"[2026-09-02T00:43:16.100Z] #15 extracting sha256:abc 4.6MB / 52.40MB\n",
+        b"[2026-09-02T00:43:16.400Z] #15 extracting sha256:abc 52.40MB / 52.40MB\n",
+        b"[2026-09-02T00:43:16.500Z] #15 DONE 2.1s\n",
+    ]);
+    processor.parse_bytes(&mut model, &bytes, &mut io::sink());
+    let output = model
+        .block_list()
+        .active_block()
+        .output_grid()
+        .contents_to_string(false, None);
+    assert!(
+        output.contains("@devcontainers/cli 0.89.0"),
+        "ordinary logs must remain, got {output:?}"
+    );
+    assert!(
+        output.contains("#15 DONE 2.1s"),
+        "completed vertex lines must remain, got {output:?}"
+    );
+    let extracting_lines = output
+        .lines()
+        .filter(|line| line.contains("extracting sha256:abc"))
+        .count();
+    assert_eq!(
+        extracting_lines, 1,
+        "superseded progress snapshots must not accumulate, got {output:?}"
+    );
+    assert!(
+        !output.contains("1.5MB"),
+        "overwritten snapshots must not linger, got {output:?}"
+    );
+    assert!(output.contains("52.40MB / 52.40MB"));
 }
 
 #[test]
