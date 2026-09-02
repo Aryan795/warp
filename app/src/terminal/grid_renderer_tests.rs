@@ -439,10 +439,9 @@ fn scene_glyph_count(hide_cursor_cell: bool, use_ligature_rendering: bool) -> us
     })
 }
 
-#[test]
-fn paints_glyph_at_hidden_pty_cursor_cell_without_ligatures() {
-    let hidden = scene_glyph_count(true, false);
-    let shown = scene_glyph_count(false, false);
+fn assert_hidden_cursor_cell_glyph_is_painted(use_ligature_rendering: bool) {
+    let hidden = scene_glyph_count(true, use_ligature_rendering);
+    let shown = scene_glyph_count(false, use_ligature_rendering);
     assert_eq!(
         hidden, shown,
         "hiding the Warp cursor overlay must still paint the PTY glyph under the cursor"
@@ -454,6 +453,11 @@ fn paints_glyph_at_hidden_pty_cursor_cell_without_ligatures() {
 }
 
 #[test]
-fn paints_hidden_pty_cursor_cell_with_ligatures_without_panicking() {
-    let _ = scene_glyph_count(true, true);
+fn paints_glyph_at_hidden_pty_cursor_cell_without_ligatures() {
+    assert_hidden_cursor_cell_glyph_is_painted(false);
+}
+
+#[test]
+fn paints_glyph_at_hidden_pty_cursor_cell_with_ligatures() {
+    assert_hidden_cursor_cell_glyph_is_painted(true);
 }

@@ -1504,6 +1504,22 @@ fn paint_line(
     character_index_to_cell_map: &[usize],
     scene: &mut Scene,
 ) {
+    #[cfg(test)]
+    if line.runs.is_empty() {
+        // The unit-test FontDB returns empty line layouts, so ligature tests would not observe a
+        // skipped cursor cell without a stand-in glyph per mapped cell.
+        for &col in character_index_to_cell_map {
+            scene.draw_glyph(
+                baseline + vec2f(col as f32 * cell_width, 0.),
+                0,
+                FontId(0),
+                line.font_size,
+                ColorU::white(),
+            );
+        }
+        return;
+    }
+
     for run in &line.runs {
         let glyph_color = run.styles.foreground_color.unwrap_or_default();
 
