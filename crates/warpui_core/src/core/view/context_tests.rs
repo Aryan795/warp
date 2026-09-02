@@ -1,6 +1,6 @@
 use crate::elements::Empty;
 use crate::platform::WindowStyle;
-use crate::{App, AppContext, Element, Entity, TypedActionView};
+use crate::{App, AppContext, Effect, Element, Entity, EntityId, TypedActionView};
 
 #[test]
 fn test_spawn_from_view() {
@@ -192,6 +192,109 @@ fn test_view_spawner() {
 
         handle.read(&app, |view, _| {
             assert!(view.count > 42);
+        });
+    });
+}
+
+#[derive(Default)]
+struct NotifyView;
+
+impl Entity for NotifyView {
+    type Event = ();
+}
+
+impl super::View for NotifyView {
+    fn render<'a>(&self, _: &AppContext) -> Box<dyn Element> {
+        Empty::new().finish()
+    }
+
+    fn ui_name() -> &'static str {
+        "NotifyView"
+    }
+}
+
+impl TypedActionView for NotifyView {
+    type Action = ();
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PendingKind {
+    ViewNotification(EntityId),
+    Event(EntityId),
+    Other,
+}
+
+fn pending_kinds(ctx: &AppContext) -> Vec<PendingKind> {
+    ctx.pending_effects
+        .iter()
+        .map(|effect| match effect {
+            Effect::ViewNotification { view_id, .. } => PendingKind::ViewNotification(*view_id),
+            Effect::Event { entity_id, .. } => PendingKind::Event(*entity_id),
+            _ => PendingKind::Other,
+        })
+        .collect()
+}
+
+#[test]
+fn coalesces_consecutive_view_notifications_for_the_same_view() {
+    App::test((), |mut app| async move {
+        let (_, handle) = app.add_window(WindowStyle::NotStealFocus, |_| NotifyView);
+
+        handle.update(&mut app, |_, ctx| {
+            ctx.notify();
+            ctx.notify();
+            ctx.notify();
+
+            assert_eq!(
+                pending_kinds(ctx),
+                vec![PendingKind::ViewNotification(ctx.view_id())]
+            );
+        });
+    });
+}
+
+#[test]
+fn keeps_consecutive_view_notifications_for_different_views() {
+    App::test((), |mut app| async move {
+        let (window_id, root) = app.add_window(WindowStyle::NotStealFocus, |_| NotifyView);
+        let child = app.add_view(window_id, |_| NotifyView);
+        let root_id = root.id();
+        let child_id = child.id();
+
+        app.update(|ctx| {
+            root.update(ctx, |_, vctx| vctx.notify());
+            child.update(ctx, |_, vctx| vctx.notify());
+
+            assert_eq!(
+                pending_kinds(ctx),
+                vec![
+                    PendingKind::ViewNotification(root_id),
+                    PendingKind::ViewNotification(child_id),
+                ]
+            );
+        });
+    });
+}
+
+#[test]
+fn keeps_same_view_notifications_separated_by_another_effect() {
+    App::test((), |mut app| async move {
+        let (_, handle) = app.add_window(WindowStyle::NotStealFocus, |_| NotifyView);
+
+        handle.update(&mut app, |_, ctx| {
+            let view_id = ctx.view_id();
+            ctx.notify();
+            ctx.emit(());
+            ctx.notify();
+
+            assert_eq!(
+                pending_kinds(ctx),
+                vec![
+                    PendingKind::ViewNotification(view_id),
+                    PendingKind::Event(view_id),
+                    PendingKind::ViewNotification(view_id),
+                ]
+            );
         });
     });
 }

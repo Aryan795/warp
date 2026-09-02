@@ -459,12 +459,22 @@ impl<'a, T: Entity> ViewContext<'a, T> {
     /// have `ctx.notify()` called on the child's `ViewContext` in order for the
     /// child to be re-rendered.
     pub fn notify(&mut self) {
+        // If the last effect is already a view notification for this view, don't add another one.
+        if let Some(Effect::ViewNotification { window_id, view_id }) =
+            self.app.pending_effects.back()
+            && *window_id == self.window_id
+            && *view_id == self.view_id
+        {
+            return;
+        }
+
         self.app
             .pending_effects
             .push_back(Effect::ViewNotification {
                 window_id: self.window_id,
                 view_id: self.view_id,
             });
+        self.app.report_if_pending_effects_unusually_large();
     }
 
     /// Requests permissions to send desktop notifications. The `on_completion callback` can be invoked to
