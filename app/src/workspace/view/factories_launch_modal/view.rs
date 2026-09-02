@@ -23,6 +23,9 @@ use crate::view_components::action_button::{
 /// `openwarp_launch_modal`, Warp's other two centered launch modals.
 const MODAL_WIDTH: f32 = 420.;
 const HERO_HEIGHT: f32 = 92.;
+// Interim placeholder: this asset is sized for the old 340x110 popover card
+// and gets cropped to fit here via `cover()`. Swap in a 420x92-native asset
+// (840x184 at 2x) once one is designed for this modal.
 const HERO_IMAGE_PATH: &str = "async/png/onboarding/factories_launch_intro_banner.png";
 const OFFER_TEXT: &str =
     "Get hands-on implementation support and up to $10K in Factory usage during Early Access.";
@@ -30,8 +33,8 @@ const OFFER_EMPHASIS: &str = "up to $10K";
 
 /// The stable key used to record that the Factories launch modal has been
 /// seen, via `AISettings::{is_feature_intro_seen, mark_feature_intro_seen}`.
-/// Kept identical to this modal's former key as a `FEATURE_INTROS` entry, so
-/// "seen" state persists across the move to its own dedicated modal.
+/// Must not change: it is a persisted, globally-synced identifier, and
+/// changing it would let already-shown users see the modal again.
 pub const FACTORIES_LAUNCH_SEEN_KEY: &str = "factories_launch";
 
 struct HowItWorksItem {

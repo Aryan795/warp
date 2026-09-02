@@ -401,10 +401,10 @@ impl OneTimeModalModel {
         self.is_factories_launch_modal_open && self.target_window_id.is_some()
     }
 
-    /// This modal occupies the priority slot the shared feature-intro engine
-    /// used to hold on its behalf, so its dismissal resumes the same later
-    /// checks (HOA onboarding, then build-plan migration) that dismissing
-    /// that slot used to reach via `resume_modal_checks_after_feature_intro`.
+    /// Dismissing this modal advances the queue to the checks that follow it
+    /// in `check_and_trigger_all_modals` (HOA onboarding, then build-plan
+    /// migration), mirroring how the other launch modals advance to the next
+    /// step on their own dismissal.
     pub fn mark_factories_launch_modal_dismissed(&mut self, ctx: &mut ModelContext<Self>) {
         if !self.set_factories_launch_modal_open(false, ctx) {
             return;
