@@ -1063,8 +1063,8 @@ fn command_execution_stats_pwd_known_count_excludes_pwd_less_executions() {
             workflow_command: None,
             is_agent_executed: false,
         };
-        // One persisted execution has a recorded pwd, one doesn't -- e.g. a history-file row with
-        // no matching sqlite record.
+        // One execution has no recorded pwd (e.g. a history-file row with no matching sqlite
+        // record).
         let persisted_commands = vec![
             persisted_command(0, Some("/home/user/project")),
             persisted_command(1, None),
@@ -1080,7 +1080,6 @@ fn command_execution_stats_pwd_known_count_excludes_pwd_less_executions() {
         )
         .await;
 
-        // A live execution with no pwd, too.
         history_handle.update(&mut app, |history, _ctx| {
             history.append_commands(
                 session.id(),

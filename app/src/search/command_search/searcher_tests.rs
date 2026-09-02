@@ -284,13 +284,16 @@ fn history_data_source_reflects_live_execution_frequency() {
             entry
         };
 
+        // Repeated executions of the same command dedupe to a single visible entry (see
+        // `History::commands`), with the repeat count folded into its execution stats. The
+        // 20-execution command is appended (and so occupies the tiebreak-losing position) before
+        // the single-execution one, so a tie would rank it *below* -- only a real frequency
+        // contribution can move it above.
         history_handle.update(&mut app, |history, _ctx| {
-            history.append_commands(session_id, vec![make_entry("npm run flag")]);
-            // Repeated executions of the same command dedupe to a single visible entry (see
-            // `History::commands`), with the repeat count folded into its execution stats.
             for _ in 0..20 {
                 history.append_commands(session_id, vec![make_entry("npm run flap")]);
             }
+            history.append_commands(session_id, vec![make_entry("npm run flag")]);
         });
 
         let mixer = app.add_model(|_| CommandSearchMixer::new());
@@ -325,9 +328,10 @@ fn history_data_source_reflects_live_execution_frequency() {
                         linked_workflow_data: None,
                     })) if command == "npm run flap"
                 ),
-                "the command run 20 times should outrank the one run once, proving the \
-                 frequency prior is wired through `history_data_source_for_session`'s live \
-                 `command_execution_stats` lookup, not just the `rank.rs` formula in isolation"
+                "the command run 20 times should outrank the one run once despite an \
+                 unfavorable tiebreak, proving the frequency prior is wired through \
+                 `history_data_source_for_session`'s live `command_execution_stats` lookup, not \
+                 just the `rank.rs` formula in isolation"
             );
         });
     });

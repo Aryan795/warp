@@ -179,11 +179,7 @@ struct CommandHistorySummary {
     /// aren't counted here, so `count_by_cwd.values().sum() <= total_count`.
     count_by_cwd: HashMap<String, u32>,
 
-    /// Cached `count_by_cwd.values().sum()`, kept in lockstep by `new`/`record_additional_execution`
-    /// rather than summed on every read: `command_execution_stats` is called once per visible
-    /// candidate from the main-thread snapshot callback in `history_data_source_for_session`, so
-    /// summing `count_by_cwd` there on every call would turn snapshot construction from
-    /// O(history entries) into O(sum of distinct directories across every command).
+    /// Cached number of executions with a recorded directory, avoiding per-query aggregation.
     pwd_known_count: u32,
 }
 
