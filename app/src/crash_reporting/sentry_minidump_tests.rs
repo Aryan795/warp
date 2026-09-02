@@ -138,6 +138,38 @@ fn uninit_sentry_then_before_exit_joins_reaper_after_live_disable() {
     reset_state_for_tests();
 }
 
+#[test]
+#[serial]
+fn duplicate_init_does_not_deadlock() {
+    reset_state_for_tests();
+
+    init();
+    let installed = has_guard();
+    init();
+
+    assert_eq!(
+        has_guard(),
+        installed,
+        "a second init must not replace or drop an existing guard"
+    );
+    reset_state_for_tests();
+}
+
+#[test]
+#[serial]
+fn init_after_exit_does_not_install_a_guard() {
+    reset_state_for_tests();
+
+    uninit_before_exit();
+    init();
+
+    assert!(
+        !has_guard(),
+        "init after exit drain must not spawn a child that will not be joined"
+    );
+    reset_state_for_tests();
+}
+
 fn spawn_short_lived_process() -> process::Child {
     #[cfg(unix)]
     let mut command = Command::new("true");

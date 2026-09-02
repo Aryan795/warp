@@ -60,17 +60,37 @@ const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 const REAP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Initialize the minidump reporter.
+///
+/// Idempotent: a second call while a guard is already installed is a no-op, so we never drop
+/// an existing guard while holding the shared state mutex. After [`uninit_before_exit`], further
+/// inits are rejected so a privacy re-enable cannot spawn a child the exit drain will not join.
 pub fn init() {
-    let mut state = STATE.lock();
-
-    match MinidumpGuard::start() {
-        Ok(guard) => {
-            state.guard = Some(guard);
-        }
-        Err(err) => {
-            report_error!(err);
+    {
+        let state = STATE.lock();
+        if state.exiting || state.guard.is_some() {
+            return;
         }
     }
+
+    let guard = match MinidumpGuard::start() {
+        Ok(guard) => guard,
+        Err(err) => {
+            report_error!(err);
+            return;
+        }
+    };
+
+    let rejected = {
+        let mut state = STATE.lock();
+        if state.exiting || state.guard.is_some() {
+            Some(guard)
+        } else {
+            state.guard = Some(guard);
+            None
+        }
+    };
+    // Drop any rejected guard outside the lock: Drop -> spawn_reaper needs that mutex.
+    drop(rejected);
 }
 
 /// Uninitialize the minidump reporter.
@@ -539,9 +559,18 @@ fn join_reaper_handles(handles: Vec<JoinHandle<()>>) {
 
 #[cfg(test)]
 fn reset_state_for_tests() {
-    let handles = std::mem::take(&mut STATE.lock().reapers);
+    let (guard, handles) = {
+        let mut state = STATE.lock();
+        state.exiting = false;
+        (state.guard.take(), std::mem::take(&mut state.reapers))
+    };
+    drop(guard);
     join_reaper_handles(handles);
-    STATE.lock().exiting = false;
+}
+
+#[cfg(test)]
+fn has_guard() -> bool {
+    STATE.lock().guard.is_some()
 }
 
 /// Poll `child` for exit, up to `timeout`, so it gets reaped instead of left as a zombie.
