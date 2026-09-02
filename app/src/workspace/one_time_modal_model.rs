@@ -6,7 +6,7 @@ use settings::Setting as _;
 use warp_core::features::FeatureFlag;
 use warp_core::send_telemetry_from_ctx;
 use warp_util::sync::Condition;
-use warpui::r#async::FutureExt as _;
+use warpui::r#async::{FutureExt as _, Spawnable, SpawnableOutput};
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity, WindowId};
 
 use super::hoa_onboarding;
@@ -975,8 +975,11 @@ impl OneTimeModalModel {
         timeout: Duration,
         ctx: &mut ModelContext<Self>,
     ) where
-        F: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = Result<bool, anyhow::Error>> + Send + 'static,
+        // `Spawnable`/`SpawnableOutput` drop the `Send` requirement on wasm, where the
+        // underlying `AuthClient` future (backed by `wasm_bindgen_futures::JsFuture`) isn't
+        // `Send` because there's no background thread to send it to.
+        F: FnOnce() -> Fut + SpawnableOutput + 'static,
+        Fut: Future<Output = Result<bool, anyhow::Error>> + Spawnable,
     {
         self.pending_factories_launch_claim = true;
         ctx.spawn_abortable(
