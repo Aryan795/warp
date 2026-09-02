@@ -116,10 +116,6 @@ fn modal_text_sub(appearance: &Appearance) -> ColorU {
         .into_solid()
 }
 
-fn modal_overlay_1(appearance: &Appearance) -> Fill {
-    appearance.theme().surface_overlay_1()
-}
-
 fn modal_terminal_magenta(appearance: &Appearance) -> ColorU {
     appearance.theme().terminal_colors().normal.magenta.into()
 }
@@ -156,12 +152,16 @@ pub enum FactoriesLaunchModalEvent {
 struct CloseButtonTheme;
 
 impl ActionButtonTheme for CloseButtonTheme {
-    fn background(&self, hovered: bool, appearance: &Appearance) -> Option<Fill> {
-        if hovered {
-            Some(modal_overlay_1(appearance))
-        } else {
-            None
-        }
+    /// Always renders a dark scrim behind the icon, not only on hover: this button sits
+    /// over the hero image, whose art can place light or decorative elements anywhere,
+    /// including directly behind this corner (as the shipped banner does). `modal_overlay_1`
+    /// is tuned for contrast against the modal body's background, not an arbitrary hero, so
+    /// it isn't reused here. A fixed, semi-transparent black keeps the white icon legible
+    /// against any hero, present or future, rather than only ones that happen to leave this
+    /// corner plain.
+    fn background(&self, hovered: bool, _appearance: &Appearance) -> Option<Fill> {
+        let opacity = if hovered { 50 } else { 30 };
+        Some(Fill::Solid(ColorU::black()).with_opacity(opacity))
     }
 
     fn text_color(
