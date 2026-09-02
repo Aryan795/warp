@@ -5,9 +5,10 @@ use parking_lot::Mutex;
 use uuid::Uuid;
 use warpui::{Entity, ModelContext};
 
+use super::kill::ProcessGroupKillOnDrop;
 use super::registry::DevContainerBuildKey;
 #[cfg(unix)]
-use crate::terminal::local_tty::ProcessGroupCancel;
+use crate::terminal::local_tty::{ProcessGroupCancel, StagingProcessGroupKillOnDrop};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DevContainerBuildPhase {
@@ -37,10 +38,26 @@ pub(crate) enum DevContainerBuildStatus {
     Completed,
 }
 
+enum ArmedProcessGroupKill {
+    Stream(ProcessGroupKillOnDrop),
+    #[cfg(unix)]
+    Staging(StagingProcessGroupKillOnDrop),
+}
+
+impl ArmedProcessGroupKill {
+    fn terminate_now(&self) {
+        match self {
+            Self::Stream(kill) => kill.terminate_now(),
+            #[cfg(unix)]
+            Self::Staging(kill) => kill.terminate_now(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct DevContainerBuildCancelState {
     cancelled: bool,
-    process_group_id: Option<u32>,
+    kill: Option<ArmedProcessGroupKill>,
 }
 
 #[derive(Clone)]
@@ -50,8 +67,13 @@ pub(crate) struct DevContainerBuildCancel {
 
 #[cfg(unix)]
 impl ProcessGroupCancel for DevContainerBuildCancel {
-    fn register_process_group(&self, id: u32) -> bool {
-        DevContainerBuildCancel::register_process_group(self, id)
+    fn register_process_group(&self, kill_group: StagingProcessGroupKillOnDrop) -> bool {
+        let mut inner = self.inner.lock();
+        if inner.cancelled {
+            return false;
+        }
+        inner.kill = Some(ArmedProcessGroupKill::Staging(kill_group));
+        true
     }
 
     fn is_cancelled(&self) -> bool {
@@ -70,19 +92,26 @@ impl DevContainerBuildCancel {
         self.inner.lock().cancelled
     }
 
-    pub(crate) fn register_process_group(&self, id: u32) -> bool {
+    pub(crate) fn register_kill_group(&self, kill_group: ProcessGroupKillOnDrop) -> bool {
         let mut inner = self.inner.lock();
         if inner.cancelled {
             return false;
         }
-        inner.process_group_id = Some(id);
+        inner.kill = Some(ArmedProcessGroupKill::Stream(kill_group));
         true
     }
 
-    pub(crate) fn mark_cancelled(&self) -> Option<u32> {
+    pub(crate) fn mark_cancelled(&self) {
         let mut inner = self.inner.lock();
         inner.cancelled = true;
-        inner.process_group_id.take()
+        if let Some(kill) = inner.kill.take() {
+            kill.terminate_now();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_armed_kill(&self) -> bool {
+        self.inner.lock().kill.is_some()
     }
 }
 
@@ -200,13 +229,12 @@ impl DevContainerBuildOperation {
 
     /// Marks the operation cancelled before the caller terminates processes or
     /// removes the pane, so a late completion is a no-op.
-    pub(crate) fn tombstone(&mut self, ctx: &mut ModelContext<Self>) -> Option<u32> {
-        let process_group_id = self.cancel.mark_cancelled();
+    pub(crate) fn tombstone(&mut self, ctx: &mut ModelContext<Self>) {
+        self.cancel.mark_cancelled();
         if self.status == DevContainerBuildStatus::Running {
             self.status = DevContainerBuildStatus::Cancelling;
         }
         ctx.notify();
-        process_group_id
     }
 
     pub(crate) fn mark_cancelled(&mut self, ctx: &mut ModelContext<Self>) {
@@ -214,14 +242,14 @@ impl DevContainerBuildOperation {
         ctx.notify();
     }
 
-    pub(crate) fn begin_retry(&mut self, ctx: &mut ModelContext<Self>) -> (u64, Option<u32>) {
-        let prior_process_group = self.cancel.mark_cancelled();
+    pub(crate) fn begin_retry(&mut self, ctx: &mut ModelContext<Self>) -> u64 {
+        self.cancel.mark_cancelled();
         self.attempt_id += 1;
         self.phase = DevContainerBuildPhase::Build;
         self.status = DevContainerBuildStatus::Running;
         self.cancel = DevContainerBuildCancel::new();
         ctx.notify();
-        (self.attempt_id, prior_process_group)
+        self.attempt_id
     }
 }
 

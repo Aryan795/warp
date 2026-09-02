@@ -8,6 +8,8 @@
 //! `crate::terminal::local_tty::dev_container`).
 
 #[cfg(feature = "local_tty")]
+mod kill;
+#[cfg(feature = "local_tty")]
 mod newline;
 #[cfg(feature = "local_tty")]
 pub(crate) mod operation;
@@ -282,11 +284,7 @@ impl TerminalView {
         if !operation.read(ctx, |operation, _| operation.shows_retry_and_close()) {
             return;
         }
-        let (attempt_id, prior_process_group) =
-            operation.update(ctx, |operation, ctx| operation.begin_retry(ctx));
-        if let Some(process_group_id) = prior_process_group {
-            stream::terminate_process_group(process_group_id);
-        }
+        let attempt_id = operation.update(ctx, |operation, ctx| operation.begin_retry(ctx));
         let key = operation.read(ctx, |operation, _| operation.key().clone());
         registry::DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
             registry.set_attempt(&key, attempt_id);
@@ -304,14 +302,10 @@ impl TerminalView {
                 return;
             };
             let key = operation.read(ctx, |operation, _| operation.key().clone());
-            let process_group_id = operation.update(ctx, |operation, ctx| {
-                let process_group_id = operation.tombstone(ctx);
+            operation.update(ctx, |operation, ctx| {
+                operation.tombstone(ctx);
                 operation.mark_cancelled(ctx);
-                process_group_id
             });
-            if let Some(process_group_id) = process_group_id {
-                stream::terminate_process_group(process_group_id);
-            }
             registry::DevContainerBuildRegistry::handle(ctx).update(ctx, |registry, _| {
                 registry.remove(&key);
             });

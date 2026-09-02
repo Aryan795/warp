@@ -9,6 +9,9 @@ use futures_util::future::{try_join, try_join3};
 use futures_util::io::AsyncReadExt;
 use parking_lot::Mutex;
 
+pub(crate) use super::kill::ProcessGroupKillOnDrop;
+#[cfg(test)]
+pub(crate) use super::kill::take_process_group_terminations;
 use super::newline::NewlineNormalizer;
 use super::operation::DevContainerBuildCancel;
 
@@ -45,68 +48,6 @@ pub(crate) fn dev_container_up_command(
     command
 }
 
-/// Holds the process-group id until the first terminate, so Drop cannot
-/// SIGKILL a pid that has already been reused.
-#[derive(Clone)]
-struct ProcessGroupKillOnDrop {
-    process_group_id: Arc<Mutex<Option<u32>>>,
-}
-
-impl ProcessGroupKillOnDrop {
-    fn new(process_group_id: u32) -> Self {
-        Self {
-            process_group_id: Arc::new(Mutex::new(Some(process_group_id))),
-        }
-    }
-
-    fn terminate_now(&self) {
-        if let Some(process_group_id) = self.process_group_id.lock().take() {
-            terminate_process_group(process_group_id);
-        }
-    }
-}
-
-impl Drop for ProcessGroupKillOnDrop {
-    fn drop(&mut self) {
-        self.terminate_now();
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    static PROCESS_GROUP_TERMINATIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn take_process_group_terminations() -> u32 {
-    PROCESS_GROUP_TERMINATIONS.with(std::cell::Cell::take)
-}
-
-pub(crate) fn terminate_process_group(process_group_id: u32) {
-    #[cfg(test)]
-    PROCESS_GROUP_TERMINATIONS.with(|count| count.set(count.get() + 1));
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::{Signal, kill};
-        use nix::unistd::Pid;
-        if process_group_id < 2 {
-            log::warn!("Refusing to signal process group {process_group_id}: pid is below 2");
-            return;
-        }
-        match kill(Pid::from_raw(-(process_group_id as i32)), Signal::SIGKILL) {
-            Ok(()) => log::info!("Sent SIGKILL to process group {process_group_id}"),
-            Err(error @ nix::errno::Errno::ESRCH) => {
-                log::info!("Process group {process_group_id} had already exited: {error}");
-            }
-            Err(error) => {
-                log::warn!("Failed to kill process group {process_group_id}: {error}");
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = process_group_id;
-}
-
 pub(crate) async fn drain_dev_container_child<F>(
     mut command: Command,
     cancel: Option<&DevContainerBuildCancel>,
@@ -119,8 +60,9 @@ where
     let process_group_id = child.id();
     let kill_group = ProcessGroupKillOnDrop::new(process_group_id);
     if let Some(cancel) = cancel
-        && !cancel.register_process_group(process_group_id)
+        && !cancel.register_kill_group(kill_group.clone())
     {
+        kill_group.terminate_now();
         let _ = child.status().await;
         return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
     }
@@ -164,7 +106,8 @@ pub(crate) async fn run_cancellable_process_group_command(
     let mut child = command.spawn()?;
     let process_group_id = child.id();
     let kill_group = ProcessGroupKillOnDrop::new(process_group_id);
-    if !cancel.register_process_group(process_group_id) {
+    if !cancel.register_kill_group(kill_group.clone()) {
+        kill_group.terminate_now();
         let _ = child.status().await;
         return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
     }

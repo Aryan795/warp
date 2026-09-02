@@ -1308,25 +1308,25 @@ fn build_dev_container_command(
 
 /// Registers the active staging child so Close/Retry can terminate it.
 pub trait ProcessGroupCancel: Send + Sync {
-    fn register_process_group(&self, id: u32) -> bool;
+    fn register_process_group(&self, kill_group: StagingProcessGroupKillOnDrop) -> bool;
     fn is_cancelled(&self) -> bool;
 }
 
 /// Holds the process-group id until the first terminate, so Drop cannot
 /// SIGKILL a pid that has already been reused.
 #[derive(Clone)]
-struct StagingProcessGroupKillOnDrop {
+pub struct StagingProcessGroupKillOnDrop {
     process_group_id: Arc<Mutex<Option<u32>>>,
 }
 
 impl StagingProcessGroupKillOnDrop {
-    fn new(process_group_id: u32) -> Self {
+    pub fn new(process_group_id: u32) -> Self {
         Self {
             process_group_id: Arc::new(Mutex::new(Some(process_group_id))),
         }
     }
 
-    fn terminate_now(&self) {
+    pub fn terminate_now(&self) {
         if let Some(process_group_id) = self.process_group_id.lock().take() {
             terminate_staging_process_group(process_group_id);
         }
@@ -1443,7 +1443,8 @@ async fn run_dev_container_docker_output(
     let mut child = command.spawn().map_err(Error::from)?;
     let process_group_id = child.id();
     let kill_group = StagingProcessGroupKillOnDrop::new(process_group_id);
-    if !cancel.register_process_group(process_group_id) {
+    if !cancel.register_process_group(kill_group.clone()) {
+        kill_group.terminate_now();
         let _ = child.status().await;
         return Err(cancelled_staging_error());
     }

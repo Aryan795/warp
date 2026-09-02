@@ -377,7 +377,7 @@ fn dev_container_rm_args_remove_the_given_container_path() {
 }
 
 struct StagingCancel {
-    inner: parking_lot::Mutex<(bool, Option<u32>)>,
+    inner: parking_lot::Mutex<(bool, Option<StagingProcessGroupKillOnDrop>)>,
 }
 
 impl StagingCancel {
@@ -387,24 +387,26 @@ impl StagingCancel {
         }
     }
 
-    fn process_group_id(&self) -> Option<u32> {
-        self.inner.lock().1
+    fn has_armed_kill(&self) -> bool {
+        self.inner.lock().1.is_some()
     }
 
-    fn cancel_and_take_process_group(&self) -> Option<u32> {
+    fn cancel_and_terminate(&self) {
         let mut inner = self.inner.lock();
         inner.0 = true;
-        inner.1.take()
+        if let Some(kill) = inner.1.take() {
+            kill.terminate_now();
+        }
     }
 }
 
 impl ProcessGroupCancel for StagingCancel {
-    fn register_process_group(&self, id: u32) -> bool {
+    fn register_process_group(&self, kill_group: StagingProcessGroupKillOnDrop) -> bool {
         let mut inner = self.inner.lock();
         if inner.0 {
             return false;
         }
-        inner.1 = Some(id);
+        inner.1 = Some(kill_group);
         true
     }
 
@@ -503,6 +505,7 @@ fn close_during_staging_cancels_in_flight_docker_command() {
 
     use instant::Instant;
 
+    let _ = take_staging_process_group_terminations();
     let cancel = Arc::new(StagingCancel::new());
     let started = Instant::now();
     futures_lite::future::block_on(async {
@@ -518,14 +521,12 @@ fn close_during_staging_cancels_in_flight_docker_command() {
         );
         let kill_fut = async {
             loop {
-                if cancel.process_group_id().is_some() {
+                if cancel.has_armed_kill() {
                     break;
                 }
                 futures_lite::future::yield_now().await;
             }
-            if let Some(process_group_id) = cancel.cancel_and_take_process_group() {
-                terminate_staging_process_group(process_group_id);
-            }
+            cancel.cancel_and_terminate();
         };
         let (result, _) = futures::join!(cmd_fut, kill_fut);
         assert!(
@@ -538,4 +539,40 @@ fn close_during_staging_cancels_in_flight_docker_command() {
             "cancelled staging command must not succeed"
         );
     });
+    assert_eq!(take_staging_process_group_terminations(), 1);
+}
+
+struct RejectRegisterCancel;
+
+impl ProcessGroupCancel for RejectRegisterCancel {
+    fn register_process_group(&self, _kill_group: StagingProcessGroupKillOnDrop) -> bool {
+        false
+    }
+
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn rejected_staging_registration_terminates_before_wait() {
+    use instant::Instant;
+
+    let _ = take_staging_process_group_terminations();
+    let started = Instant::now();
+    let result = futures_lite::future::block_on(run_dev_container_docker_output(
+        Path::new("python3"),
+        &[
+            OsString::from("-c"),
+            OsString::from("import time; time.sleep(30)"),
+        ],
+        Some(&RejectRegisterCancel),
+    ));
+    assert!(
+        started.elapsed().as_secs() < 5,
+        "rejected staging registration must not wait on the child: {:?}",
+        started.elapsed()
+    );
+    assert!(result.is_err());
+    assert_eq!(take_staging_process_group_terminations(), 1);
 }

@@ -82,6 +82,105 @@ fn successful_drain_terminates_process_group_once() {
     assert_eq!(super::take_process_group_terminations(), 1);
 }
 
+fn sleep_process_group_command() -> command::r#async::Command {
+    let mut command = command::r#async::Command::new_with_process_group("python3");
+    command
+        .arg("-c")
+        .arg("import time; time.sleep(30)")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
+#[test]
+fn cancel_during_build_terminates_process_group_once() {
+    use instant::Instant;
+
+    use crate::terminal::view::dev_container::operation::DevContainerBuildCancel;
+
+    let _ = super::take_process_group_terminations();
+    let cancel = DevContainerBuildCancel::new();
+    let started = Instant::now();
+    block_on(async {
+        let drain_fut =
+            super::drain_dev_container_child(sleep_process_group_command(), Some(&cancel), |_| {});
+        let kill_fut = async {
+            loop {
+                if cancel.has_armed_kill() {
+                    break;
+                }
+                futures_lite::future::yield_now().await;
+            }
+            cancel.mark_cancelled();
+        };
+        let (result, _) = futures::join!(drain_fut, kill_fut);
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "build cancel must return promptly: {:?}",
+            started.elapsed()
+        );
+        assert!(result.is_err() || result.is_ok_and(|(_, success)| !success));
+    });
+    assert_eq!(super::take_process_group_terminations(), 1);
+}
+
+#[test]
+fn cancel_during_preflight_terminates_process_group_once() {
+    use instant::Instant;
+
+    use crate::terminal::view::dev_container::operation::DevContainerBuildCancel;
+
+    let _ = super::take_process_group_terminations();
+    let cancel = DevContainerBuildCancel::new();
+    let started = Instant::now();
+    block_on(async {
+        let run_fut =
+            super::run_cancellable_process_group_command(sleep_process_group_command(), &cancel);
+        let kill_fut = async {
+            loop {
+                if cancel.has_armed_kill() {
+                    break;
+                }
+                futures_lite::future::yield_now().await;
+            }
+            cancel.mark_cancelled();
+        };
+        let (result, _) = futures::join!(run_fut, kill_fut);
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "preflight cancel must return promptly: {:?}",
+            started.elapsed()
+        );
+        assert!(result.is_err() || result.is_ok_and(|output| !output.status.success()));
+    });
+    assert_eq!(super::take_process_group_terminations(), 1);
+}
+
+#[test]
+fn rejected_build_registration_terminates_before_wait() {
+    use instant::Instant;
+
+    use crate::terminal::view::dev_container::operation::DevContainerBuildCancel;
+
+    let _ = super::take_process_group_terminations();
+    let cancel = DevContainerBuildCancel::new();
+    cancel.mark_cancelled();
+    let started = Instant::now();
+    let result = block_on(super::drain_dev_container_child(
+        sleep_process_group_command(),
+        Some(&cancel),
+        |_| {},
+    ));
+    assert!(
+        started.elapsed().as_secs() < 5,
+        "rejected registration must not wait on the child: {:?}",
+        started.elapsed()
+    );
+    assert!(result.is_err());
+    assert_eq!(super::take_process_group_terminations(), 1);
+}
+
 #[test]
 fn drain_marks_stdout_oversized_past_one_mib() {
     block_on(async {

@@ -3,9 +3,11 @@
 use settings::Setting as _;
 use warp_core::context_flag::ContextFlag;
 use warpui::elements::{
-    ConstrainedBox, CrossAxisAlignment, Empty, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
-    MouseStateHandle, ParentElement, Shrinkable, Text,
+    ConstrainedBox, CrossAxisAlignment, Empty, Flex, MainAxisAlignment, MainAxisSize,
+    ParentElement, Shrinkable, Text,
 };
+#[cfg(feature = "local_tty")]
+use warpui::elements::{Hoverable, MouseStateHandle};
 use warpui::prelude::{ChildView, Container};
 use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::UiComponent;
