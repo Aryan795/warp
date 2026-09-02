@@ -351,10 +351,20 @@ impl TerminalView {
         };
         let operation_id = operation.read(ctx, |operation, _| operation.operation_id());
         let attempt_id = operation.read(ctx, |operation, _| operation.attempt_id());
-        let delay = operation::BUILD_SILENCE_THRESHOLD;
+        let delay = operation.read(ctx, |operation, _| {
+            operation::silence_watch_delay(operation.output_elapsed())
+        });
+        let output_rx = operation.read(ctx, |operation, _| operation.output_rx());
+        while output_rx.try_recv().is_ok() {}
         ctx.spawn(
             async move {
-                warpui::r#async::Timer::after(delay).await;
+                futures::future::select(
+                    Box::pin(warpui::r#async::Timer::after(delay)),
+                    Box::pin(async {
+                        let _ = output_rx.recv().await;
+                    }),
+                )
+                .await;
             },
             move |me, _, ctx| {
                 if !me.is_current_dev_container_attempt(operation_id, attempt_id, ctx) {
@@ -569,14 +579,21 @@ impl TerminalView {
             .dev_container_build
             .as_ref()
             .map(|operation| operation.read(ctx, |operation, _| operation.last_output_clock()));
+        let output_tx = self
+            .dev_container_build
+            .as_ref()
+            .map(|operation| operation.read(ctx, |operation, _| operation.output_tx()));
         let up_future = async move {
             let command = stream::dev_container_up_command(&cli, &workspace_folder, &config_file);
             let (drain, exit_success) =
                 stream::drain_dev_container_child(command, Some(&cancel), move |chunk| {
-                    if !chunk.is_empty()
-                        && let Some(last_output) = &last_output
-                    {
-                        *last_output.lock() = instant::Instant::now();
+                    if !chunk.is_empty() {
+                        if let Some(last_output) = &last_output {
+                            *last_output.lock() = instant::Instant::now();
+                        }
+                        if let Some(output_tx) = &output_tx {
+                            let _ = output_tx.try_send(());
+                        }
                     }
                     processor
                         .lock()

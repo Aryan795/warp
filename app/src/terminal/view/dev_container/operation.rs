@@ -129,12 +129,15 @@ pub(crate) struct DevContainerBuildOperation {
     status: DevContainerBuildStatus,
     cancel: DevContainerBuildCancel,
     last_output_at: Arc<Mutex<Instant>>,
+    output_tx: async_channel::Sender<()>,
+    output_rx: async_channel::Receiver<()>,
 }
 
 impl DevContainerBuildOperation {
     pub(crate) fn new(key: DevContainerBuildKey) -> Self {
         let workspace_folder = key.workspace_folder.clone();
         let config_file = key.config_file.clone();
+        let (output_tx, output_rx) = async_channel::unbounded();
         Self {
             key,
             operation_id: Uuid::new_v4(),
@@ -145,6 +148,8 @@ impl DevContainerBuildOperation {
             status: DevContainerBuildStatus::Running,
             cancel: DevContainerBuildCancel::new(),
             last_output_at: Arc::new(Mutex::new(Instant::now())),
+            output_tx,
+            output_rx,
         }
     }
 
@@ -204,6 +209,18 @@ impl DevContainerBuildOperation {
 
     pub(crate) fn last_output_clock(&self) -> Arc<Mutex<Instant>> {
         self.last_output_at.clone()
+    }
+
+    pub(crate) fn output_elapsed(&self) -> Duration {
+        self.last_output_at.lock().elapsed()
+    }
+
+    pub(crate) fn output_tx(&self) -> async_channel::Sender<()> {
+        self.output_tx.clone()
+    }
+
+    pub(crate) fn output_rx(&self) -> async_channel::Receiver<()> {
+        self.output_rx.clone()
     }
 
     pub(crate) fn shows_retry(&self) -> bool {
@@ -290,6 +307,15 @@ pub(crate) fn silence_subtitle(elapsed: Duration) -> Option<String> {
     }
     let minutes = elapsed.as_secs() / 60;
     Some(format!("No output for {minutes}m"))
+}
+
+pub(crate) fn silence_watch_delay(elapsed: Duration) -> Duration {
+    let remaining = BUILD_SILENCE_THRESHOLD.saturating_sub(elapsed);
+    if remaining.is_zero() {
+        Duration::from_secs(60)
+    } else {
+        remaining
+    }
 }
 
 impl Entity for DevContainerBuildOperation {

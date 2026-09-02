@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::{
     BUILD_SILENCE_THRESHOLD, DevContainerBuildOperation, DevContainerBuildPhase,
-    DevContainerBuildStatus, silence_subtitle,
+    DevContainerBuildStatus, silence_subtitle, silence_watch_delay,
 };
 use crate::terminal::view::dev_container::registry::DevContainerBuildKey;
 
@@ -90,4 +90,35 @@ fn failed_build_clears_silence_subtitle() {
     assert!(op.shows_retry());
     assert!(op.shows_close());
     assert_eq!(op.header_secondary(), "");
+}
+
+#[test]
+fn output_shortly_before_initial_wake_defers_subtitle_to_last_output_plus_threshold() {
+    let first_wake = BUILD_SILENCE_THRESHOLD;
+    let output_at = first_wake - Duration::from_secs(10);
+    let elapsed_at_first_wake = first_wake - output_at;
+    assert_eq!(elapsed_at_first_wake, Duration::from_secs(10));
+    assert_eq!(silence_subtitle(elapsed_at_first_wake), None);
+    assert_eq!(
+        silence_watch_delay(elapsed_at_first_wake),
+        Duration::from_secs(110)
+    );
+    assert_eq!(
+        first_wake + silence_watch_delay(elapsed_at_first_wake),
+        output_at + BUILD_SILENCE_THRESHOLD
+    );
+}
+
+#[test]
+fn output_shortly_after_threshold_clears_subtitle_and_rearms_remaining() {
+    assert_eq!(
+        silence_subtitle(BUILD_SILENCE_THRESHOLD).as_deref(),
+        Some("No output for 2m")
+    );
+    let elapsed_after_fresh_output = Duration::from_secs(5);
+    assert_eq!(silence_subtitle(elapsed_after_fresh_output), None);
+    assert_eq!(
+        silence_watch_delay(elapsed_after_fresh_output),
+        Duration::from_secs(115)
+    );
 }
