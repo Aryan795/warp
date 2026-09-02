@@ -31,11 +31,18 @@ use warp_errors::report_error;
 
 use super::ToSentryTags;
 
+#[derive(Default)]
+struct MinidumpState {
+    guard: Option<MinidumpGuard>,
+    /// Reaper threads started by live crash-reporting disable.
+    reapers: Vec<JoinHandle<()>>,
+    /// Set by [`uninit_before_exit`] before draining `reapers`, so a racing live disable
+    /// cannot register a handle that would never be joined.
+    exiting: bool,
+}
+
 lazy_static! {
-    static ref GUARD: Mutex<Option<MinidumpGuard>> = Mutex::new(None);
-    /// Reaper threads started by live crash-reporting disable. [`uninit_before_exit`]
-    /// joins them so a disable-then-immediate-exit still reaps within [`REAP_TIMEOUT`].
-    static ref BACKGROUND_REAPERS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
+    static ref STATE: Mutex<MinidumpState> = Mutex::new(MinidumpState::default());
 }
 
 /// The minidump child process will exit if it doesn't receive a message after some time. This
@@ -54,11 +61,11 @@ const REAP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Initialize the minidump reporter.
 pub fn init() {
-    let mut global_guard = GUARD.lock();
+    let mut state = STATE.lock();
 
     match MinidumpGuard::start() {
         Ok(guard) => {
-            *global_guard = Some(guard);
+            state.guard = Some(guard);
         }
         Err(err) => {
             report_error!(err);
@@ -68,17 +75,30 @@ pub fn init() {
 
 /// Uninitialize the minidump reporter.
 ///
-/// The minidump child process is reaped on a background thread (see [`Drop for
-/// MinidumpGuard`](Drop)), so this never blocks the caller. Use this when the app keeps
-/// running afterward, e.g. a live settings/preference toggle -- a slow-to-die child must not
-/// stall whatever triggered the toggle. Use [`uninit_before_exit`] instead when the whole
-/// process is about to exit shortly after this call.
+/// Reaps the minidump child on a background thread so this never blocks the caller during a
+/// live settings/preference toggle. Use [`uninit_before_exit`] when the whole process is about
+/// to exit shortly after this call.
 pub fn uninit() {
-    let maybe_guard = { GUARD.lock().take() };
-    // Ensure we drop the `MinidumpGuard` after releasing the GUARD mutex. If there's an
-    // error stopping the server, we should log it as a Sentry breadcrumb in the Warp
-    // process, but not forward the breadcrumb to the server process.
-    std::mem::drop(maybe_guard);
+    let leftover_child = {
+        let mut state = STATE.lock();
+        let mut maybe_guard = state.guard.take();
+        let leftover = maybe_guard
+            .as_mut()
+            .and_then(MinidumpGuard::shutdown_kill_and_take_child)
+            .and_then(|child| {
+                if state.exiting {
+                    Some(child)
+                } else {
+                    start_reaper(&mut state.reapers, child)
+                }
+            });
+        drop(state);
+        drop(maybe_guard);
+        leftover
+    };
+    if let Some(mut child) = leftover_child {
+        log_reap_result(wait_with_timeout(&mut child, REAP_TIMEOUT));
+    }
 }
 
 /// Like [`uninit`], but blocks (with a short bound) until the minidump child process is
@@ -95,25 +115,29 @@ pub fn uninit() {
 /// Also joins any background reapers started by earlier [`uninit`] calls, so a live disable
 /// followed immediately by process exit still reaps within [`REAP_TIMEOUT`].
 pub fn uninit_before_exit() {
-    let maybe_guard = { GUARD.lock().take() };
+    let (maybe_guard, reapers) = {
+        let mut state = STATE.lock();
+        state.exiting = true;
+        (state.guard.take(), std::mem::take(&mut state.reapers))
+    };
     if let Some(mut guard) = maybe_guard {
         guard.reap_blocking();
     }
-    join_background_reapers();
+    join_reaper_handles(reapers);
 }
 
 /// Set a tag to include in minidump crash reports.
 pub fn set_tag(key: String, value: String) {
-    let global_guard = GUARD.lock();
-    if let Some(guard) = global_guard.as_ref() {
+    let state = STATE.lock();
+    if let Some(guard) = state.guard.as_ref() {
         guard.set_tags(HashMap::from([(key, value)]));
     }
 }
 
 /// Set tags to include in minidump crash reports, using a type that implements [`ToSentryTags`].
 pub fn set_tags_from<T: ToSentryTags>(tags: &T) {
-    let global_guard = GUARD.lock();
-    if let Some(guard) = global_guard.as_ref() {
+    let state = STATE.lock();
+    if let Some(guard) = state.guard.as_ref() {
         let tags = tags
             .to_sentry_tags()
             .into_iter()
@@ -125,16 +149,16 @@ pub fn set_tags_from<T: ToSentryTags>(tags: &T) {
 
 /// Set the user id to include in minidump crash reports.
 pub fn set_user_id(user_id: &str) {
-    let global_guard = GUARD.lock();
-    if let Some(guard) = global_guard.as_ref() {
+    let state = STATE.lock();
+    if let Some(guard) = state.guard.as_ref() {
         guard.set_user_id(user_id.to_owned());
     }
 }
 
 /// Forward a breadcrumb to attach to minidump crash reports.
 pub fn forward_breadcrumb(breadcrumb: Breadcrumb) {
-    let global_guard = GUARD.lock();
-    if let Some(guard) = global_guard.as_ref() {
+    let state = STATE.lock();
+    if let Some(guard) = state.guard.as_ref() {
         guard.add_breadcrumb(breadcrumb);
     }
 }
@@ -142,8 +166,8 @@ pub fn forward_breadcrumb(breadcrumb: Breadcrumb) {
 /// Send a crash report via minidump. On certain platforms, this will produce an error report
 /// without actually crashing the process.
 pub fn crash() {
-    let global_guard = GUARD.lock();
-    if let Some(guard) = global_guard.as_ref() {
+    let state = STATE.lock();
+    if let Some(guard) = state.guard.as_ref() {
         guard.crash();
     }
 }
@@ -399,6 +423,16 @@ impl MinidumpGuard {
         }
     }
 
+    /// Shuts down the server, kills the child, and takes it so Drop cannot abandon it unreaped.
+    fn shutdown_kill_and_take_child(&mut self) -> Option<process::Child> {
+        self.send_shutdown_command();
+        let mut child = self.child.take()?;
+        if let Err(err) = child.kill() {
+            log::warn!("Unable to kill minidump child process: {err:#}");
+        }
+        Some(child)
+    }
+
     /// Kills the minidump child process and blocks (with a short bound) until it's reaped.
     ///
     /// Only call this when the whole process is about to exit shortly after (see
@@ -419,30 +453,20 @@ impl Drop for MinidumpGuard {
     fn drop(&mut self) {
         // Dropping the crash handler will detach it.
         // We can report errors here, as the minidump handler is no longer active.
-        self.send_shutdown_command();
-
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
-
-        // Kill can fail (e.g. the child already exited); still hand the Child to the reaper
-        // so it is waited on with a bound instead of dropped.
-        if let Err(err) = child.kill() {
-            log::warn!("Unable to kill minidump child process: {err:#}");
+        if let Some(child) = self.shutdown_kill_and_take_child() {
+            // Reap on a background thread rather than blocking here: this `Drop` also runs from
+            // a live settings/preference toggle (crash reporting disabled while the app keeps
+            // running), where a wedged child must not stall the caller. Callers that are about
+            // to exit the whole process should call `reap_blocking`/`uninit_before_exit` instead,
+            // where blocking briefly is fine and actually needed (see its doc comment).
+            spawn_reaper(child);
         }
-
-        // Reap on a background thread rather than blocking here: this `Drop` also runs from
-        // a live settings/preference toggle (crash reporting disabled while the app keeps
-        // running), where a wedged child must not stall the caller. Callers that are about
-        // to exit the whole process should call `reap_blocking`/`uninit_before_exit` instead,
-        // where blocking briefly is fine and actually needed (see its doc comment).
-        spawn_reaper(child);
     }
 }
 
 /// Kill, then always attempt a bounded wait. `Child::kill` failing (e.g. ESRCH because the
-/// process already exited) must not skip the wait: dropping an unreaped `Child` either hangs
-/// on an unbounded `wait` or leaves a zombie.
+/// process already exited) must not skip the wait: dropping an unreaped `Child` does not reap
+/// it and would leave a zombie.
 fn kill_then_wait(child: &mut process::Child) -> io::Result<bool> {
     if let Err(err) = child.kill() {
         log::warn!("Unable to kill minidump child process: {err:#}");
@@ -464,9 +488,27 @@ fn log_reap_result(result: io::Result<bool>) {
 
 /// Waits (bounded) for `child` to exit and reaps it, off the calling thread, so a
 /// killed-but-slow-to-die process can't block whoever dropped the [`MinidumpGuard`].
-fn spawn_reaper(mut child: process::Child) {
+fn spawn_reaper(child: process::Child) {
+    let leftover = {
+        let mut state = STATE.lock();
+        if state.exiting {
+            Some(child)
+        } else {
+            start_reaper(&mut state.reapers, child)
+        }
+    };
+    if let Some(mut child) = leftover {
+        log_reap_result(wait_with_timeout(&mut child, REAP_TIMEOUT));
+    }
+}
+
+/// Hands `child` to a reaper thread. Returns the child if the caller must reap it instead.
+fn start_reaper(
+    reapers: &mut Vec<JoinHandle<()>>,
+    child: process::Child,
+) -> Option<process::Child> {
     // Hand the child over only after the thread exists, so a spawn failure can still reap
-    // on the caller with a bound instead of dropping `Child` (unbounded wait).
+    // on the caller instead of dropping an unreaped `Child`.
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     match std::thread::Builder::new()
         .name("minidump-reaper".to_string())
@@ -476,25 +518,30 @@ fn spawn_reaper(mut child: process::Child) {
             }
         }) {
         Ok(handle) => {
-            if let Err(std::sync::mpsc::SendError(mut child)) = tx.send(child) {
-                log_reap_result(wait_with_timeout(&mut child, REAP_TIMEOUT));
-            }
-            BACKGROUND_REAPERS.lock().push(handle);
+            let send_err = tx.send(child).err();
+            reapers.push(handle);
+            send_err.map(|std::sync::mpsc::SendError(child)| child)
         }
         Err(err) => {
             log::warn!("Unable to spawn minidump reaper thread: {err:#}; reaping on caller");
-            log_reap_result(wait_with_timeout(&mut child, REAP_TIMEOUT));
+            Some(child)
         }
     }
 }
 
-fn join_background_reapers() {
-    let handles = std::mem::take(&mut *BACKGROUND_REAPERS.lock());
+fn join_reaper_handles(handles: Vec<JoinHandle<()>>) {
     for handle in handles {
         if handle.join().is_err() {
             log::warn!("Minidump reaper thread panicked");
         }
     }
+}
+
+#[cfg(test)]
+fn reset_state_for_tests() {
+    let handles = std::mem::take(&mut STATE.lock().reapers);
+    join_reaper_handles(handles);
+    STATE.lock().exiting = false;
 }
 
 /// Poll `child` for exit, up to `timeout`, so it gets reaped instead of left as a zombie.

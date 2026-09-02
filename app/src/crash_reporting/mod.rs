@@ -436,6 +436,9 @@ pub fn uninit_sentry() {
 /// shutdown wait -- such as the Oz agent sidecar's launcher script -- can't be left waiting on
 /// an unreaped zombie. Do not use this from a live settings toggle or similar: blocking there
 /// would stall the caller if the child is slow to die.
+///
+/// Still drains minidump reapers if a prior [`uninit_sentry`] already dropped the Rust Sentry
+/// guard.
 pub fn uninit_sentry_before_exit() {
     uninit_sentry_impl(true);
 }
@@ -446,15 +449,22 @@ fn uninit_sentry_impl(
     // Take the client guard out of the mutex, replacing it with
     // `Uninitialized`.
     let client_guard = std::mem::take(RUST_SENTRY_CLIENT_GUARD.lock().deref_mut());
-    if matches!(client_guard, RustSentryClientGuard::Initialized { .. }) {
+    let was_initialized = matches!(client_guard, RustSentryClientGuard::Initialized { .. });
+    if was_initialized {
         log::info!("Uninitializing crash reporting...");
+    }
 
-        #[cfg(linux_or_windows)]
-        if before_exit {
-            sentry_minidump::uninit_before_exit();
-        } else {
-            sentry_minidump::uninit();
-        }
+    // Exit must drain minidump reapers even if a prior live disable already took the
+    // Rust Sentry guard, otherwise the process can exit while a background reaper still
+    // owns a killed, unreaped child.
+    #[cfg(linux_or_windows)]
+    if before_exit {
+        sentry_minidump::uninit_before_exit();
+    } else if was_initialized {
+        sentry_minidump::uninit();
+    }
+
+    if was_initialized {
         #[cfg(target_os = "macos")]
         if FeatureFlag::CocoaSentry.is_enabled() {
             uninit_cocoa_sentry();

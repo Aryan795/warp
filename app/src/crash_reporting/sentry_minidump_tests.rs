@@ -65,7 +65,7 @@ fn kill_then_wait_reaps_even_if_kill_fails() {
 #[test]
 #[serial]
 fn live_disable_returns_without_waiting_for_child_reap() {
-    join_background_reapers();
+    reset_state_for_tests();
 
     let child = spawn_long_lived_process();
     #[cfg(unix)]
@@ -81,13 +81,13 @@ fn live_disable_returns_without_waiting_for_child_reap() {
     {
         let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
     }
-    join_background_reapers();
+    reset_state_for_tests();
 }
 
 #[test]
 #[serial]
 fn uninit_before_exit_joins_reaper_started_by_live_disable() {
-    join_background_reapers();
+    reset_state_for_tests();
 
     let mut child = spawn_long_lived_process();
     #[cfg(unix)]
@@ -108,6 +108,34 @@ fn uninit_before_exit_joins_reaper_started_by_live_disable() {
             "exit shutdown must join the live-disable reaper so the child is gone"
         );
     }
+    reset_state_for_tests();
+}
+
+#[test]
+#[serial]
+fn uninit_sentry_then_before_exit_joins_reaper_after_live_disable() {
+    reset_state_for_tests();
+
+    let mut child = spawn_long_lived_process();
+    #[cfg(unix)]
+    let pid = child.id();
+    if let Err(err) = child.kill() {
+        log::warn!("Unable to kill minidump child process: {err:#}");
+    }
+    spawn_reaper(child);
+
+    super::super::uninit_sentry();
+    super::super::uninit_sentry_before_exit();
+
+    #[cfg(unix)]
+    {
+        let exists = unsafe { libc::kill(pid as i32, 0) };
+        assert_eq!(
+            exists, -1,
+            "uninit_sentry_before_exit must drain reapers after uninit_sentry"
+        );
+    }
+    reset_state_for_tests();
 }
 
 fn spawn_short_lived_process() -> process::Child {
