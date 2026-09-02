@@ -21910,11 +21910,17 @@ impl TerminalView {
                     log::warn!("Local dev container feature flag is disabled");
                     return;
                 }
+                #[cfg(feature = "local_tty")]
                 self.resolve_dev_container_cli_and_bring_up(
                     workspace_folder.clone(),
                     config_path.clone(),
                     ctx,
                 );
+                #[cfg(not(feature = "local_tty"))]
+                {
+                    let _ = (workspace_folder, config_path);
+                    log::warn!("Dev Container requires the `local_tty` feature; ignoring request");
+                }
             }
             InputEvent::ExitCloudModeAndStartLocalAgent { initial_prompt } => {
                 let origin = AgentViewEntryOrigin::Input {
