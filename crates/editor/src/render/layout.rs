@@ -209,6 +209,7 @@ impl<'a> TextLayout<'a> {
             self.content_width(spacing),
             Default::default(),
             max_chars.min(MAX_LAYOUT_LINE_CHARS),
+            true,
         )
     }
     pub fn layout_text_with_options(
@@ -246,6 +247,7 @@ impl<'a> TextLayout<'a> {
             max_width,
             alignment,
             max_chars,
+            false,
         )
     }
 
@@ -259,6 +261,7 @@ impl<'a> TextLayout<'a> {
         max_width: f32,
         alignment: TextAlignment,
         max_chars: usize,
+        redraw_only_fallback: bool,
     ) -> Arc<TextFrame> {
         if text.is_empty() {
             return Arc::new(TextFrame::empty(
@@ -273,16 +276,29 @@ impl<'a> TextLayout<'a> {
             clamp_style_runs_for_layout_with_max_chars(style_runs, max_chars)
         });
 
-        layout_cache.layout_text(
-            shaped_text,
-            paragraph_style.line_style(),
-            clamped_style_runs.as_deref().unwrap_or(style_runs),
-            max_width,
-            f32::MAX,
-            alignment,
-            None,
-            &self.font_cache,
-        )
+        if redraw_only_fallback {
+            layout_cache.layout_text_redraw_only(
+                shaped_text,
+                paragraph_style.line_style(),
+                clamped_style_runs.as_deref().unwrap_or(style_runs),
+                max_width,
+                f32::MAX,
+                alignment,
+                None,
+                &self.font_cache,
+            )
+        } else {
+            layout_cache.layout_text(
+                shaped_text,
+                paragraph_style.line_style(),
+                clamped_style_runs.as_deref().unwrap_or(style_runs),
+                max_width,
+                f32::MAX,
+                alignment,
+                None,
+                &self.font_cache,
+            )
+        }
     }
 
     /// Lays out placeholder text for empty blocks.

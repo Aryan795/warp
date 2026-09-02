@@ -33,6 +33,7 @@ pub(crate) enum RequestedFallbackFontSource {
     GlyphForChar((FontId, char)),
     Line(text_layout::CacheKeyValue),
     TextFrame(text_layout::CacheKeyValue),
+    RedrawOnly,
 }
 
 pub(crate) struct FontBytes(pub Vec<u8>);
@@ -99,6 +100,13 @@ impl FontFallbackCache {
             return;
         }
 
+        if source == RequestedFallbackFontSource::RedrawOnly
+            && !self
+                .requested_redraw_only_families
+                .insert(fallback_font_family.clone())
+        {
+            return;
+        }
         self.requested_fallback_families
             .entry(fallback_font_family)
             .or_default()
@@ -158,6 +166,9 @@ impl Cache {
             .map(|mut entry| (entry.key().clone(), mem::take(entry.value_mut())))
             .collect_vec();
         self.font_fallback_cache.requested_fallback_families.clear();
+        self.font_fallback_cache
+            .requested_redraw_only_families
+            .clear();
         result.into_iter()
     }
 
@@ -165,5 +176,39 @@ impl Cache {
         self.font_fallback_cache
             .loaded_fallback_families
             .contains_key(family)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sequential_redraw_only_requests_retain_one_keyless_source() {
+        let cache = FontFallbackCache {
+            fallback_font_fn: Some(Box::new(|_| {
+                Some(ExternalFontFamily {
+                    font_urls: Arc::new(vec!["fallback".to_string()]),
+                    name: "fallback",
+                })
+            })),
+            ..Default::default()
+        };
+
+        for _ in 0..1_000 {
+            cache.request_fallback_font_for_char('⌘', RequestedFallbackFontSource::RedrawOnly);
+        }
+
+        let requests = cache
+            .requested_fallback_families
+            .iter()
+            .next()
+            .expect("fallback family should be requested");
+        assert_eq!(requests.value().len(), 1);
+        assert!(matches!(
+            requests.value().as_slice(),
+            [RequestedFallbackFontSource::RedrawOnly]
+        ));
+        assert_eq!(cache.requested_redraw_only_families.len(), 1);
     }
 }

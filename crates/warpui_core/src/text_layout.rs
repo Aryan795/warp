@@ -160,7 +160,6 @@ impl LayoutCache {
     pub fn remove_text_frame(&self, key: &dyn CacheKey) {
         self.text_frame_cache.remove(key);
     }
-
     #[allow(clippy::too_many_arguments)]
     pub fn layout_text<'a>(
         &'a self,
@@ -172,6 +171,58 @@ impl LayoutCache {
         alignment: TextAlignment,
         first_line_head_indent: Option<f32>,
         text_layout_system: &'a TextLayoutSystem<'a>,
+    ) -> Arc<TextFrame> {
+        self.layout_text_with_fallback_source(
+            text,
+            line_style,
+            styles,
+            max_width,
+            max_height,
+            alignment,
+            first_line_head_indent,
+            text_layout_system,
+            false,
+        )
+    }
+
+    /// Lays out a text frame whose fallback-font requests only need to trigger a redraw.
+    #[allow(clippy::too_many_arguments)]
+    pub fn layout_text_redraw_only<'a>(
+        &'a self,
+        text: &'a str,
+        line_style: LineStyle,
+        styles: &'a [StyleRun],
+        max_width: f32,
+        max_height: f32,
+        alignment: TextAlignment,
+        first_line_head_indent: Option<f32>,
+        text_layout_system: &'a TextLayoutSystem<'a>,
+    ) -> Arc<TextFrame> {
+        self.layout_text_with_fallback_source(
+            text,
+            line_style,
+            styles,
+            max_width,
+            max_height,
+            alignment,
+            first_line_head_indent,
+            text_layout_system,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_text_with_fallback_source<'a>(
+        &'a self,
+        text: &'a str,
+        line_style: LineStyle,
+        styles: &'a [StyleRun],
+        max_width: f32,
+        max_height: f32,
+        alignment: TextAlignment,
+        first_line_head_indent: Option<f32>,
+        text_layout_system: &'a TextLayoutSystem<'a>,
+        redraw_only: bool,
     ) -> Arc<TextFrame> {
         let (text, adjusted_styles) = strip_leading_unicode_bom(text, styles);
         let styles = adjusted_styles
@@ -217,10 +268,12 @@ impl LayoutCache {
             };
             for line in text_frame.lines() {
                 for ch in &line.chars_with_missing_glyphs {
-                    text_layout_system.request_fallback_font_for_char(
-                        *ch,
-                        RequestedFallbackFontSource::TextFrame(key.clone()),
-                    );
+                    let source = if redraw_only {
+                        RequestedFallbackFontSource::RedrawOnly
+                    } else {
+                        RequestedFallbackFontSource::TextFrame(key.clone())
+                    };
+                    text_layout_system.request_fallback_font_for_char(*ch, source);
                 }
             }
             self.text_frame_cache.insert(key, text_frame.clone());
