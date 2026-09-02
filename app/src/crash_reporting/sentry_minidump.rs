@@ -22,7 +22,7 @@ use anyhow::Context as _;
 use command::blocking::Command;
 use crash_handler::{CrashContext, CrashHandler};
 use lazy_static::lazy_static;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use sentry::protocol::{Attachment, AttachmentType};
 use sentry::{Breadcrumb, Level};
 use serde::{Deserialize, Serialize};
@@ -39,10 +39,26 @@ struct MinidumpState {
     /// Set by [`uninit_before_exit`] before draining `reapers`, so a racing live disable
     /// cannot register a handle that would never be joined.
     exiting: bool,
+    /// `init` calls that have passed the pre-start check but not yet installed or rolled back.
+    in_flight_inits: usize,
 }
 
 lazy_static! {
     static ref STATE: Mutex<MinidumpState> = Mutex::new(MinidumpState::default());
+    static ref STATE_CV: Condvar = Condvar::new();
+}
+
+/// Decrements [`MinidumpState::in_flight_inits`] and wakes [`uninit_before_exit`].
+struct InFlightInit;
+
+impl Drop for InFlightInit {
+    fn drop(&mut self) {
+        let mut state = STATE.lock();
+        state.in_flight_inits = state.in_flight_inits.saturating_sub(1);
+        if state.in_flight_inits == 0 {
+            STATE_CV.notify_all();
+        }
+    }
 }
 
 /// The minidump child process will exit if it doesn't receive a message after some time. This
@@ -66,11 +82,13 @@ const REAP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// inits are rejected so a privacy re-enable cannot spawn a child the exit drain will not join.
 pub fn init() {
     {
-        let state = STATE.lock();
+        let mut state = STATE.lock();
         if state.exiting || state.guard.is_some() {
             return;
         }
+        state.in_flight_inits += 1;
     }
+    let _in_flight = InFlightInit;
 
     let guard = match MinidumpGuard::start() {
         Ok(guard) => guard,
@@ -90,6 +108,7 @@ pub fn init() {
         }
     };
     // Drop any rejected guard outside the lock: Drop -> spawn_reaper needs that mutex.
+    // Must finish before `InFlightInit` drops so exit drain waits for this cleanup.
     drop(rejected);
 }
 
@@ -133,11 +152,15 @@ pub fn uninit() {
 /// afterward.
 ///
 /// Also joins any background reapers started by earlier [`uninit`] calls, so a live disable
-/// followed immediately by process exit still reaps within [`REAP_TIMEOUT`].
+/// followed immediately by process exit still reaps within [`REAP_TIMEOUT`]. Waits for any
+/// `init` that has already begun so a rejected start is reaped before this returns.
 pub fn uninit_before_exit() {
     let (maybe_guard, reapers) = {
         let mut state = STATE.lock();
         state.exiting = true;
+        while state.in_flight_inits > 0 {
+            STATE_CV.wait(&mut state);
+        }
         (state.guard.take(), std::mem::take(&mut state.reapers))
     };
     if let Some(mut guard) = maybe_guard {
@@ -579,6 +602,8 @@ fn reset_state_for_tests() {
     let (guard, handles) = {
         let mut state = STATE.lock();
         state.exiting = false;
+        state.in_flight_inits = 0;
+        STATE_CV.notify_all();
         (state.guard.take(), std::mem::take(&mut state.reapers))
     };
     drop(guard);
@@ -588,6 +613,28 @@ fn reset_state_for_tests() {
 #[cfg(test)]
 fn has_guard() -> bool {
     STATE.lock().guard.is_some()
+}
+
+#[cfg(test)]
+fn in_flight_inits() -> usize {
+    STATE.lock().in_flight_inits
+}
+
+/// Stalls after claiming an in-flight init, with a real child already spawned, then rolls the
+/// child back. Used to race [`uninit_before_exit`] against a start that has not yet installed.
+#[cfg(test)]
+fn init_with_child_stalled_for_tests(child: process::Child, stall: std::sync::mpsc::Receiver<()>) {
+    {
+        let mut state = STATE.lock();
+        if state.exiting || state.guard.is_some() {
+            rollback_spawned_child(child);
+            return;
+        }
+        state.in_flight_inits += 1;
+    }
+    let _in_flight = InFlightInit;
+    let _ = stall.recv();
+    rollback_spawned_child(child);
 }
 
 /// Poll `child` for exit, up to `timeout`, so it gets reaped instead of left as a zombie.
