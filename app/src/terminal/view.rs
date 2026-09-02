@@ -122,8 +122,10 @@ use session_sharing_protocol::sharer::{
 use settings::{Setting, ToggleableSetting};
 use shared_session::cloud_conversation_continuation::CloudConversationContinuationUiState;
 pub(crate) use shared_session::cloud_conversation_continuation::{
-    AIQueryRouting, CompletedChildPresentation, ConversationAccess,
-    completed_child_conversation_access, completed_child_presentation, resolve_ai_query_routing,
+    AIQueryRouting, CloudRoutingIndicator, CompletedChildPresentation, ConversationAccess,
+    completed_child_conversation_access, completed_child_presentation,
+    is_retained_setup_failure_debug_editable_for_task, resolve_ai_query_routing,
+    resolve_ambient_agent_task_id,
 };
 use shared_session::{SharedSessionAdapter, Viewer};
 use ssh_file_upload::{FileUpload, FileUploadEvent};
@@ -131,6 +133,7 @@ use sum_tree::SeekBias;
 use use_agent_footer::UseAgentToolbar;
 use uuid::Uuid;
 use vec1::vec1;
+use warp_completer::meta::Span;
 use warp_core::r#async::debounce;
 use warp_core::channel::ChannelState;
 use warp_core::command::ExitCode;
@@ -244,6 +247,7 @@ use crate::ai::blocklist::codebase_index_speedbump_banner::{
 use crate::ai::blocklist::diff_storage::DiffStorageHelper;
 use crate::ai::blocklist::diff_types::FileDiff;
 use crate::ai::blocklist::inline_action::code_diff_view::CodeDiffView;
+use crate::ai::blocklist::local_agent_task_sync_model::LocalAgentTaskSyncModel;
 use crate::ai::blocklist::model::{
     AIBlockModel, AIBlockModelHelper, AIBlockModelImpl, AIBlockOutputStatus,
 };
@@ -1408,6 +1412,9 @@ pub enum ContextMenuAction {
     CopyAIBlockQuery {
         ai_block_view_id: EntityId,
     },
+    CopyAIBlockTimestamp {
+        ai_block_view_id: EntityId,
+    },
     /// Copy the AI block output text
     CopyAIBlockOutput {
         ai_block_view_id: EntityId,
@@ -1508,6 +1515,7 @@ impl fmt::Debug for ContextMenuAction {
             StopSharing => f.write_str("StopSharing"),
             CopyAIDebuggingLink { .. } => f.write_str("CopyAIDebuggingLink"),
             CopyAIBlockQuery { .. } => f.write_str("CopyAIBlockPrompt"),
+            CopyAIBlockTimestamp { .. } => f.write_str("CopyAIBlockTimestamp"),
             CopyAIBlockOutput { .. } => f.write_str("CopyAIBlockOutput"),
             CopyAIBlock { .. } => f.write_str("CopyAIBlockBoth"),
             CopyAIBlockConversation { .. } => f.write_str("CopyAIBlockConversation"),
@@ -1918,7 +1926,7 @@ pub enum Event {
     TerminateFileUploadSession(FileUploadId),
     RunNativeShellCompletions {
         buffer_text: String,
-        results_tx: async_channel::Sender<Vec<ShellCompletion>>,
+        results_tx: async_channel::Sender<(Vec<ShellCompletion>, Option<Span>)>,
     },
     /// Emitted when the user clicks "install" in the SSH remote-server choice block.
     RemoteServerInstallRequested {
@@ -3160,7 +3168,10 @@ impl TerminalView {
             ActiveSession::new(sessions.clone(), model_events_handle.clone(), ctx)
         });
         let ambient_agent_view_model = is_ambient_agent.then(|| {
-            ctx.add_model(|ctx| ambient_agent::AmbientAgentViewModel::new(terminal_view_id, ctx))
+            let terminal_view = terminal_view.clone();
+            ctx.add_model(|ctx| {
+                ambient_agent::AmbientAgentViewModel::new(terminal_view_id, terminal_view, ctx)
+            })
         });
 
         let ephemeral_message_model = ctx.add_model(|_| EphemeralMessageModel::new());
@@ -3503,6 +3514,7 @@ impl TerminalView {
                 &model_events_handle,
                 model.clone(),
                 terminal_view_id,
+                UserWorkspaces::team_context_resolver(terminal_view.clone()),
                 conversation_selection.clone(),
                 ctx,
             )
@@ -8033,8 +8045,10 @@ impl TerminalView {
             return existing;
         }
         let terminal_view_id = self.view_id;
-        let model =
-            ctx.add_model(|ctx| ambient_agent::AmbientAgentViewModel::new(terminal_view_id, ctx));
+        let terminal_view = ctx.handle();
+        let model = ctx.add_model(|ctx| {
+            ambient_agent::AmbientAgentViewModel::new(terminal_view_id, terminal_view, ctx)
+        });
         self.wire_ambient_agent_view_model(model.clone(), ctx);
         // Notify observers (e.g. `PaneGroup::create_shared_session_viewer`) that the model
         // now exists so they can wire the viewer `TerminalManager` to its session events.
@@ -8101,10 +8115,7 @@ impl TerminalView {
         model: &TerminalModel,
         app: &AppContext,
     ) -> Option<AmbientAgentTaskId> {
-        self.ambient_agent_view_model
-            .as_ref()
-            .and_then(|model| model.as_ref(app).task_id())
-            .or_else(|| model.ambient_agent_task_id())
+        resolve_ambient_agent_task_id(self.ambient_agent_view_model.as_ref(), model, app)
     }
     pub fn ambient_agent_task_id_for_details_panel(
         &self,
@@ -10805,7 +10816,7 @@ impl TerminalView {
 
         // Check if the model supports AWS Bedrock routing
         let llm_prefs = LLMPreferences::as_ref(ctx);
-        let Some(llm_info) = llm_prefs.get_llm_info(model_id) else {
+        let Some(llm_info) = llm_prefs.get_llm_info(model_id, ctx) else {
             return;
         };
 
@@ -12874,8 +12885,7 @@ impl TerminalView {
                 ctx.emit(Event::ShellSpawned(*shell_type));
                 ctx.notify();
             }
-            ModelEvent::CompletionsFinished(_data) => {}
-            ModelEvent::SendCompletionsPrompt => {}
+            ModelEvent::CompletionsFinished(..) => {}
             ModelEvent::ImageReceived {
                 image_id,
                 image_data,
@@ -13401,30 +13411,49 @@ impl TerminalView {
         }
     }
 
-    fn child_conversation_id_for_cli_status_updates(
+    /// Resolves the conversation this pane's CLI agent status updates should
+    /// be written to: the conversation whose `task_id` matches the ambient
+    /// task this pane's CLI-harness session is registered under (see
+    /// `LocalAgentTaskSyncModel::register_cli_session`). Prefers the pane's
+    /// active conversation; otherwise falls back to this terminal surface's
+    /// sole live conversation with a matching task_id, if unambiguous.
+    ///
+    /// Returns `None` when this pane has no registered ambient task — e.g. a
+    /// purely interactive CLI agent session with no orchestration/ambient
+    /// run behind it — since there is no `AIConversation` to bridge status
+    /// into in that case. The task_id match also guards against writing
+    /// into an unrelated conversation that happens to be live in the same
+    /// pane (e.g. an earlier native Agent Mode conversation).
+    ///
+    /// Not scoped to child (orchestration) conversations: nothing else in
+    /// the codebase keeps a CLI-harness conversation's `ConversationStatus`
+    /// in sync with the harness's own lifecycle hooks, so a root/standalone
+    /// CLI-harness conversation needs this bridge just as much as a child
+    /// one does (e.g. for orchestration event delivery, which reads
+    /// `ConversationStatus` directly).
+    fn conversation_id_for_cli_agent_status_updates(
         &self,
         ctx: &AppContext,
     ) -> Option<AIConversationId> {
-        if let Some(conversation_id) = BlocklistAIHistoryModel::as_ref(ctx)
+        let task_id =
+            LocalAgentTaskSyncModel::as_ref(ctx).task_id_for_terminal_view(self.view_id)?;
+        let matches_task = |conversation: &&AIConversation| conversation.task_id() == Some(task_id);
+
+        let history_model = BlocklistAIHistoryModel::as_ref(ctx);
+        if let Some(conversation_id) = history_model
             .active_conversation(self.view_id)
-            .and_then(|conversation| {
-                conversation
-                    .is_child_agent_conversation()
-                    .then_some(conversation.id())
-            })
+            .filter(matches_task)
+            .map(|conversation| conversation.id())
         {
             return Some(conversation_id);
         }
 
-        let mut child_conversation_ids = BlocklistAIHistoryModel::as_ref(ctx)
+        let mut conversation_ids = history_model
             .all_live_conversations_for_terminal_surface(self.view_id)
-            .filter(|conversation| conversation.is_child_agent_conversation())
+            .filter(matches_task)
             .map(|conversation| conversation.id());
-        let child_conversation_id = child_conversation_ids.next()?;
-        child_conversation_ids
-            .next()
-            .is_none()
-            .then_some(child_conversation_id)
+        let conversation_id = conversation_ids.next()?;
+        conversation_ids.next().is_none().then_some(conversation_id)
     }
 
     /// If the startup auto-open setting is enabled, auto-opens rich input for a
@@ -13516,7 +13545,7 @@ impl TerminalView {
             return;
         }
 
-        if let Some(conversation_id) = self.child_conversation_id_for_cli_status_updates(ctx) {
+        if let Some(conversation_id) = self.conversation_id_for_cli_agent_status_updates(ctx) {
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, ctx| {
                 history_model.update_conversation_status(
                     self.view_id,
@@ -21718,6 +21747,50 @@ impl TerminalView {
         true
     }
 
+    /// Submits a follow-up through the run follow-up service for the REMOTE-2661 retained
+    /// setup-failure debug route. Unlike [`Self::try_submit_pending_cloud_followup`], not gated
+    /// by `HandoffCloudCloud`: the server alone decides whether it bootstraps a debug
+    /// conversation or starts a new VM.
+    ///
+    /// Returns `false` when the follow-up couldn't be routed (no bound ambient view model, or
+    /// one bound to a different task); the caller then shows an error toast.
+    fn try_submit_setup_failure_debug_followup(
+        &mut self,
+        task_id: crate::ai::ambient_agents::AmbientAgentTaskId,
+        prompt: String,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if prompt.trim().is_empty() {
+            self.input.update(ctx, |input, ctx| {
+                input.reset_after_cloud_followup_submission(ctx);
+                input.set_input_mode_agent(true, ctx);
+            });
+            self.update_pane_configuration(ctx);
+            self.focus_input_box(ctx);
+            ctx.notify();
+            return true;
+        }
+
+        let Some(ambient_agent_view_model) = self.ambient_agent_view_model.clone() else {
+            return false;
+        };
+        if ambient_agent_view_model.as_ref(ctx).task_id() != Some(task_id) {
+            return false;
+        }
+
+        ambient_agent_view_model.update(ctx, |model, ctx| {
+            model.submit_setup_failure_debug_followup(prompt, ctx);
+        });
+
+        self.input.update(ctx, |input, ctx| {
+            input.reset_after_cloud_followup_submission(ctx);
+            input.set_input_mode_agent(true, ctx);
+        });
+        self.update_pane_configuration(ctx);
+        ctx.notify();
+        true
+    }
+
     fn handle_input_event(&mut self, event: &InputEvent, ctx: &mut ViewContext<Self>) {
         match event {
             InputEvent::Enter => self.clear_prompt_suggestions(ctx),
@@ -21784,6 +21857,14 @@ impl TerminalView {
                     return;
                 }
                 self.show_error_toast("Couldn't continue this cloud task.".to_string(), ctx);
+            }
+            InputEvent::SubmitSetupFailureDebugFollowup { task_id, prompt } => {
+                if !self.try_submit_setup_failure_debug_followup(*task_id, prompt.clone(), ctx) {
+                    self.show_error_toast(
+                        "Couldn't reach the retained session to debug it.".to_string(),
+                        ctx,
+                    );
+                }
             }
             InputEvent::CancelSharedSessionConversation {
                 server_conversation_token,
@@ -25228,6 +25309,18 @@ impl TerminalView {
                     {
                         ai_metadata.ai_block_handle.update(ctx, |block, ctx| {
                             block.handle_action(&AIBlockAction::CopyQuery, ctx);
+                        });
+                        break;
+                    }
+                }
+            }
+            CopyAIBlockTimestamp { ai_block_view_id } => {
+                for rich_content in self.rich_content_views.iter() {
+                    if let Some(ai_metadata) = rich_content.ai_block_metadata()
+                        && ai_metadata.ai_block_handle.id() == *ai_block_view_id
+                    {
+                        ai_metadata.ai_block_handle.update(ctx, |block, ctx| {
+                            block.handle_action(&AIBlockAction::CopyTimestamp, ctx);
                         });
                         break;
                     }
