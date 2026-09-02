@@ -439,9 +439,15 @@ fn scene_glyph_count(hide_cursor_cell: bool, use_ligature_rendering: bool) -> us
     })
 }
 
-fn assert_hidden_cursor_cell_glyph_is_painted(use_ligature_rendering: bool) {
-    let hidden = scene_glyph_count(true, use_ligature_rendering);
-    let shown = scene_glyph_count(false, use_ligature_rendering);
+fn ligature_mapped_columns(hide_cursor_cell: bool) -> Vec<usize> {
+    let _ = scene_glyph_count(hide_cursor_cell, true);
+    super::take_last_ligature_cell_map()
+}
+
+#[test]
+fn paints_glyph_at_hidden_pty_cursor_cell_without_ligatures() {
+    let hidden = scene_glyph_count(true, false);
+    let shown = scene_glyph_count(false, false);
     assert_eq!(
         hidden, shown,
         "hiding the Warp cursor overlay must still paint the PTY glyph under the cursor"
@@ -453,11 +459,15 @@ fn assert_hidden_cursor_cell_glyph_is_painted(use_ligature_rendering: bool) {
 }
 
 #[test]
-fn paints_glyph_at_hidden_pty_cursor_cell_without_ligatures() {
-    assert_hidden_cursor_cell_glyph_is_painted(false);
-}
-
-#[test]
 fn paints_glyph_at_hidden_pty_cursor_cell_with_ligatures() {
-    assert_hidden_cursor_cell_glyph_is_painted(true);
+    let hidden = ligature_mapped_columns(true);
+    let shown = ligature_mapped_columns(false);
+    assert_eq!(
+        hidden, shown,
+        "hiding the Warp cursor overlay must still include the PTY cursor cell in ligature mapping"
+    );
+    assert!(
+        hidden.contains(&0),
+        "expected the PTY cursor cell column to remain in the ligature character map"
+    );
 }

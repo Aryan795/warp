@@ -1435,6 +1435,10 @@ fn render_grid_with_ligatures<'a>(
         }
 
         let string_data = string_builder.build();
+        #[cfg(test)]
+        LAST_LIGATURE_CELL_MAP.with(|map| {
+            *map.borrow_mut() = string_data.character_index_to_cell_map.clone();
+        });
 
         let laid_out = ctx.text_layout_cache.layout_line(
             &string_data.line,
@@ -1504,22 +1508,6 @@ fn paint_line(
     character_index_to_cell_map: &[usize],
     scene: &mut Scene,
 ) {
-    #[cfg(test)]
-    if line.runs.is_empty() {
-        // The unit-test FontDB returns empty line layouts, so ligature tests would not observe a
-        // skipped cursor cell without a stand-in glyph per mapped cell.
-        for &col in character_index_to_cell_map {
-            scene.draw_glyph(
-                baseline + vec2f(col as f32 * cell_width, 0.),
-                0,
-                FontId(0),
-                line.font_size,
-                ColorU::white(),
-            );
-        }
-        return;
-    }
-
     for run in &line.runs {
         let glyph_color = run.styles.foreground_color.unwrap_or_default();
 
@@ -2870,6 +2858,17 @@ fn render_dotted_line(
                 .with_dashed_border(BLOCK_FILTER_DOTTED_LINE_DASH)
                 .with_border_color(*dotted_line_color),
         );
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_LIGATURE_CELL_MAP: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn take_last_ligature_cell_map() -> Vec<usize> {
+    LAST_LIGATURE_CELL_MAP.with(|map| map.replace(Vec::new()))
 }
 
 #[cfg(test)]
