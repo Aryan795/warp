@@ -178,18 +178,28 @@ struct CommandHistorySummary {
     /// Of those executions, how many ran from each directory. Executions with no recorded pwd
     /// aren't counted here, so `count_by_cwd.values().sum() <= total_count`.
     count_by_cwd: HashMap<String, u32>,
+
+    /// Cached `count_by_cwd.values().sum()`, kept in lockstep by `new`/`record_additional_execution`
+    /// rather than summed on every read: `command_execution_stats` is called once per visible
+    /// candidate from the main-thread snapshot callback in `history_data_source_for_session`, so
+    /// summing `count_by_cwd` there on every call would turn snapshot construction from
+    /// O(history entries) into O(sum of distinct directories across every command).
+    pwd_known_count: u32,
 }
 
 impl CommandHistorySummary {
     fn new(most_recent_entry: HistoryEntry) -> Self {
         let mut count_by_cwd = HashMap::new();
+        let mut pwd_known_count = 0;
         if let Some(pwd) = most_recent_entry.pwd.clone() {
             count_by_cwd.insert(pwd, 1);
+            pwd_known_count = 1;
         }
         Self {
             most_recent_entry,
             total_count: 1,
             count_by_cwd,
+            pwd_known_count,
         }
     }
 
@@ -199,6 +209,7 @@ impl CommandHistorySummary {
         self.total_count += 1;
         if let Some(pwd) = pwd {
             *self.count_by_cwd.entry(pwd.to_owned()).or_insert(0) += 1;
+            self.pwd_known_count += 1;
         }
     }
 }
@@ -546,7 +557,7 @@ impl History {
                 .and_then(|cwd| summary.count_by_cwd.get(cwd))
                 .copied()
                 .unwrap_or(0),
-            pwd_known_count: summary.count_by_cwd.values().sum(),
+            pwd_known_count: summary.pwd_known_count,
         }
     }
 
