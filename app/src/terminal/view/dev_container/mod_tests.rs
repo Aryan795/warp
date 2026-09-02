@@ -220,6 +220,20 @@ fn interpret_dev_container_up_output_uses_bounded_stderr_tail_fallback() {
 }
 
 #[test]
+fn leftover_stdout_strips_ansi_from_failure_text() {
+    let stdout = "\u{1b}[31mContainer started\u{1b}[0m\n\u{1b}]0;title\u{7}not a result\n";
+    let message = dev_container_up_failure_message(stdout.as_bytes(), b"");
+    assert!(
+        message.contains("Container started"),
+        "plain leftover stdout must remain, got {message:?}"
+    );
+    assert!(
+        !message.contains('\u{1b}'),
+        "CSI/OSC must not leak into failure text, got {message:?}"
+    );
+}
+
+#[test]
 fn interpret_dev_container_up_output_strips_tty_redraw_from_stderr_fallback() {
     let stderr = "\u{1b}[1A\u{1b}[K#15 extracting 1MB\r\u{1b}[1A\u{1b}[KCannot connect to the Docker daemon\n";
     let outcome = interpret_dev_container_up_output(false, b"", stderr.as_bytes());

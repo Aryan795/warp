@@ -240,24 +240,42 @@ where
     R: futures_util::AsyncRead + Unpin,
 {
     let mut buf = [0_u8; 8192];
-    let mut bytes = Vec::new();
+    let mut complete = Vec::new();
+    let mut pending = Vec::new();
     let mut oversized = false;
     loop {
         let n = stdout.read(&mut buf).await?;
         if n == 0 {
             break;
         }
-        if oversized {
-            continue;
+        pending.extend_from_slice(&buf[..n]);
+        while let Some(newline_at) = pending.iter().position(|&b| b == b'\n') {
+            let record: Vec<u8> = pending.drain(..=newline_at).collect();
+            append_complete_stdout_record(&mut complete, &record);
         }
-        if bytes.len() + n > STDOUT_LIMIT {
+        if pending.len() > STDOUT_LIMIT {
             oversized = true;
-            bytes.clear();
-            continue;
+            pending.clear();
         }
-        bytes.extend_from_slice(&buf[..n]);
     }
-    Ok(DevContainerUpStdout { bytes, oversized })
+    Ok(DevContainerUpStdout {
+        bytes: complete,
+        oversized,
+    })
+}
+
+fn append_complete_stdout_record(complete: &mut Vec<u8>, record: &[u8]) {
+    complete.extend_from_slice(record);
+    if complete.len() <= STDOUT_LIMIT {
+        return;
+    }
+    let overflow = complete.len() - STDOUT_LIMIT;
+    let skip = complete[overflow..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|i| overflow + i + 1)
+        .unwrap_or(overflow);
+    complete.drain(..skip);
 }
 
 async fn drain_stderr<R, F>(mut stderr: R, on_stderr: Arc<Mutex<F>>) -> io::Result<Vec<u8>>

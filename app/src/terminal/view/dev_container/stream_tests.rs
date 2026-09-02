@@ -70,43 +70,67 @@ os.write(1, b'\n{"outcome":"success","containerId":"abc","remoteWorkspaceFolder"
 #[cfg(unix)]
 #[test]
 fn pty_stdio_is_tty_and_redraw_reaches_sink_before_exit() {
+    use std::time::Duration;
+
+    use futures::future::{self, Either};
+    use instant::Instant;
+
     block_on(async {
+        let release_dir = tempfile::tempdir().expect("release dir");
+        let release_path = release_dir.path().join("go");
         let mut command = command::r#async::Command::new_with_process_group("python3");
         command
             .arg("-c")
             .arg(
                 r#"
-import os
+import os, time
+path = os.environ["DC_RELEASE_PATH"]
 os.write(2, f"stdout_tty={int(os.isatty(1))} stderr_tty={int(os.isatty(2))}\n".encode())
 os.write(2, b"first\rsecond\n")
+while not os.path.exists(path):
+    time.sleep(0.01)
 os.write(1, b'note\n{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"/w"}\n')
 "#,
             )
+            .env("DC_RELEASE_PATH", &release_path)
             .kill_on_drop(true);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_cb = seen.clone();
-        let (drain, success) = super::drain_dev_container_child(command, None, move |chunk| {
+        let drain_fut = super::drain_dev_container_child(command, None, move |chunk| {
             seen_cb.lock().unwrap().extend_from_slice(chunk);
-        })
-        .await
-        .expect("drain");
-        assert!(success);
-        let seen_bytes = seen.lock().unwrap().clone();
-        let stderr = String::from_utf8_lossy(&seen_bytes);
-        assert!(
-            stderr.contains("stdout_tty=1"),
-            "fd 1 must be a TTY, got {stderr:?}"
-        );
-        assert!(
-            stderr.contains("stderr_tty=1"),
-            "fd 2 must be a TTY, got {stderr:?}"
-        );
-        assert!(
-            stderr.contains("second"),
-            "redraw must reach sink, got {stderr:?}"
-        );
-        let stdout = String::from_utf8_lossy(&drain.stdout.bytes);
-        assert!(stdout.contains(r#""outcome":"success""#), "got {stdout:?}");
+        });
+        let wait_fut = async {
+            let started = Instant::now();
+            loop {
+                let seen_bytes = seen.lock().unwrap().clone();
+                let stderr = String::from_utf8_lossy(&seen_bytes);
+                if stderr.contains("stdout_tty=1")
+                    && stderr.contains("stderr_tty=1")
+                    && stderr.contains("second")
+                {
+                    std::fs::write(&release_path, b"go").expect("release child");
+                    return;
+                }
+                assert!(
+                    started.elapsed().as_secs() < 5,
+                    "stderr redraw must stream before process EOF, got {stderr:?}"
+                );
+                warpui::r#async::Timer::after(Duration::from_millis(10)).await;
+            }
+        };
+        let work = async { futures::join!(drain_fut, wait_fut) };
+        let timeout = async {
+            warpui::r#async::Timer::after(Duration::from_secs(5)).await;
+        };
+        match future::select(Box::pin(work), Box::pin(timeout)).await {
+            Either::Right(_) => panic!("timed out waiting for pre-EOF PTY stream"),
+            Either::Left(((drain_result, _), _)) => {
+                let (drain, success) = drain_result.expect("drain");
+                assert!(success);
+                let stdout = String::from_utf8_lossy(&drain.stdout.bytes);
+                assert!(stdout.contains(r#""outcome":"success""#), "got {stdout:?}");
+            }
+        }
     });
 }
 
@@ -251,6 +275,39 @@ fn drain_marks_stdout_oversized_past_one_mib() {
         let _ = child.status().await;
         assert!(result.stdout.oversized);
         assert!(result.stdout.bytes.is_empty());
+        assert!(result.stdout.bytes.len() <= STDOUT_LIMIT);
+    });
+}
+
+#[test]
+fn drain_keeps_final_json_after_more_than_one_mib_of_complete_records() {
+    block_on(async {
+        let mut command = command::r#async::Command::new("python3");
+        command
+            .arg("-c")
+            .arg(format!(
+                r##"
+import os
+os.write(1, (b"n\n" * {}))
+os.write(1, b'{{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"/w"}}\n')
+os.write(2, b"")
+"##,
+                (STDOUT_LIMIT / 2) + 32
+            ))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().expect("spawn noisy stdout child");
+        let stdout = child.stdout.take().expect("stdout");
+        let stderr = child.stderr.take().expect("stderr");
+        let result = drain_dev_container_pipes(stdout, stderr, |_| {})
+            .await
+            .expect("drain");
+        let _ = child.status().await;
+        assert!(!result.stdout.oversized);
+        assert!(result.stdout.bytes.len() <= STDOUT_LIMIT);
+        let stdout = String::from_utf8_lossy(&result.stdout.bytes);
+        assert!(stdout.contains(r#""outcome":"success""#), "got {stdout:?}");
     });
 }
 

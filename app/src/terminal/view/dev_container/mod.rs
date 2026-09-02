@@ -1029,7 +1029,7 @@ fn dev_container_up_failure_message(stdout: &[u8], stderr: &[u8]) -> String {
 
 #[cfg(feature = "local_tty")]
 fn leftover_stdout_lines(stdout: &[u8]) -> Option<String> {
-    let stdout_text = String::from_utf8_lossy(stdout);
+    let stdout_text = strip_ansi_control_sequences(&String::from_utf8_lossy(stdout));
     let mut lines: Vec<&str> = stdout_text
         .lines()
         .map(str::trim)
@@ -1176,8 +1176,15 @@ fn dev_container_preflight_args(
 #[cfg(feature = "local_tty")]
 fn parse_dev_container_up_stdout(stdout: &[u8]) -> Option<DevContainerUpResult> {
     let stdout_text = String::from_utf8_lossy(stdout);
-    let last_line = stdout_text.lines().next_back()?.trim();
-    serde_json::from_str(last_line).ok()
+    stdout_text.lines().rev().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() {
+            return None;
+        }
+        serde_json::from_str::<DevContainerUpResult>(line)
+            .ok()
+            .filter(|parsed| !parsed.outcome.is_empty())
+    })
 }
 
 /// Finds `devcontainer.json` candidates for `workspace_folder`, in the order the
