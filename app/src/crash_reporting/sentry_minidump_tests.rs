@@ -170,6 +170,28 @@ fn init_after_exit_does_not_install_a_guard() {
     reset_state_for_tests();
 }
 
+#[test]
+fn rollback_spawned_child_reaps_a_live_process() {
+    let mut child = spawn_long_lived_process();
+    let pid = child.id();
+    assert_ne!(pid, 0, "test setup must spawn a real child");
+    assert!(
+        child
+            .try_wait()
+            .expect("try_wait on a live child")
+            .is_none(),
+        "test setup must have a still-running child"
+    );
+
+    rollback_spawned_child(child);
+
+    #[cfg(unix)]
+    {
+        let exists = unsafe { libc::kill(pid as i32, 0) };
+        assert_eq!(exists, -1, "rollback must reap the spawned child");
+    }
+}
+
 fn spawn_short_lived_process() -> process::Child {
     #[cfg(unix)]
     let mut command = Command::new("true");

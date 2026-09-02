@@ -367,14 +367,18 @@ impl MinidumpGuard {
                 .spawn()
                 .context("Unable to spawn minidump server process")?;
 
-        let client = Arc::new(
-            wait_for_server(socket_path.as_path()).context("Unable to create minidump client")?,
-        );
+        let client = match wait_for_server(socket_path.as_path()) {
+            Ok(client) => Arc::new(client),
+            Err(err) => {
+                rollback_spawned_child(child);
+                return Err(err).context("Unable to create minidump client");
+            }
+        };
         spawn_keepalive_thread(client.clone());
 
         let client2 = client.clone();
 
-        let crash_handler = CrashHandler::attach(unsafe {
+        let crash_handler = match CrashHandler::attach(unsafe {
             crash_handler::make_crash_event(move |crash_context: &CrashContext| {
                 if let Some(details) = format_crash_details(crash_context) {
                     let _ = send_command(
@@ -390,8 +394,14 @@ impl MinidumpGuard {
                 let dump_result = client.request_dump(crash_context);
                 crash_handler::CrashEventResult::Handled(dump_result.is_ok())
             })
-        })
-        .context("Failed to attach crash signal handler")?;
+        }) {
+            Ok(handler) => handler,
+            Err(err) => {
+                let _ = send_command(client2.as_ref(), MinidumpCommand::Shutdown);
+                rollback_spawned_child(child);
+                return Err(err).context("Failed to attach crash signal handler");
+            }
+        };
 
         // Ensure that the crash server process can ptrace Warp.
         #[cfg(target_os = "linux")]
@@ -482,6 +492,13 @@ impl Drop for MinidumpGuard {
             spawn_reaper(child);
         }
     }
+}
+
+/// Kill and bounded-wait a child spawned by [`MinidumpGuard::start`] after a later step failed.
+/// Does not log: this runs before the crash handler is attached, when Sentry I/O can deadlock.
+fn rollback_spawned_child(mut child: process::Child) {
+    let _ = child.kill();
+    let _ = wait_with_timeout(&mut child, REAP_TIMEOUT);
 }
 
 /// Kill, then always attempt a bounded wait. `Child::kill` failing (e.g. ESRCH because the
