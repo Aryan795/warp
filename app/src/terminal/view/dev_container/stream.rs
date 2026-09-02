@@ -75,18 +75,18 @@ pub(crate) fn dev_container_up_command(
 pub(crate) async fn drain_dev_container_child<F>(
     command: Command,
     cancel: Option<&DevContainerBuildCancel>,
-    on_stderr: F,
+    on_output: F,
 ) -> io::Result<(DevContainerDrain, bool)>
 where
     F: FnMut(&[u8]) + Send,
 {
-    drain_dev_container_child_with_size(command, cancel, on_stderr, PtySize::default()).await
+    drain_dev_container_child_with_size(command, cancel, on_output, PtySize::default()).await
 }
 
 pub(crate) async fn drain_dev_container_child_with_size<F>(
     mut command: Command,
     cancel: Option<&DevContainerBuildCancel>,
-    on_stderr: F,
+    on_output: F,
     pty_size: PtySize,
 ) -> io::Result<(DevContainerDrain, bool)>
 where
@@ -109,7 +109,7 @@ where
         let drain_fut = drain_dev_container_pipes(
             PtyMasterReader(stdout_master),
             PtyMasterReader(stderr_master),
-            on_stderr,
+            on_output,
         );
         let status_fut = {
             let kill_group = kill_group.clone();
@@ -142,7 +142,7 @@ where
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("devcontainer up stderr was not piped"))?;
-        let drain_fut = drain_dev_container_pipes(stdout, stderr, on_stderr);
+        let drain_fut = drain_dev_container_pipes(stdout, stderr, on_output);
         let status_fut = {
             let kill_group = kill_group.clone();
             async move {
@@ -218,16 +218,16 @@ where
 pub(crate) async fn drain_dev_container_pipes<R1, R2, F>(
     stdout: R1,
     stderr: R2,
-    on_stderr: F,
+    on_output: F,
 ) -> io::Result<DevContainerDrain>
 where
     R1: futures_util::AsyncRead + Unpin,
     R2: futures_util::AsyncRead + Unpin,
     F: FnMut(&[u8]) + Send,
 {
-    let on_stderr = Arc::new(Mutex::new(on_stderr));
-    let stdout_task = drain_stdout(stdout);
-    let stderr_task = drain_stderr(stderr, on_stderr);
+    let on_output = Arc::new(Mutex::new(on_output));
+    let stdout_task = drain_stdout(stdout, on_output.clone());
+    let stderr_task = drain_stderr(stderr, on_output);
     let (stdout, stderr_tail) = try_join(stdout_task, stderr_task).await?;
     Ok(DevContainerDrain {
         stdout,
@@ -235,14 +235,21 @@ where
     })
 }
 
-async fn drain_stdout<R>(mut stdout: R) -> io::Result<DevContainerUpStdout>
+async fn drain_stdout<R, F>(
+    mut stdout: R,
+    on_output: Arc<Mutex<F>>,
+) -> io::Result<DevContainerUpStdout>
 where
     R: futures_util::AsyncRead + Unpin,
+    F: FnMut(&[u8]),
 {
     let mut buf = [0_u8; 8192];
     let mut complete = Vec::new();
     let mut pending = Vec::new();
     let mut oversized = false;
+    // Final status JSON is parsed for attach and must not appear in the build pane.
+    let mut held_outcome: Option<Vec<u8>> = None;
+    let mut normalizer = NewlineNormalizer::new();
     loop {
         let n = stdout.read(&mut buf).await?;
         if n == 0 {
@@ -252,16 +259,72 @@ where
         while let Some(newline_at) = pending.iter().position(|&b| b == b'\n') {
             let record: Vec<u8> = pending.drain(..=newline_at).collect();
             append_complete_stdout_record(&mut complete, &record);
+            if let Some(previous) = held_outcome.take() {
+                emit_output(&on_output, &mut normalizer, &previous);
+            }
+            if is_outcome_json_record(&record) {
+                held_outcome = Some(record);
+            } else {
+                emit_output(&on_output, &mut normalizer, &record);
+            }
         }
         if pending.len() > STDOUT_LIMIT {
             oversized = true;
             pending.clear();
+        } else if !could_be_outcome_json_prefix(&pending) {
+            emit_output(&on_output, &mut normalizer, &pending);
+            pending.clear();
         }
+    }
+    if !pending.is_empty() && !is_outcome_json_record(&pending) {
+        emit_output(&on_output, &mut normalizer, &pending);
+    }
+    let trailing = normalizer.finish();
+    if !trailing.is_empty() {
+        (on_output.lock())(&trailing);
     }
     Ok(DevContainerUpStdout {
         bytes: complete,
         oversized,
     })
+}
+
+fn emit_output<F>(on_output: &Arc<Mutex<F>>, normalizer: &mut NewlineNormalizer, bytes: &[u8])
+where
+    F: FnMut(&[u8]),
+{
+    if bytes.is_empty() {
+        return;
+    }
+    let normalized = normalizer.push(bytes);
+    if !normalized.is_empty() {
+        (on_output.lock())(&normalized);
+    }
+}
+
+fn is_outcome_json_record(record: &[u8]) -> bool {
+    let line = String::from_utf8_lossy(record);
+    let line = line.trim();
+    if line.is_empty() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("outcome")
+                .and_then(|outcome| outcome.as_str())
+                .map(|outcome| !outcome.is_empty())
+        })
+        .unwrap_or(false)
+}
+
+fn could_be_outcome_json_prefix(pending: &[u8]) -> bool {
+    match pending.iter().find(|&&byte| !matches!(byte, b' ' | b'\t')) {
+        Some(&b'{') => true,
+        Some(_) => false,
+        None => !pending.is_empty(),
+    }
 }
 
 fn append_complete_stdout_record(complete: &mut Vec<u8>, record: &[u8]) {
@@ -278,7 +341,7 @@ fn append_complete_stdout_record(complete: &mut Vec<u8>, record: &[u8]) {
     complete.drain(..skip);
 }
 
-async fn drain_stderr<R, F>(mut stderr: R, on_stderr: Arc<Mutex<F>>) -> io::Result<Vec<u8>>
+async fn drain_stderr<R, F>(mut stderr: R, on_output: Arc<Mutex<F>>) -> io::Result<Vec<u8>>
 where
     R: futures_util::AsyncRead + Unpin,
     F: FnMut(&[u8]),
@@ -293,12 +356,12 @@ where
         }
         let normalized = normalizer.push(&buf[..n]);
         append_bounded_tail(&mut stderr_tail, &normalized);
-        (on_stderr.lock())(&normalized);
+        (on_output.lock())(&normalized);
     }
     let trailing = normalizer.finish();
     if !trailing.is_empty() {
         append_bounded_tail(&mut stderr_tail, &trailing);
-        (on_stderr.lock())(&trailing);
+        (on_output.lock())(&trailing);
     }
     Ok(stderr_tail)
 }

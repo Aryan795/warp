@@ -53,12 +53,15 @@ os.write(1, b'\n{"outcome":"success","containerId":"abc","remoteWorkspaceFolder"
         .expect("drain");
         let status = child.status().await.expect("wait");
         assert!(status.success());
+        let seen = seen_stderr.lock().unwrap().clone();
         assert!(
-            seen_stderr
-                .lock()
-                .unwrap()
-                .windows(b"marker-before-exit".len())
+            seen.windows(b"marker-before-exit".len())
                 .any(|window| window == b"marker-before-exit")
+        );
+        let seen_text = String::from_utf8_lossy(&seen);
+        assert!(
+            !seen_text.contains(r#""outcome":"success""#),
+            "final status JSON must not be displayed, got {seen_text:?}"
         );
         let stdout_text = String::from_utf8_lossy(&result.stdout.bytes);
         assert!(stdout_text.contains(r#""outcome":"success""#));
@@ -87,9 +90,11 @@ import os, time
 path = os.environ["DC_RELEASE_PATH"]
 os.write(2, f"stdout_tty={int(os.isatty(1))} stderr_tty={int(os.isatty(2))}\n".encode())
 os.write(2, b"first\rsecond\n")
+os.write(1, b"layer 1MB\rlayer 2MB\n")
+os.write(1, b"cursor\x1b[1A\rupdated\n")
 while not os.path.exists(path):
     time.sleep(0.01)
-os.write(1, b'note\n{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"/w"}\n')
+os.write(1, b'{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"/w"}\n')
 "#,
             )
             .env("DC_RELEASE_PATH", &release_path)
@@ -103,17 +108,19 @@ os.write(1, b'note\n{"outcome":"success","containerId":"abc","remoteWorkspaceFol
             let started = Instant::now();
             loop {
                 let seen_bytes = seen.lock().unwrap().clone();
-                let stderr = String::from_utf8_lossy(&seen_bytes);
-                if stderr.contains("stdout_tty=1")
-                    && stderr.contains("stderr_tty=1")
-                    && stderr.contains("second")
+                let output = String::from_utf8_lossy(&seen_bytes);
+                if output.contains("stdout_tty=1")
+                    && output.contains("stderr_tty=1")
+                    && output.contains("second")
+                    && output.contains("layer 2MB")
+                    && output.contains("updated")
                 {
                     std::fs::write(&release_path, b"go").expect("release child");
                     return;
                 }
                 assert!(
                     started.elapsed().as_secs() < 5,
-                    "stderr redraw must stream before process EOF, got {stderr:?}"
+                    "PTY redraw must stream before process EOF, got {output:?}"
                 );
                 warpui::r#async::Timer::after(Duration::from_millis(10)).await;
             }
@@ -127,6 +134,19 @@ os.write(1, b'note\n{"outcome":"success","containerId":"abc","remoteWorkspaceFol
             Either::Left(((drain_result, _), _)) => {
                 let (drain, success) = drain_result.expect("drain");
                 assert!(success);
+                let displayed = String::from_utf8_lossy(&seen.lock().unwrap().clone()).into_owned();
+                assert!(
+                    displayed.contains("layer 2MB"),
+                    "stdout CR progress must be displayed, got {displayed:?}"
+                );
+                assert!(
+                    displayed.contains("updated"),
+                    "stdout cursor progress must be displayed, got {displayed:?}"
+                );
+                assert!(
+                    !displayed.contains(r#""outcome":"success""#),
+                    "final status JSON must not be displayed, got {displayed:?}"
+                );
                 let stdout = String::from_utf8_lossy(&drain.stdout.bytes);
                 assert!(stdout.contains(r#""outcome":"success""#), "got {stdout:?}");
             }
@@ -254,13 +274,13 @@ fn rejected_build_registration_terminates_before_wait() {
 }
 
 #[test]
-fn drain_marks_stdout_oversized_past_one_mib() {
+fn drain_marks_stdout_oversized_when_pending_json_prefix_exceeds_one_mib() {
     block_on(async {
         let mut command = command::r#async::Command::new("python3");
         command
             .arg("-c")
             .arg(format!(
-                "import os; os.write(1, b'x' * {}); os.write(2, b'')",
+                "import os; os.write(1, b'{{' * {}); os.write(2, b'')",
                 STDOUT_LIMIT + 1
             ))
             .stdout(Stdio::piped())
@@ -721,8 +741,12 @@ os.write(1, b'{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"
         let status = child.status().await.expect("wait");
         assert!(status.success());
         assert!(String::from_utf8_lossy(&result.stdout.bytes).contains(r#""outcome":"success""#));
-
         let decoded = seen_stderr.lock().unwrap().clone();
+        let displayed = String::from_utf8_lossy(&decoded);
+        assert!(
+            !displayed.contains(r#""outcome":"success""#),
+            "final status JSON must not be displayed, got {displayed:?}"
+        );
         let mut model = wide_terminal_model();
         model.start_commandless_output_block();
         let mut processor = Processor::new();
@@ -776,6 +800,60 @@ fn stderr_tail_overflow_keeps_decoded_diagnostics_not_json_envelopes() {
             "JSON envelopes must not appear in the failure tail, got {tail:?}"
         );
     });
+}
+
+#[test]
+fn stdout_cr_progress_reaches_sink_before_outcome_json() {
+    let progress = b"layer 1MB\r".to_vec();
+    let progress2 = b"layer 2MB\n".to_vec();
+    let json =
+        b"{\"outcome\":\"success\",\"containerId\":\"abc\",\"remoteWorkspaceFolder\":\"/w\"}\n"
+            .to_vec();
+    let released = Arc::new(Mutex::new(1usize));
+    let stdout = GatedReader {
+        chunks: vec![progress, progress2, json],
+        next: 0,
+        released: released.clone(),
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_cb = seen.clone();
+    let released_cb = released.clone();
+    let saw_progress = Arc::new(Mutex::new(false));
+    let saw_progress_cb = saw_progress.clone();
+
+    let result = block_on(async {
+        drain_dev_container_pipes(stdout, EofReader, move |chunk| {
+            let text = {
+                let mut seen = seen_cb.lock().unwrap();
+                seen.extend_from_slice(chunk);
+                String::from_utf8_lossy(&seen).into_owned()
+            };
+            let mut saw_progress = saw_progress_cb.lock().unwrap();
+            if !*saw_progress && text.contains("layer 1MB") {
+                assert!(
+                    !text.contains("\"outcome\""),
+                    "status JSON must not appear before later chunks, got {text:?}"
+                );
+                *saw_progress = true;
+                *released_cb.lock().unwrap() = usize::MAX;
+            }
+        })
+        .await
+        .expect("drain")
+    });
+
+    assert!(
+        *saw_progress.lock().unwrap(),
+        "stdout progress must stream before EOF"
+    );
+    let displayed = String::from_utf8_lossy(&seen.lock().unwrap().clone()).into_owned();
+    assert!(displayed.contains("layer 2MB"), "got {displayed:?}");
+    assert!(
+        !displayed.contains(r#""outcome":"success""#),
+        "final status JSON must not be displayed, got {displayed:?}"
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout.bytes);
+    assert!(stdout.contains(r#""outcome":"success""#), "got {stdout:?}");
 }
 
 #[test]
