@@ -212,6 +212,31 @@ impl<'a> TextLayout<'a> {
             true,
         )
     }
+
+    /// Like [`Self::layout_text`], but shapes through a throwaway cache instead of the shared,
+    /// generation-rotated [`LayoutCache`].
+    ///
+    /// A deferred paragraph only needs its full [`TextFrame`] transiently, to compute the compact
+    /// representation it actually retains (see `Paragraph::new_deferred`); the shared cache would
+    /// otherwise hold every such full frame strongly until the enclosing parallel chunk finishes,
+    /// which for a single large multiline block (one [`LayoutTask::Text`]) means every paragraph in
+    /// that block simultaneously, defeating the retention bound this cache exists to enforce.
+    pub(crate) fn layout_text_uncached(
+        &self,
+        text: &str,
+        paragraph_style: &ParagraphStyles,
+        spacing: &BlockSpacing,
+        style_runs: &[(Range<usize>, StyleAndFont)],
+    ) -> Arc<TextFrame> {
+        self.layout_text_prefix_uncached(
+            text,
+            paragraph_style,
+            spacing,
+            style_runs,
+            MAX_LAYOUT_LINE_CHARS,
+        )
+    }
+
     pub fn layout_text_with_options(
         &self,
         text: &str,
