@@ -729,10 +729,9 @@ const WARP_MD_PATH: &str = "WARP.md";
 /// name used in `app/assets/bundled/bootstrap/zsh_body.sh`.
 const EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG: &str = "external_ctrl_r_history";
 
-/// `shell_plugins` tag reported by bootstrap when `^R` is still the shell's built-in incremental
-/// history search (bash Readline / zsh ZLE). Independent of [`EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG`];
-/// bootstrap reports at most one of the two. Must match the tag name used in
-/// `app/assets/bundled/bootstrap/zsh_body.sh`.
+/// `shell_plugins` tag reported by bootstrap when `^R` is not fzf/atuin. Must match the tag
+/// name used in `app/assets/bundled/bootstrap/zsh_body.sh`.
+#[cfg(test)]
 const BUILTIN_CTRL_R_HISTORY_PLUGIN_TAG: &str = "builtin_ctrl_r_history";
 
 /// `shell_plugins` tag reported by bootstrap when the shell's `^T` binding has been rebound away
@@ -767,13 +766,12 @@ fn ctrl_r_history_handoff_kind(
     plugins: &HashSet<String>,
     shell_type: ShellType,
 ) -> Option<CtrlRHistoryHandoffKind> {
-    if FeatureFlag::ShellWidgetHandoff.is_enabled()
-        && plugins.contains(EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG)
-    {
+    let has_external = plugins.contains(EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG);
+    if FeatureFlag::ShellWidgetHandoff.is_enabled() && has_external {
         return Some(CtrlRHistoryHandoffKind::External);
     }
     if FeatureFlag::BuiltinShellHistoryHandoff.is_enabled()
-        && plugins.contains(BUILTIN_CTRL_R_HISTORY_PLUGIN_TAG)
+        && !has_external
         && matches!(shell_type, ShellType::Bash | ShellType::Zsh)
     {
         return Some(CtrlRHistoryHandoffKind::Builtin);
@@ -9273,8 +9271,8 @@ impl TerminalView {
     /// from its default reverse-history-search widget (reported via the
     /// [`EXTERNAL_CTRL_R_HISTORY_PLUGIN_TAG`] shell plugin tag, e.g. by fzf or atuin), hands the
     /// keypress off to that widget instead of opening Warp's own command search. If that tag is
-    /// absent and [`BUILTIN_CTRL_R_HISTORY_PLUGIN_TAG`] is present, hands off to bash/zsh built-in
-    /// incremental history search when [`FeatureFlag::BuiltinShellHistoryHandoff`] is enabled.
+    /// absent, hands off to bash/zsh built-in incremental history search when
+    /// [`FeatureFlag::BuiltinShellHistoryHandoff`] is enabled.
     ///
     /// Returns `true` if the handoff was triggered, in which case the caller should not open
     /// Warp's command search.

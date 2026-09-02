@@ -1597,14 +1597,9 @@ esac
         shell_plugins+=(external_ctrl_r_history)
       fi
 
-      # `read -e -i` needs bash >= 4.0; skip the built-in path on older bash (including macOS 3.2).
+      # Default Ctrl-R is reverse-i-search. Only skip the tag on bash < 4.0 (`read -e -i`).
       if [ -z "$_WARP_EXTERNAL_CTRL_R_WIDGET" ] && [ "$(warp_at_least_bash_version "4.0")" = "1" ]; then
-        warp_ctrl_r_readline="$(bind -p 2>/dev/null | command -p sed -n 's/^"\\C-r": //p')"
-        case "$warp_ctrl_r_readline" in
-          reverse-search-history)
-            shell_plugins+=(builtin_ctrl_r_history)
-            ;;
-        esac
+        shell_plugins+=(builtin_ctrl_r_history)
       fi
 
       _WARP_EXTERNAL_CTRL_T_WIDGET=""

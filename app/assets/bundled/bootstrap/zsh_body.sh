@@ -1427,11 +1427,14 @@ esac
         _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
         shell_plugins+=(external_ctrl_r_history)
         ;;
-      history-incremental-search-backward|history-incremental-pattern-search-backward)
-        _WARP_BUILTIN_CTRL_R_WIDGET="$warp_ctrl_r_widget"
+      *)
+        _WARP_BUILTIN_CTRL_R_WIDGET="${warp_ctrl_r_widget:-history-incremental-search-backward}"
         shell_plugins+=(builtin_ctrl_r_history)
         ;;
     esac
+  else
+    _WARP_BUILTIN_CTRL_R_WIDGET="history-incremental-search-backward"
+    shell_plugins+=(builtin_ctrl_r_history)
   fi
 
   # Detect whether ctrl-t has been rebound to fzf's file-search widget.

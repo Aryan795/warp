@@ -213,8 +213,6 @@ WARP_IN_MSYS2=false
 bind () {
   if [ "$1" = -X ]; then
     printf '%s\n' '"\C-r": "__fzf_history__"'
-  elif [ "$1" = -p ]; then
-    printf '%s\n' '"\C-r": reverse-search-history'
   fi
 }
 warp_at_least_bash_version () { echo 1; }
@@ -226,12 +224,7 @@ case "$warp_ctrl_r_binding" in
     ;;
 esac
 if [ -z "$_WARP_EXTERNAL_CTRL_R_WIDGET" ] && [ "$(warp_at_least_bash_version "4.0")" = "1" ]; then
-  warp_ctrl_r_readline="$(bind -p 2>/dev/null | command -p sed -n 's/^"\\C-r": //p')"
-  case "$warp_ctrl_r_readline" in
-    reverse-search-history)
-      shell_plugins+=(builtin_ctrl_r_history)
-      ;;
-  esac
+  shell_plugins+=(builtin_ctrl_r_history)
 fi
 printf '%s %s\n' "$_WARP_EXTERNAL_CTRL_R_WIDGET" "${shell_plugins[*]}"
 "#,
@@ -240,7 +233,7 @@ printf '%s %s\n' "$_WARP_EXTERNAL_CTRL_R_WIDGET" "${shell_plugins[*]}"
 }
 
 #[test]
-fn bash_detection_reports_builtin_when_ctrl_r_is_reverse_search() {
+fn bash_detection_reports_builtin_when_no_external_widget() {
     let stdout = run_shell(
         "bash",
         &[],
@@ -249,11 +242,7 @@ set -u
 shell_plugins=()
 _WARP_EXTERNAL_CTRL_R_WIDGET=""
 bind () {
-  if [ "$1" = -X ]; then
-    printf '%s\n' ''
-  elif [ "$1" = -p ]; then
-    printf '%s\n' '"\C-r": reverse-search-history'
-  fi
+  printf '%s\n' ''
 }
 warp_at_least_bash_version () { echo 1; }
 warp_ctrl_r_binding="$(bind -X 2>/dev/null | command -p sed -n 's/^"\\C-r"[ :] *"\(.*\)"$/\1/p')"
@@ -264,12 +253,7 @@ case "$warp_ctrl_r_binding" in
     ;;
 esac
 if [ -z "$_WARP_EXTERNAL_CTRL_R_WIDGET" ] && [ "$(warp_at_least_bash_version "4.0")" = "1" ]; then
-  warp_ctrl_r_readline="$(bind -p 2>/dev/null | command -p sed -n 's/^"\\C-r": //p')"
-  case "$warp_ctrl_r_readline" in
-    reverse-search-history)
-      shell_plugins+=(builtin_ctrl_r_history)
-      ;;
-  esac
+  shell_plugins+=(builtin_ctrl_r_history)
 fi
 printf '%s\n' "${shell_plugins[*]}"
 "#,
@@ -293,17 +277,23 @@ setopt nounset
 local -a shell_plugins
 _WARP_EXTERNAL_CTRL_R_WIDGET=""
 _WARP_BUILTIN_CTRL_R_WIDGET=""
-warp_ctrl_r_widget="fzf-history-widget"
-case "$warp_ctrl_r_widget" in
-  fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
-    _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
-    shell_plugins+=(external_ctrl_r_history)
-    ;;
-  history-incremental-search-backward|history-incremental-pattern-search-backward)
-    _WARP_BUILTIN_CTRL_R_WIDGET="$warp_ctrl_r_widget"
-    shell_plugins+=(builtin_ctrl_r_history)
-    ;;
-esac
+warp_ctrl_r_binding='"^R" fzf-history-widget'
+if [[ "$warp_ctrl_r_binding" == '"^R" '* ]]; then
+  warp_ctrl_r_widget="${warp_ctrl_r_binding#\"^R\" }"
+  case "$warp_ctrl_r_widget" in
+    fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
+      _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
+      shell_plugins+=(external_ctrl_r_history)
+      ;;
+    *)
+      _WARP_BUILTIN_CTRL_R_WIDGET="${warp_ctrl_r_widget:-history-incremental-search-backward}"
+      shell_plugins+=(builtin_ctrl_r_history)
+      ;;
+  esac
+else
+  _WARP_BUILTIN_CTRL_R_WIDGET="history-incremental-search-backward"
+  shell_plugins+=(builtin_ctrl_r_history)
+fi
 print -r -- "$_WARP_EXTERNAL_CTRL_R_WIDGET ${shell_plugins[*]}"
 "#,
     );
@@ -311,7 +301,7 @@ print -r -- "$_WARP_EXTERNAL_CTRL_R_WIDGET ${shell_plugins[*]}"
 }
 
 #[test]
-fn zsh_detection_reports_builtin_incremental_search() {
+fn zsh_detection_reports_builtin_when_bindkey_is_missing() {
     let stdout = run_shell(
         "zsh",
         &[],
@@ -321,17 +311,23 @@ setopt nounset
 local -a shell_plugins
 _WARP_EXTERNAL_CTRL_R_WIDGET=""
 _WARP_BUILTIN_CTRL_R_WIDGET=""
-warp_ctrl_r_widget="history-incremental-search-backward"
-case "$warp_ctrl_r_widget" in
-  fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
-    _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
-    shell_plugins+=(external_ctrl_r_history)
-    ;;
-  history-incremental-search-backward|history-incremental-pattern-search-backward)
-    _WARP_BUILTIN_CTRL_R_WIDGET="$warp_ctrl_r_widget"
-    shell_plugins+=(builtin_ctrl_r_history)
-    ;;
-esac
+warp_ctrl_r_binding=""
+if [[ "$warp_ctrl_r_binding" == '"^R" '* ]]; then
+  warp_ctrl_r_widget="${warp_ctrl_r_binding#\"^R\" }"
+  case "$warp_ctrl_r_widget" in
+    fzf-history-widget|atuin-search|atuin-search-viins|atuin-search-vicmd|_atuin_search_widget)
+      _WARP_EXTERNAL_CTRL_R_WIDGET="$warp_ctrl_r_widget"
+      shell_plugins+=(external_ctrl_r_history)
+      ;;
+    *)
+      _WARP_BUILTIN_CTRL_R_WIDGET="${warp_ctrl_r_widget:-history-incremental-search-backward}"
+      shell_plugins+=(builtin_ctrl_r_history)
+      ;;
+  esac
+else
+  _WARP_BUILTIN_CTRL_R_WIDGET="history-incremental-search-backward"
+  shell_plugins+=(builtin_ctrl_r_history)
+fi
 print -r -- "${shell_plugins[*]}"
 "#,
     );
