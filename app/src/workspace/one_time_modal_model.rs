@@ -1005,6 +1005,15 @@ impl OneTimeModalModel {
                         me.resume_modal_checks_after_factories_launch(ctx);
                     }
                     Err(_timed_out) => {
+                        // Accepted gap: this only stops waiting on the client side. If the
+                        // server commits the claim just after the timeout elapses, this
+                        // device's seen marker stays unset and a later retry receives
+                        // `Ok(false)` like any non-winning caller, so the user never sees
+                        // the modal despite having won the claim. Closing it needs a
+                        // client-generated idempotency token or a claim-status lookup,
+                        // which is disproportionate for a launch announcement given the
+                        // failure is rare, costs at most one impression, and errs toward
+                        // under- rather than over-showing.
                         log::warn!(
                             "Timed out waiting for the Factories launch modal impression claim"
                         );
