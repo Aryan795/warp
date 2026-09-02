@@ -2,6 +2,8 @@
 //! new LF line. CR overwrites the previous snapshot for the same vertex.
 
 const ERASE_TO_EOL: &[u8] = b"\x1b[K";
+const DISABLE_LINE_WRAP: &[u8] = b"\x1b[?7l";
+const ENABLE_LINE_WRAP: &[u8] = b"\x1b[?7h";
 const PENDING_LINE_CAP: usize = 512;
 
 const PROGRESS_VERBS: &[&[u8]] = &[
@@ -21,6 +23,7 @@ pub(crate) struct ProgressCollapser {
     pending: Vec<u8>,
     last_identity: Option<Vec<u8>>,
     progress_open: bool,
+    wrap_disabled: bool,
     pass_through_until_lf: bool,
     held_cr: bool,
 }
@@ -31,6 +34,7 @@ impl ProgressCollapser {
             pending: Vec::new(),
             last_identity: None,
             progress_open: false,
+            wrap_disabled: false,
             pass_through_until_lf: false,
             held_cr: false,
         }
@@ -50,9 +54,7 @@ impl ProgressCollapser {
             let line = std::mem::take(&mut self.pending);
             self.emit_line(&line, &mut out);
         }
-        if self.progress_open {
-            out.push(b'\n');
-        }
+        self.end_progress_row(&mut out);
         out
     }
 
@@ -97,37 +99,51 @@ impl ProgressCollapser {
     }
 
     fn begin_pass_through(&mut self, out: &mut Vec<u8>) {
-        if self.progress_open {
-            out.push(b'\n');
-            self.progress_open = false;
-            self.last_identity = None;
-        }
+        self.end_progress_row(out);
         out.append(&mut self.pending);
         self.pass_through_until_lf = true;
     }
 
+    fn begin_progress_row(&mut self, out: &mut Vec<u8>) {
+        if !self.wrap_disabled {
+            out.extend_from_slice(DISABLE_LINE_WRAP);
+            self.wrap_disabled = true;
+        }
+    }
+
+    fn end_progress_row(&mut self, out: &mut Vec<u8>) {
+        if !self.progress_open && !self.wrap_disabled {
+            return;
+        }
+        if self.wrap_disabled {
+            out.extend_from_slice(ENABLE_LINE_WRAP);
+            self.wrap_disabled = false;
+        }
+        if self.progress_open {
+            out.push(b'\n');
+            self.progress_open = false;
+        }
+        self.last_identity = None;
+    }
+
     fn emit_line(&mut self, line: &[u8], out: &mut Vec<u8>) {
         if let Some(identity) = progress_identity(line) {
+            let display = progress_display_line(line);
             if self.progress_open && self.last_identity.as_deref() == Some(identity.as_slice()) {
                 out.push(b'\r');
                 out.extend_from_slice(ERASE_TO_EOL);
-                out.extend_from_slice(line);
+                out.extend_from_slice(display);
             } else {
-                if self.progress_open {
-                    out.push(b'\n');
-                }
-                out.extend_from_slice(line);
+                self.end_progress_row(out);
+                self.begin_progress_row(out);
+                out.extend_from_slice(display);
                 self.progress_open = true;
             }
             self.last_identity = Some(identity);
             return;
         }
 
-        if self.progress_open {
-            out.push(b'\n');
-            self.progress_open = false;
-            self.last_identity = None;
-        }
+        self.end_progress_row(out);
         out.extend_from_slice(line);
         out.push(b'\n');
     }
@@ -148,6 +164,13 @@ fn timestamp_rest(line: &[u8]) -> Option<&[u8]> {
     let end = line.iter().position(|&b| b == b']')?;
     let rest = &line[end + 1..];
     Some(rest.strip_prefix(b" ").unwrap_or(rest))
+}
+
+fn progress_display_line(line: &[u8]) -> &[u8] {
+    match timestamp_rest(line) {
+        Some(rest) if !rest.is_empty() => rest,
+        _ => line,
+    }
 }
 
 fn may_be_buildkit_progress(line: &[u8]) -> bool {

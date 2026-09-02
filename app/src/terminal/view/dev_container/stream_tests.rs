@@ -452,6 +452,72 @@ fn superseded_progress_snapshots_do_not_accumulate_in_the_grid() {
     assert!(output.contains("52.40MB / 52.40MB"));
 }
 
+fn narrow_terminal_model() -> TerminalModel {
+    let mut sizes = block_size();
+    sizes.size = SizeInfo::new_without_font_metrics(24, 40);
+    TerminalModel::new_for_test(
+        sizes,
+        color::List::from(&Colors::default()),
+        ChannelEventListener::new_for_test(),
+        Arc::new(Background::default()),
+        false,
+        None,
+        false,
+        false,
+        None,
+    )
+}
+
+#[test]
+fn timestamped_progress_occupies_one_row_on_a_narrow_grid() {
+    let mut model = narrow_terminal_model();
+    model.start_commandless_output_block();
+    let mut processor = Processor::new();
+    let bytes = super::transform_dev_container_stderr(&[
+        b"[cli] @devcontainers/cli 0.89.0\n",
+        b"[2026-09-02T00:43:15.960Z] #15 extracting sha256:abc 1.5MB / 52.40MB\n",
+        b"[2026-09-02T00:43:16.100Z] #15 extracting sha256:abc 4.6MB / 52.40MB\n",
+        b"[2026-09-02T00:43:16.200Z] #15 extracting sha256:abc 10MB\n",
+        b"[2026-09-02T00:43:16.400Z] #15 extracting sha256:abc 52.40MB / 52.40MB\n",
+        b"[2026-09-02T00:43:16.500Z] #15 DONE 2.1s\n",
+    ]);
+    processor.parse_bytes(&mut model, &bytes, &mut io::sink());
+    let output = model
+        .block_list()
+        .active_block()
+        .output_grid()
+        .contents_to_string(false, None);
+    assert!(
+        output.contains("@devcontainers/cli 0.89.0"),
+        "ordinary logs must remain, got {output:?}"
+    );
+    assert!(
+        output.contains("#15 DONE 2.1s"),
+        "completed vertex lines must remain, got {output:?}"
+    );
+    let extracting_lines = output
+        .lines()
+        .filter(|line| line.contains("extracting sha256:abc"))
+        .count();
+    assert_eq!(
+        extracting_lines, 1,
+        "wrapped progress must not leave residual rows, got {output:?}"
+    );
+    assert!(
+        !output.contains("1.5MB"),
+        "superseded snapshots must not linger, got {output:?}"
+    );
+    assert!(
+        !output.contains("4.6MB"),
+        "superseded snapshots must not linger, got {output:?}"
+    );
+    assert!(
+        !output.contains("10MB"),
+        "a shorter update must not linger, got {output:?}"
+    );
+    assert!(output.contains("#15 extracting sha256:abc"));
+}
+
 #[test]
 fn commandless_output_block_height_grows_with_later_batches() {
     use warpui::units::Lines;
