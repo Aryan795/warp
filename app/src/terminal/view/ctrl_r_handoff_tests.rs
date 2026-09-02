@@ -116,6 +116,6 @@ fn builtin_helper_command_hex_encodes_the_first_draft_line() {
     );
     assert_eq!(
         builtin_ctrl_r_helper_command(""),
-        format!("{} {}", BUILTIN_CTRL_R_HELPER_COMMAND, hex::encode(b""))
+        BUILTIN_CTRL_R_HELPER_COMMAND
     );
 }

@@ -741,7 +741,7 @@ if [[ -z $WARP_BOOTSTRAPPED ]]; then
   function warp_run_builtin_ctrl_r_widget () {
     local result=""
     local draft=""
-    if [[ -n "$1" ]]; then
+    if [[ -n "${1-}" ]]; then
       draft="$(warp_hex_decode_string "$1")"
       draft="${draft%%$'\n'*}"
     fi

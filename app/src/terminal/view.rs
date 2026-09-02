@@ -5,6 +5,9 @@ mod block_banner;
 pub mod block_onboarding;
 pub(crate) mod blocklist_filter;
 mod bookmarks;
+#[cfg(all(test, unix))]
+#[path = "view/builtin_ctrl_r_shell_tests.rs"]
+mod builtin_ctrl_r_shell_tests;
 mod context_menu;
 #[cfg(test)]
 #[path = "view/ctrl_r_handoff_tests.rs"]
@@ -780,11 +783,15 @@ fn ctrl_r_history_handoff_kind(
 
 fn builtin_ctrl_r_helper_command(draft: &str) -> String {
     let first_line = draft.split('\n').next().unwrap_or(draft);
-    format!(
-        "{} {}",
-        BUILTIN_CTRL_R_HELPER_COMMAND,
-        hex::encode(first_line.as_bytes())
-    )
+    if first_line.is_empty() {
+        BUILTIN_CTRL_R_HELPER_COMMAND.to_string()
+    } else {
+        format!(
+            "{} {}",
+            BUILTIN_CTRL_R_HELPER_COMMAND,
+            hex::encode(first_line.as_bytes())
+        )
+    }
 }
 
 pub const LONG_RUNNING_AGENT_REQUESTED_COMMAND_CONTEXT_KEY: &str = "LongRunningRequestedCommand";
