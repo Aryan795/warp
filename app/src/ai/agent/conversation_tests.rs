@@ -1665,3 +1665,116 @@ fn to_serialized_blocklist_items_does_not_truncate_at_exact_cap() {
         "got: {last_command:?}"
     );
 }
+
+/// Regression test for APP-5428 review finding: pins `restored_block_count_up_to`'s
+/// exact contract at and below the `cap` boundary -- it must return the real count
+/// whenever that count is `<= cap` (including the equality case), not a sentinel.
+#[test]
+fn restored_block_count_up_to_returns_exact_count_within_and_at_cap() {
+    let conversation = restored_conversation_with_n_run_shell_commands(10);
+
+    assert_eq!(conversation.restored_block_count_up_to(20), 10);
+    // Equality at the boundary must return the real count, not a sentinel.
+    assert_eq!(conversation.restored_block_count_up_to(10), 10);
+}
+
+/// Regression test for APP-5428 review finding: once the true count exceeds `cap`,
+/// `restored_block_count_up_to` must return exactly `cap + 1` -- never the real count
+/// (which would defeat the point of bounding the scan) and never some other
+/// over-`cap` value that would corrupt the aggregate-budget arithmetic callers do
+/// with it (e.g. `restored_block_count + 2` in `restore_missing_child_agent_panes_for_parent`).
+#[test]
+fn restored_block_count_up_to_returns_cap_plus_one_sentinel_when_exceeding_cap() {
+    let conversation = restored_conversation_with_n_run_shell_commands(50);
+
+    assert_eq!(conversation.restored_block_count_up_to(10), 11);
+}
+
+/// Regression test for APP-5428 review finding: even when `cap` itself is larger
+/// than `MAX_RESTORED_COMMAND_BLOCKS`, the scan must never go past
+/// `MAX_RESTORED_COMMAND_BLOCKS` -- the sentinel is `MAX_RESTORED_COMMAND_BLOCKS + 1`,
+/// not `cap + 1`, matching what `to_serialized_blocklist_items` would actually restore.
+#[test]
+fn restored_block_count_up_to_clamps_scanning_to_max_restored_command_blocks() {
+    let total = super::MAX_RESTORED_COMMAND_BLOCKS + 50;
+    let conversation = restored_conversation_with_n_run_shell_commands(total);
+
+    assert_eq!(
+        conversation.restored_block_count_up_to(total),
+        super::MAX_RESTORED_COMMAND_BLOCKS + 1
+    );
+}
+
+/// Builds a restored conversation whose root task only contains a summarization
+/// subagent call, with the `n` `RunShellCommand` pairs living in the referenced
+/// subtask instead -- mirroring what a real conversation looks like once its early
+/// history has been moved into a summarization subtask.
+fn restored_conversation_with_summarized_run_shell_commands(n: usize) -> AIConversation {
+    let root_id = "root-task";
+    let subtask_id = "summarized-subtask";
+
+    let mut sub_messages = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let tool_call_id = format!("call-{i}");
+        let command = format!("echo {i}");
+        sub_messages.push(tool_call_message(
+            &format!("tool-call-{i}"),
+            "req",
+            &tool_call_id,
+            run_shell_command_tool_call(&command),
+        ));
+        sub_messages.push(tool_call_result_message(
+            &format!("tool-result-{i}"),
+            "req",
+            &tool_call_id,
+            run_shell_command_finished_result(&command, &i.to_string(), &format!("command-{i}")),
+        ));
+    }
+
+    let summarization_call = crate::test_util::ai_agent_tasks::create_subagent_tool_call_message(
+        "summary_call",
+        root_id,
+        subtask_id,
+        Some(api::message::tool_call::subagent::Metadata::Summarization(
+            (),
+        )),
+    );
+
+    AIConversation::new_restored(
+        AIConversationId::new(),
+        vec![
+            api::Task {
+                id: root_id.to_string(),
+                messages: vec![summarization_call],
+                dependencies: None,
+                description: String::new(),
+                summary: String::new(),
+                server_data: String::new(),
+            },
+            api::Task {
+                id: subtask_id.to_string(),
+                messages: sub_messages,
+                dependencies: Some(api::task::Dependencies {
+                    parent_task_id: root_id.to_string(),
+                }),
+                description: String::new(),
+                summary: String::new(),
+                server_data: String::new(),
+            },
+        ],
+        None,
+    )
+    .unwrap()
+}
+
+/// Regression test for APP-5428 review finding: `restored_block_count_up_to` must
+/// recurse into summarization subtasks the same way `extract_command_blocks` does,
+/// so commands moved out of the root task by summarization are still counted
+/// instead of silently vanishing from the budget calculation.
+#[test]
+fn restored_block_count_up_to_recurses_into_summarization_subtasks() {
+    let conversation = restored_conversation_with_summarized_run_shell_commands(10);
+
+    assert_eq!(conversation.restored_block_count_up_to(20), 10);
+    assert_eq!(conversation.restored_block_count_up_to(5), 6);
+}

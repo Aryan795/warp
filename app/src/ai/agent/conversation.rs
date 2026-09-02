@@ -4338,15 +4338,120 @@ impl AIConversation {
     /// serializing any command block, as long as that count is at most `cap`. Returns
     /// `cap + 1` when the true count exceeds `cap`, without scanning further to find out
     /// by how much.
+    ///
+    /// Unlike [`Self::extract_command_blocks_up_to`], this never builds an index over the
+    /// whole conversation -- an exchange-timestamp map, or a per-message-set tool-call/
+    /// result map -- before applying `cap`. It counts in a single forward pass and
+    /// returns as soon as the running count exceeds `cap`, so sizing a conversation with
+    /// a very large historical message count for a small remaining budget costs work
+    /// proportional to `cap`, not to the conversation's full history.
     pub(crate) fn restored_block_count_up_to(&self, cap: usize) -> usize {
         let scan_cap = cap.min(MAX_RESTORED_COMMAND_BLOCKS);
-        let raw_count = self.extract_command_blocks_up_to(Some(scan_cap)).len();
-        if raw_count <= scan_cap {
-            raw_count
+        let Some(root_task) = self.get_root_task() else {
+            return 0;
+        };
+        let Some(api_task) = root_task.source() else {
+            return 0;
+        };
+
+        let mut count = 0;
+        self.count_command_blocks_up_to(&api_task.messages, scan_cap, &mut count);
+        if count <= scan_cap {
+            count
         } else if scan_cap == MAX_RESTORED_COMMAND_BLOCKS {
             MAX_RESTORED_COMMAND_BLOCKS + 1
         } else {
             cap + 1
+        }
+    }
+
+    /// Counts command blocks the way [`Self::extract_command_blocks_from_messages`] does,
+    /// stopping as soon as `*count` exceeds `limit`, and without building a
+    /// `CommandBlockInfo`, an exchange-timestamp index, or a full per-message-set
+    /// tool-call/result index. Recurses into summarization subagent subtasks the same way
+    /// `extract_command_blocks_from_messages` does, so a summarized-away command is still
+    /// counted.
+    ///
+    /// Assumes a `RunShellCommand` tool call's result appears later in `messages` than the
+    /// call itself, which holds for how these transcripts are produced; a call whose
+    /// result hasn't appeared yet (or never will, e.g. it was cancelled) is simply not
+    /// counted, matching `extract_command_blocks_from_messages`.
+    fn count_command_blocks_up_to(
+        &self,
+        messages: &[api::Message],
+        limit: usize,
+        count: &mut usize,
+    ) {
+        let mut pending_run_shell_command_ids: HashSet<&str> = HashSet::new();
+
+        for message in messages {
+            if *count > limit {
+                return;
+            }
+
+            if let Some(tool_call) = message.tool_call() {
+                if let Some(subagent) = tool_call.subagent()
+                    && subagent.is_summarization()
+                {
+                    let subtask_id = TaskId::new(subagent.task_id.clone());
+                    if let Some(subtask) = self.task_store.get(&subtask_id)
+                        && let Some(subtask_source) = subtask.source()
+                    {
+                        self.count_command_blocks_up_to(&subtask_source.messages, limit, count);
+                    }
+                    continue;
+                }
+
+                if matches!(
+                    tool_call.tool,
+                    Some(api::message::tool_call::Tool::RunShellCommand(_))
+                ) {
+                    pending_run_shell_command_ids.insert(tool_call.tool_call_id.as_str());
+                }
+            }
+
+            if let Some(result) = message.tool_call_result()
+                && let Some(api::message::tool_call_result::Result::RunShellCommand(cmd_result)) =
+                    &result.result
+                && matches!(
+                    cmd_result.result,
+                    Some(api::run_shell_command_result::Result::CommandFinished(_))
+                )
+                && pending_run_shell_command_ids.remove(result.tool_call_id.as_str())
+            {
+                *count += 1;
+            }
+
+            let attachment_count = match message.message.as_ref() {
+                Some(api::message::Message::UserQuery(user_query)) => user_query
+                    .referenced_attachments
+                    .values()
+                    .filter(|attachment| {
+                        matches!(
+                            attachment.value,
+                            Some(api::attachment::Value::ExecutedShellCommand(_))
+                        )
+                    })
+                    .count(),
+                _ => 0,
+            };
+            *count += attachment_count;
+
+            let context = match message.message.as_ref() {
+                Some(api::message::Message::UserQuery(user_query)) => user_query.context.as_ref(),
+                Some(api::message::Message::SystemQuery(system_query)) => {
+                    system_query.context.as_ref()
+                }
+                _ => None,
+            };
+            if let Some(context) = context {
+                #[allow(deprecated)]
+                let executed_shell_commands = &context.executed_shell_commands;
+                *count += executed_shell_commands
+                    .iter()
+                    .filter(|cmd| !cmd.command.is_empty())
+                    .count();
+            }
         }
     }
 

@@ -2185,6 +2185,87 @@ fn test_restore_missing_child_agent_panes_for_parent_bounds_aggregate_blocks_acr
     });
 }
 
+/// Regression test for APP-5428 review finding: the aggregate-budget test above checks
+/// only `total_resident_blocks <= budget`, which an under-costed per-child formula can
+/// still satisfy by coincidence (undercounting a few children by 1 block each rarely
+/// pushes the sum over a budget as large as `MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS`).
+/// This test instead sizes two children so their *correct* per-child cost
+/// (`restored_block_count + 2`) consumes the remaining budget exactly, leaving zero
+/// blocks for a third (minimal) child. Undercounting each of the first two children by
+/// 1 block (the old `+ 1` bug) would free up exactly the 2 blocks the third child
+/// needs, wrongly admitting it and overshooting the budget by 2 blocks -- so this
+/// fails on the old formula and passes on the correct one.
+#[test]
+fn test_restore_missing_child_agent_panes_for_parent_rejects_third_child_at_exact_budget_boundary()
+{
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+
+            let parent_resident_blocks = total_resident_blocks(panes, parent_pane_id, ctx);
+            let remaining_budget = MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS - parent_resident_blocks;
+            // Split `remaining_budget - 4` (the total restored-command budget across two
+            // children once each child's fixed `+ 2` overhead is subtracted) across the
+            // two children; the exact split doesn't matter, only that it sums precisely.
+            let total_restored_commands = remaining_budget - 4;
+            let first_child_commands = total_restored_commands / 2;
+            let second_child_commands = total_restored_commands - first_child_commands;
+
+            restore_child_conversation_with_run_shell_commands(
+                panes,
+                parent_pane_id,
+                parent_conversation_id,
+                first_child_commands,
+                ctx,
+            );
+            restore_child_conversation_with_run_shell_commands(
+                panes,
+                parent_pane_id,
+                parent_conversation_id,
+                second_child_commands,
+                ctx,
+            );
+            // A third, minimal child: with zero restored commands its candidate cost is
+            // 1 (the "empty-but-not-nothing" case), which is exactly what an
+            // under-costed remaining budget of 2 (instead of the correct 0) would
+            // wrongly admit.
+            restore_child_conversation_with_run_shell_commands(
+                panes,
+                parent_pane_id,
+                parent_conversation_id,
+                0,
+                ctx,
+            );
+
+            panes.restore_missing_child_agent_panes_for_parent(
+                parent_conversation_id,
+                parent_pane_id,
+                true,
+                None,
+                ctx,
+            );
+
+            assert_eq!(
+                panes.child_agent_panes.len(),
+                2,
+                "the two full-sized children exactly exhaust the aggregate budget under the \
+                 correct (restored_block_count + 2) per-child cost, so the third (minimal) \
+                 child must be rejected -- admitting it is only possible under the old, \
+                 undercounting (+ 1) formula",
+            );
+            assert_eq!(
+                total_resident_blocks(panes, parent_pane_id, ctx),
+                MAX_EAGERLY_RESTORED_CHILD_AGENT_BLOCKS,
+                "the two admitted children should exactly exhaust the budget",
+            );
+        });
+    });
+}
+
 #[test]
 fn test_ambient_transcript_restore_creates_cloud_mode_pane_when_handoff_enabled() {
     let _agent_view = FeatureFlag::AgentView.override_enabled(true);
