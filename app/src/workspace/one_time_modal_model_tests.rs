@@ -913,6 +913,79 @@ fn factories_launch_claim_in_flight_reserves_the_modal_slot() {
     });
 }
 
+/// Regression test: a stalled claim must not permanently suppress the entire
+/// one-time-modal queue. Uses a claim future that never resolves (bypassing
+/// `MockAuthClient`, whose mocked `async fn` always resolves synchronously and so
+/// cannot simulate a hang) together with a very short timeout, so the test proves
+/// the timeout path itself — not just that a real 15-second wait eventually clears
+/// the flag.
+#[test]
+fn factories_launch_claim_timeout_releases_the_reservation() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let terminal = add_window_with_terminal(&mut app, None);
+        let key = FeatureIntroId::CustomModelRouter.as_key();
+
+        terminal.update(&mut app, |_, ctx| {
+            let window_id = ctx.window_id();
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                model.update_target_window_id(window_id, ctx);
+                model.has_completed_initial_modal_checks = true;
+
+                model.claim_and_show_factories_launch_modal_with_claim(
+                    futures::future::pending,
+                    std::time::Duration::from_millis(20),
+                    ctx,
+                );
+                assert!(model.pending_factories_launch_claim);
+                assert!(
+                    model.is_any_modal_open(),
+                    "the in-flight claim must reserve the modal slot"
+                );
+
+                // A competing recheck while the claim is stalled must still be
+                // suppressed, exactly as it would be for a claim in flight for any
+                // other reason.
+                model.maybe_check_and_trigger_feature_intro_modal(ctx);
+                assert!(!AISettings::as_ref(ctx).is_feature_intro_seen(key));
+            });
+        });
+
+        // Let the 20ms timeout elapse and the abortable future's callback run.
+        wait_for_factories_launch_claim_to_resolve(&mut app).await;
+
+        terminal.update(&mut app, |_, ctx| {
+            let window_id = ctx.window_id();
+            OneTimeModalModel::handle(ctx).update(ctx, |model, ctx| {
+                model.update_target_window_id(window_id, ctx);
+                assert!(
+                    !model.pending_factories_launch_claim,
+                    "a timed-out claim must release the reservation"
+                );
+                assert!(
+                    !model.is_factories_launch_modal_open(),
+                    "a timed-out claim must not show the modal on this device"
+                );
+                assert!(
+                    !model.is_any_modal_open(),
+                    "the slot must not remain reserved once the claim has timed out"
+                );
+                // The seen marker must not be burned by a request that never
+                // actually resolved either way.
+                assert!(!AISettings::as_ref(ctx).is_feature_intro_seen(FACTORIES_LAUNCH_SEEN_KEY));
+
+                // With the reservation released, a modal that was deferred while the
+                // claim was pending can now run.
+                model.maybe_check_and_trigger_feature_intro_modal(ctx);
+                assert!(
+                    AISettings::as_ref(ctx).is_feature_intro_seen(key),
+                    "another eligible modal must be able to run once the reservation clears"
+                );
+            });
+        });
+    });
+}
+
 #[test]
 fn feature_intro_recheck_on_experiments_updated() {
     App::test((), |mut app| async move {

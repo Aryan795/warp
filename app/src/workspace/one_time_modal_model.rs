@@ -1,10 +1,12 @@
 use std::future::Future;
+use std::time::Duration;
 
 use ai::api_keys::ApiKeyManager;
 use settings::Setting as _;
 use warp_core::features::FeatureFlag;
 use warp_core::send_telemetry_from_ctx;
 use warp_util::sync::Condition;
+use warpui::r#async::FutureExt as _;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity, WindowId};
 
 use super::hoa_onboarding;
@@ -91,6 +93,10 @@ pub struct OneTimeModalModel {
     /// This is captured when a modal is first opened and ensures the modal stays on that window.
     target_window_id: Option<WindowId>,
 }
+
+/// How long to wait for the Factories launch modal's impression claim to resolve before
+/// treating it as failed. See `claim_and_show_factories_launch_modal_with_timeout`.
+const FACTORIES_LAUNCH_CLAIM_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl OneTimeModalModel {
     pub fn new(ctx: &mut ModelContext<Self>) -> Self {
@@ -941,18 +947,44 @@ impl OneTimeModalModel {
     /// retry on the next recheck instead of silently burning the user's only
     /// impression.
     fn claim_and_show_factories_launch_modal(&mut self, ctx: &mut ModelContext<Self>) {
-        self.pending_factories_launch_claim = true;
         let auth_client = ServerApiProvider::as_ref(ctx).get_auth_client();
-        ctx.spawn(
-            async move {
+        self.claim_and_show_factories_launch_modal_with_claim(
+            move || async move {
                 auth_client
                     .claim_feature_intro_impression(FACTORIES_LAUNCH_SEEN_KEY)
                     .await
             },
+            FACTORIES_LAUNCH_CLAIM_TIMEOUT,
+            ctx,
+        );
+    }
+
+    /// The body of `claim_and_show_factories_launch_modal`, with the claim request and its
+    /// timeout both injectable so tests can force the timeout path deterministically — with
+    /// a claim future that never resolves and a very short timeout — instead of waiting out
+    /// the real duration. The underlying GraphQL request has no transport-level timeout of
+    /// its own, so without this bound a stalled request would never resolve, leaving
+    /// `pending_factories_launch_claim` (and therefore `is_any_modal_open`) stuck `true` for
+    /// the rest of the session and silently suppressing every other one-time modal.
+    ///
+    /// Every terminal outcome — success, a request error, a timeout, or the spawned future
+    /// being aborted before it resolves — clears the reservation and resumes the modal queue.
+    fn claim_and_show_factories_launch_modal_with_claim<F, Fut>(
+        &mut self,
+        claim: F,
+        timeout: Duration,
+        ctx: &mut ModelContext<Self>,
+    ) where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<bool, anyhow::Error>> + Send + 'static,
+    {
+        self.pending_factories_launch_claim = true;
+        ctx.spawn_abortable(
+            async move { claim().with_timeout(timeout).await },
             move |me, result, ctx| {
                 me.pending_factories_launch_claim = false;
                 match result {
-                    Ok(claimed) => {
+                    Ok(Ok(claimed)) => {
                         AISettings::handle(ctx).update(ctx, |settings, ctx| {
                             settings.mark_feature_intro_seen(FACTORIES_LAUNCH_SEEN_KEY, ctx);
                         });
@@ -968,11 +1000,25 @@ impl OneTimeModalModel {
                             me.resume_modal_checks_after_factories_launch(ctx);
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         log::warn!("Failed to claim Factories launch modal impression: {e:#}");
                         me.resume_modal_checks_after_factories_launch(ctx);
                     }
+                    Err(_timed_out) => {
+                        log::warn!(
+                            "Timed out waiting for the Factories launch modal impression claim"
+                        );
+                        me.resume_modal_checks_after_factories_launch(ctx);
+                    }
                 }
+            },
+            move |me, ctx| {
+                // The claim was aborted before resolving. Nothing currently calls `abort()`
+                // on this future, but releasing the reservation here keeps the invariant —
+                // every terminal outcome resumes the queue — true even if a future teardown
+                // path starts doing so.
+                me.pending_factories_launch_claim = false;
+                me.resume_modal_checks_after_factories_launch(ctx);
             },
         );
     }
