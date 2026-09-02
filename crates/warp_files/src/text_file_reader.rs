@@ -28,12 +28,10 @@ pub enum TextFileReadResult {
 ///
 /// **Line ending normalization**: `\n` and `\r\n` line endings are normalized
 /// to `\n` (LF) in the emitted [`TextFileSegment::content`]. Classic Mac
-/// `\r`-only line endings are **not** recognized as line separators (matching
-/// the behavior of `read_line()`, which only splits on `\n`). Lines are
-/// expected to be pushed with their terminators already stripped (as produced
-/// by `read_line()` + manual stripping). The trailing newline of the file, if
-/// present, is preserved via the `has_trailing_newline` flag passed to
-/// [`Self::push_line`].
+/// `\r`-only line endings are **not** recognized as line separators because
+/// only `\n` separates lines. Lines are expected to be pushed with their
+/// terminators already stripped. The trailing newline of the file, if present,
+/// is preserved via the `has_trailing_newline` flag passed to [`Self::push_line`].
 pub(crate) struct TextFileAccumulator {
     file_name: String,
     last_modified: Option<SystemTime>,
@@ -95,6 +93,19 @@ impl TextFileAccumulator {
     /// newline in the original file. For every line except possibly the last
     /// one in a file, this will be `true`.
     pub(crate) fn push_line(&mut self, line: String, has_trailing_newline: bool) {
+        self.push_line_inner(line, has_trailing_newline, false);
+    }
+
+    pub(crate) fn push_truncated_line(&mut self, has_trailing_newline: bool) {
+        self.push_line_inner(String::new(), has_trailing_newline, true);
+    }
+
+    fn push_line_inner(
+        &mut self,
+        line: String,
+        has_trailing_newline: bool,
+        exceeded_byte_budget: bool,
+    ) {
         self.current_line += 1;
         self.last_line_had_newline = has_trailing_newline;
 
@@ -115,7 +126,9 @@ impl TextFileAccumulator {
             if self.current_line >= range.start && self.current_line < range.end && !self.truncated
             {
                 let line_bytes = line.len() + if self.buf.is_empty() { 0 } else { 1 };
-                if self.total_bytes_read + self.buf_bytes + line_bytes > self.max_bytes {
+                if exceeded_byte_budget
+                    || self.total_bytes_read + self.buf_bytes + line_bytes > self.max_bytes
+                {
                     self.truncated = true;
                 } else {
                     self.buf_bytes += line_bytes;
@@ -124,6 +137,11 @@ impl TextFileAccumulator {
                 }
             }
         }
+    }
+
+    pub(crate) fn remaining_bytes(&self) -> usize {
+        self.max_bytes
+            .saturating_sub(self.total_bytes_read + self.buf_bytes)
     }
 
     /// Emits a [`TextFileSegment`] for the current range and resets per-range

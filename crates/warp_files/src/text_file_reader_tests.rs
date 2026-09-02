@@ -333,6 +333,27 @@ fn non_utf8_file_returns_not_text() {
         futures::executor::block_on(FileModel::read_text_file(&path, 10_000, &[], None)).unwrap();
     assert!(matches!(result, TextFileReadResult::NotText));
 }
+#[test]
+fn read_text_file_bounds_newline_free_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("long-line.txt");
+    std::fs::write(&path, vec![b'a'; 64 * 1024]).unwrap();
+
+    let result =
+        futures::executor::block_on(FileModel::read_text_file(&path, 16, &[], None)).unwrap();
+    let TextFileReadResult::Segments {
+        segments,
+        bytes_read,
+    } = result
+    else {
+        panic!("expected Segments");
+    };
+
+    assert_eq!(segments[0].content, "");
+    assert_eq!(segments[0].line_range, Some(1..1));
+    assert_eq!(segments[0].line_count, 1);
+    assert_eq!(bytes_read, 0);
+}
 
 #[test]
 fn read_text_file_preserves_trailing_newline() {
