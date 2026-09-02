@@ -86,19 +86,6 @@ pub struct OneTimeModalModel {
     /// `maybe_display_pending_factories_launch_modal`) once the popover
     /// closes.
     factories_launch_pending_display: bool,
-    /// Set when a Factories launch modal claim request on this device ended
-    /// without a definitive server answer -- a network error, or the
-    /// client-side timeout in `claim_and_show_factories_launch_modal_with_claim`
-    /// racing a server commit -- rather than resolving cleanly. The claim is
-    /// idempotent per *user*, not per *request*: if that request actually
-    /// committed server-side, a retry legitimately observes the row as
-    /// already claimed and returns `claimed == false`, even though this
-    /// device is the rightful winner. Without a server-side idempotency
-    /// token that echoes back which request actually won, this flag is the
-    /// best available signal to tell that apart from a genuine loss to
-    /// another device: a true loss would have returned `false` on the very
-    /// first attempt, never left the outcome unknown.
-    factories_launch_claim_had_transport_error: bool,
     /// Whether the HOA onboarding flow is currently being shown.
     is_hoa_onboarding_open: bool,
     /// The feature-intro popover currently being shown, if any. Unlike the other
@@ -248,7 +235,6 @@ impl OneTimeModalModel {
             is_factories_launch_modal_open: false,
             pending_factories_launch_claim: false,
             factories_launch_pending_display: false,
-            factories_launch_claim_had_transport_error: false,
             is_hoa_onboarding_open: false,
             active_feature_intro: None,
             has_completed_initial_modal_checks: false,
@@ -1054,24 +1040,10 @@ impl OneTimeModalModel {
                 me.pending_factories_launch_claim = false;
                 match result {
                     Ok(Ok(claimed)) => {
-                        // A retry that lands here after our own earlier attempt ended
-                        // inconclusively (network error or client-side timeout, below)
-                        // must not assume `claimed == false` means another device won:
-                        // the claim is idempotent per user, not per request, so if our
-                        // unconfirmed attempt actually committed, this retry legitimately
-                        // observes it as already claimed. A genuine loss to another
-                        // device always resolves cleanly on the very first attempt, so
-                        // `factories_launch_claim_had_transport_error` is the best
-                        // available signal to recover the win without a server-side
-                        // idempotency token (see the field's doc comment).
-                        let had_transport_error =
-                            std::mem::take(&mut me.factories_launch_claim_had_transport_error);
-                        let won = claimed || had_transport_error;
-
                         AISettings::handle(ctx).update(ctx, |settings, ctx| {
                             settings.mark_feature_intro_seen(FACTORIES_LAUNCH_SEEN_KEY, ctx);
                         });
-                        if won {
+                        if claimed {
                             // The feature-intro popover is intentionally excluded from
                             // `is_any_modal_open`, so a win that resolves while it's open
                             // must be held rather than stacking the centered Factories
@@ -1093,20 +1065,21 @@ impl OneTimeModalModel {
                     }
                     Ok(Err(e)) => {
                         log::warn!("Failed to claim Factories launch modal impression: {e:#}");
-                        me.factories_launch_claim_had_transport_error = true;
                         me.resume_modal_checks_after_factories_launch(ctx);
                     }
                     Err(_timed_out) => {
-                        // This only stops waiting on the client side. If the server commits
-                        // the claim just after the timeout elapses, a later retry receives
-                        // `claimed == false` like any non-winning caller; the transport-error
-                        // flag set here lets that retry recover the win instead of silently
-                        // suppressing it (see the field's doc comment for why a server-side
-                        // idempotency token would be the fully precise fix).
+                        // Accepted gap: this only stops waiting on the client side. If the
+                        // server commits the claim just after the timeout elapses, this
+                        // device's seen marker stays unset and a later retry receives
+                        // `Ok(false)` like any non-winning caller, so the user never sees
+                        // the modal despite having won the claim. Closing it needs a
+                        // client-generated idempotency token or a claim-status lookup,
+                        // which is disproportionate for a launch announcement given the
+                        // failure is rare, costs at most one impression, and errs toward
+                        // under- rather than over-showing.
                         log::warn!(
                             "Timed out waiting for the Factories launch modal impression claim"
                         );
-                        me.factories_launch_claim_had_transport_error = true;
                         me.resume_modal_checks_after_factories_launch(ctx);
                     }
                 }
@@ -1115,9 +1088,8 @@ impl OneTimeModalModel {
                 // The claim was aborted before resolving. Nothing currently calls `abort()`
                 // on this future, but releasing the reservation here keeps the invariant —
                 // every terminal outcome resumes the queue — true even if a future teardown
-                // path starts doing so. The outcome is unknown, same as a timeout.
+                // path starts doing so.
                 me.pending_factories_launch_claim = false;
-                me.factories_launch_claim_had_transport_error = true;
                 me.resume_modal_checks_after_factories_launch(ctx);
             },
         );
