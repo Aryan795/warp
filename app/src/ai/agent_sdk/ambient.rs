@@ -27,6 +27,7 @@ use warpui::{AppContext, ModelContext, SingletonEntity};
 use super::common::{
     EnvironmentChoice, ResolveConfigurationError, RunCloudEnvironmentPlan, parse_ambient_task_id,
 };
+use super::config_file::LoadedAgentConfigSnapshotFile;
 use crate::ServerApiProvider;
 use crate::ai::agent::{UserQueryMode, extract_user_query_mode};
 use crate::ai::agent_sdk::driver::attachments::{
@@ -196,6 +197,18 @@ fn sort_order_from_arg(arg: SortOrderArg) -> RunSortOrder {
         SortOrderArg::Asc => RunSortOrder::Asc,
         SortOrderArg::Desc => RunSortOrder::Desc,
     }
+}
+
+fn merge_run_cloud_config(
+    loaded_file: Option<&LoadedAgentConfigSnapshotFile>,
+    cli: AgentConfigSnapshot,
+    no_environment: bool,
+) -> AgentConfigSnapshot {
+    let mut merged = super::config_file::merge_with_precedence(loaded_file, cli);
+    if no_environment {
+        merged.environment_id = None;
+    }
+    merged
 }
 
 fn resolve_run_cloud_environment(
@@ -422,7 +435,8 @@ impl AmbientAgentRunner {
             }
 
             let mut environment_args = args.environment_create_args();
-            if environment_args.environment.is_none() && !environment_args.no_environment
+            let no_environment = environment_args.no_environment;
+            if environment_args.environment.is_none() && !no_environment
                 && let Some(environment_id) = loaded_file
                     .as_ref()
                     .and_then(|f| f.file.environment_id.clone())
@@ -480,7 +494,7 @@ impl AmbientAgentRunner {
                 codex_auth_secret_name: args.codex_auth_secret.clone(),
             });
 
-            let merged_config = super::config_file::merge_with_precedence(
+            let merged_config = merge_run_cloud_config(
                 loaded_file.as_ref(),
                 AgentConfigSnapshot {
                     name: args.name,
@@ -503,6 +517,7 @@ impl AmbientAgentRunner {
                     harness_auth_secrets,
                     additional_source_repos: None,
                 },
+                no_environment,
             );
 
             // We must wait until after workspace metadata is refreshed to check available LLMs.

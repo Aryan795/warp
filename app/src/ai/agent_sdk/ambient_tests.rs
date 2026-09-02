@@ -9,6 +9,7 @@ use warp_cli::task::{
 };
 use warp_server_client::HttpStatusError;
 
+use super::super::config_file::{AgentConfigSnapshotFile, LoadedAgentConfigSnapshotFile};
 use super::*;
 use crate::server::server_api::ai::{
     ArtifactType, ExecutionLocation, MockAIClient, RunSortBy, RunSortOrder,
@@ -588,5 +589,38 @@ fn non_tty_unnamed_without_env_flags_requires_explicit_choice() {
     assert!(
         msg.contains("--no-environment"),
         "error should require --no-environment: {msg}"
+    );
+}
+
+#[test]
+fn no_environment_omits_spawn_environment_id_when_config_file_sets_one() {
+    let plan = RunCloudEnvironmentPlan::from_args(&run_cloud_env_args(None, true), true, false)
+        .expect("--no-environment should skip the selector");
+    assert_eq!(
+        plan,
+        RunCloudEnvironmentPlan::NoEnvironment {
+            named_agent_may_apply: true,
+        }
+    );
+
+    let loaded = LoadedAgentConfigSnapshotFile {
+        file: AgentConfigSnapshotFile {
+            environment_id: Some("env-from-file".to_string()),
+            ..Default::default()
+        },
+    };
+    let cli = AgentConfigSnapshot {
+        environment_id: None,
+        ..Default::default()
+    };
+    assert_eq!(
+        merge_run_cloud_config(Some(&loaded), cli.clone(), false)
+            .environment_id
+            .as_deref(),
+        Some("env-from-file"),
+    );
+    assert_eq!(
+        merge_run_cloud_config(Some(&loaded), cli, true).environment_id,
+        None
     );
 }
