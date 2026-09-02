@@ -3460,9 +3460,13 @@ impl AppContext {
 
     const UNUSUALLY_LARGE_PENDING_EFFECTS: usize = 10_000;
 
-    pub(super) fn report_if_pending_effects_unusually_large(&self) {
-        if self.is_unit_test || self.pending_effects.len() != Self::UNUSUALLY_LARGE_PENDING_EFFECTS
-        {
+    pub(super) fn enqueue_effect(&mut self, effect: Effect) {
+        self.pending_effects.push_back(effect);
+        self.report_if_pending_effects_unusually_large();
+    }
+
+    fn report_if_pending_effects_unusually_large(&self) {
+        if self.is_unit_test || self.pending_effects.len() < Self::UNUSUALLY_LARGE_PENDING_EFFECTS {
             return;
         }
         report_error!(

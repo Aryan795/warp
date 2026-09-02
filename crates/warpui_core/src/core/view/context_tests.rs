@@ -1,6 +1,6 @@
 use crate::elements::Empty;
 use crate::platform::WindowStyle;
-use crate::{App, AppContext, Effect, Element, Entity, EntityId, TypedActionView};
+use crate::{App, AppContext, Effect, Element, Entity, EntityId, TypedActionView, WindowId};
 
 #[test]
 fn test_spawn_from_view() {
@@ -219,7 +219,10 @@ impl TypedActionView for NotifyView {
 
 #[derive(Debug, PartialEq, Eq)]
 enum PendingKind {
-    ViewNotification(EntityId),
+    ViewNotification {
+        window_id: WindowId,
+        view_id: EntityId,
+    },
     Event(EntityId),
     Other,
 }
@@ -228,7 +231,10 @@ fn pending_kinds(ctx: &AppContext) -> Vec<PendingKind> {
     ctx.pending_effects
         .iter()
         .map(|effect| match effect {
-            Effect::ViewNotification { view_id, .. } => PendingKind::ViewNotification(*view_id),
+            Effect::ViewNotification { window_id, view_id } => PendingKind::ViewNotification {
+                window_id: *window_id,
+                view_id: *view_id,
+            },
             Effect::Event { entity_id, .. } => PendingKind::Event(*entity_id),
             _ => PendingKind::Other,
         })
@@ -247,7 +253,10 @@ fn coalesces_consecutive_view_notifications_for_the_same_view() {
 
             assert_eq!(
                 pending_kinds(ctx),
-                vec![PendingKind::ViewNotification(ctx.view_id())]
+                vec![PendingKind::ViewNotification {
+                    window_id: ctx.window_id(),
+                    view_id: ctx.view_id(),
+                }]
             );
         });
     });
@@ -268,8 +277,14 @@ fn keeps_consecutive_view_notifications_for_different_views() {
             assert_eq!(
                 pending_kinds(ctx),
                 vec![
-                    PendingKind::ViewNotification(root_id),
-                    PendingKind::ViewNotification(child_id),
+                    PendingKind::ViewNotification {
+                        window_id,
+                        view_id: root_id,
+                    },
+                    PendingKind::ViewNotification {
+                        window_id,
+                        view_id: child_id,
+                    },
                 ]
             );
         });
@@ -290,9 +305,45 @@ fn keeps_same_view_notifications_separated_by_another_effect() {
             assert_eq!(
                 pending_kinds(ctx),
                 vec![
-                    PendingKind::ViewNotification(view_id),
+                    PendingKind::ViewNotification {
+                        window_id: ctx.window_id(),
+                        view_id,
+                    },
                     PendingKind::Event(view_id),
-                    PendingKind::ViewNotification(view_id),
+                    PendingKind::ViewNotification {
+                        window_id: ctx.window_id(),
+                        view_id,
+                    },
+                ]
+            );
+        });
+    });
+}
+
+#[test]
+fn keeps_view_notifications_for_source_and_target_windows_after_transfer() {
+    App::test((), |mut app| async move {
+        let (source_window_id, _) = app.add_window(WindowStyle::NotStealFocus, |_| NotifyView);
+        let (target_window_id, _) = app.add_window(WindowStyle::NotStealFocus, |_| NotifyView);
+        let view = app.add_view(source_window_id, |_| NotifyView);
+        let view_id = view.id();
+
+        app.update(|ctx| {
+            view.update(ctx, |_, vctx| vctx.notify());
+            assert!(ctx.transfer_view_to_window(view_id, source_window_id, target_window_id));
+            view.update(ctx, |_, vctx| vctx.notify());
+
+            assert_eq!(
+                pending_kinds(ctx),
+                vec![
+                    PendingKind::ViewNotification {
+                        window_id: source_window_id,
+                        view_id,
+                    },
+                    PendingKind::ViewNotification {
+                        window_id: target_window_id,
+                        view_id,
+                    },
                 ]
             );
         });
