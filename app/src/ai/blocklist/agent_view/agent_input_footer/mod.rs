@@ -80,7 +80,6 @@ use crate::settings::{
     PrivacySettingsChangedEvent,
 };
 use crate::settings_view::SettingsSection;
-use crate::settings_view::keybindings::{KeybindingChangedEvent, KeybindingChangedNotifier};
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::ShellLaunchData;
 #[cfg(not(target_family = "wasm"))]
@@ -107,7 +106,6 @@ use crate::terminal::view::init::{ATTACH_FILE_KEYBINDING, OPEN_CLI_AGENT_RICH_IN
 use crate::terminal::view::{CloudRoutingIndicator, TerminalAction, resolve_ai_query_routing};
 use crate::terminal::{CLIAgent, TerminalModel};
 use crate::ui_components::icons::Icon;
-use crate::util::bindings::keybinding_name_to_display_string;
 use crate::view_components::DismissibleToast;
 #[cfg(not(target_family = "wasm"))]
 use crate::view_components::ToastLink;
@@ -418,38 +416,17 @@ impl AgentInputFooter {
             });
         }
 
-        let file_button = ctx.add_typed_action_view(|ctx| {
-            let mut button = ActionButton::new("", AgentInputButtonTheme)
+        let file_button = ctx.add_typed_action_view(|_ctx| {
+            ActionButton::new("", AgentInputButtonTheme)
                 .with_icon(Icon::Plus)
                 .with_tooltip("Attach file")
+                .with_tooltip_keybinding(ATTACH_FILE_KEYBINDING)
                 .with_size(button_size)
                 .with_tooltip_alignment(TooltipAlignment::Left)
                 .on_click(|ctx| {
                     ctx.dispatch_typed_action(AgentInputFooterAction::SelectFile);
-                });
-            if let Some(keybinding) = keybinding_name_to_display_string(ATTACH_FILE_KEYBINDING, ctx)
-            {
-                button = button.with_tooltip_sublabel(keybinding);
-            }
-            button
+                })
         });
-        ctx.subscribe_to_model(
-            &KeybindingChangedNotifier::handle(ctx),
-            |me, _, event, ctx| {
-                let KeybindingChangedEvent::BindingChanged {
-                    binding_name,
-                    new_trigger,
-                } = event;
-                if binding_name == ATTACH_FILE_KEYBINDING {
-                    me.file_button.update(ctx, |button, ctx| {
-                        button.set_tooltip_sublabel(
-                            new_trigger.as_ref().map(|keystroke| keystroke.displayed()),
-                            ctx,
-                        );
-                    });
-                }
-            },
-        );
 
         // Fast-forward (auto-approve) toggle button.
         // Uses FastForwardButtonTheme so the button keeps its one-off semantics.
