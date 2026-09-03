@@ -391,6 +391,11 @@ impl AuthState {
 
     /// Returns whether the user considered onboarded to Warp.
     pub fn is_onboarded(&self) -> Option<bool> {
+        // Local-adapter builds have no Warp account, so there is no onboarding
+        // flow to complete.
+        if ChannelState::uses_local_adapter() {
+            return Some(true);
+        }
         self.user.read().as_ref().map(|user| user.is_onboarded)
     }
 
