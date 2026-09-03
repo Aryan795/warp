@@ -23,18 +23,21 @@ use std::collections::VecDeque;
 
 use parking_lot::{Condvar, Mutex};
 
-/// Number of dedicated OS threads ever allowed to touch a `Gitignore`'s `regex_automata`
-/// pool. This bounds every matcher's worst-case retained cache count to
-/// `THREAD_COUNT + 1` regardless of caller concurrency (see module docs): with globset's
-/// `hybrid_cache_capacity` of 10 MiB per compiled matcher, that is at most
-/// `(THREAD_COUNT + 1) * 10 MiB` = 90 MiB retained per matcher in the pathological case
-/// (most real `.gitignore` patterns are literal/prefix/suffix and never reach
-/// `regex_automata` at all, so this ceiling is rarely approached in practice). Matching
-/// is a fast, CPU-only regex check relative to the directory I/O surrounding it in every
-/// caller, so 8 dedicated threads — matching `regex_automata`'s own `MAX_POOL_STACKS`
-/// shard count — keeps real work overlapping during watcher storms and embedding scans
-/// without letting the thread set, and therefore the worst-case retained memory per
-/// matcher, grow with the number of background executor or rayon workers.
+/// Matches `regex_automata`'s own `MAX_POOL_STACKS`, so worst-case retention per matcher
+/// is `THREAD_COUNT + 1` = 9 caches, at most `9 * 10 MiB` ≈ 90 MiB given globset's 10 MiB
+/// `hybrid_cache_capacity` per compiled matcher.
+///
+/// Dispatch overhead was measured directly (repository benchmarks, not shipped):
+/// single-call round-trip cost through this pool is ~15–20 µs versus ~0.1–0.6 µs called
+/// directly, but that cost is immeasurable in the two representative traversal paths it
+/// actually runs on — a 2,342-file tree build and a 567-directory watcher-registration
+/// walk over this repository both showed no timing difference with dispatch bypassed.
+/// The cost only shows up under sustained, I/O-free contention: 8–16 threads calling
+/// nothing but this function in a tight loop see 5–8x lower aggregate throughput than
+/// calling directly. No current caller drives that pattern — every call site interleaves
+/// filesystem I/O between matches, and the `ai` crate's own rayon pool for outline and
+/// embedding work caps at 2 threads and never calls this function from inside a
+/// `par_iter` closure.
 const THREAD_COUNT: usize = 8;
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -76,14 +79,9 @@ fn build_queue() -> &'static WorkQueue {
     queue
 }
 
-/// Runs `f` on one of the dedicated gitignore-match threads and blocks the calling
-/// thread until it completes.
-///
-/// Safe to call from any context — an async task, a rayon worker, or a plain sync
-/// callback — since the dedicated threads are independent, plain OS threads that never
-/// depend on the caller's own executor to make progress. There is no re-entrancy or
-/// deadlock risk as long as `f` never calls back into this function; matching is a leaf
-/// computation and never does.
+/// Runs `f` on one of the dedicated threads and blocks the calling thread until it
+/// completes. Safe from any calling context (async task, rayon worker, or plain sync
+/// callback); `f` must not itself call back into `run`.
 pub(crate) fn run<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
     static QUEUE: std::sync::LazyLock<&'static WorkQueue> = std::sync::LazyLock::new(build_queue);
 

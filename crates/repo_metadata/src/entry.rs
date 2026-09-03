@@ -765,11 +765,8 @@ pub(crate) fn matches_force_included_path(path: &Path, force_included_paths: &[P
 /// - If `check_ancestors` is true, then `/target/debug` will match.
 /// - If `check_ancestors` is false, then `/target/debug` will not match.
 ///
-/// The actual match against each applicable `Gitignore`'s compiled regex runs on a
-/// small, fixed set of dedicated threads (see `gitignore_match_pool`) so that the
-/// `regex_automata` scratch-cache pool backing every shared, long-lived matcher
-/// (`gitignore_cache`) cannot accumulate a cache per caller thread. Every caller of
-/// this function inherits that bound automatically.
+/// The actual match dispatches to `gitignore_match_pool` (see its module docs for why);
+/// every caller of this function inherits that bound automatically.
 pub fn matches_gitignores(
     path: &Path,
     is_dir: bool,

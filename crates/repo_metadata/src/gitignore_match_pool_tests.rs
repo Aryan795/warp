@@ -27,12 +27,8 @@ fn thread_identity() -> usize {
     })
 }
 
-/// This is the property `run` exists to guarantee: no matter how many callers ask for
+/// Verifies the property the module docs rely on: no matter how many callers ask for
 /// work concurrently, only a fixed, small set of distinct OS threads ever executes it.
-/// That's what bounds each `Gitignore`'s `regex_automata` pool by construction (see the
-/// module docs) — a caller-side concurrency limit does not, because pool retention is
-/// keyed by the set of distinct threads that have ever called in, not by how many call
-/// in at once (see the review finding this replaced).
 ///
 /// Removing the dispatch in `run` (i.e. calling `f()` directly on the caller's own
 /// thread) makes this test fail: many distinct caller threads below would each execute
@@ -60,9 +56,7 @@ fn run_executes_on_a_fixed_small_set_of_threads() {
     assert!(
         observed_identities.len() <= super::THREAD_COUNT,
         "expected at most THREAD_COUNT ({}) distinct executing threads across {CALLERS} \
-         concurrent callers, but observed {}: {observed_identities:?}. Every gitignore \
-         match must run on the fixed dedicated thread set for the retained-cache bound to \
-         hold — routing work back onto arbitrary caller threads defeats it.",
+         concurrent callers, but observed {}: {observed_identities:?}",
         super::THREAD_COUNT,
         observed_identities.len(),
     );
