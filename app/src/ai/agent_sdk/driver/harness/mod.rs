@@ -396,8 +396,8 @@ fn task_env_vars_for_harness_name(
             );
         }
     }
-    // Server URL overrides are disabled on release channels, so there's no
-    // override to propagate to child processes there.
+    // Stable and Preview disable server URL overrides, so there's no override
+    // to propagate to child processes there.
     if ChannelState::channel().allows_server_url_overrides() {
         insert_non_empty_task_env_var(
             &mut env_vars,
