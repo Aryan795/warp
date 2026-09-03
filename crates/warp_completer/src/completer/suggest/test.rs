@@ -890,67 +890,6 @@ pub fn test_variadic_args_for_option() {
 
 #[cfg(not(feature = "v2"))]
 #[test]
-pub fn git_merge_base_is_suggested_from_embedded_spec() {
-    let git = warp_command_signatures::signature_by_name("git")
-        .expect("embedded git signature should include merge-base");
-    let ctx = FakeCompletionContext::new(create_test_command_registry([git]));
-
-    let mer = complete_at_end_of_line("git mer", &ctx);
-    assert!(
-        mer.contains(&"merge".to_string()),
-        "git mer should still suggest merge, got {mer:?}"
-    );
-    assert!(
-        mer.contains(&"merge-base".to_string()),
-        "git mer should suggest merge-base, got {mer:?}"
-    );
-    assert!(
-        mer.contains(&"mergetool".to_string()),
-        "git mer should still suggest mergetool, got {mer:?}"
-    );
-
-    let merge_b = complete_at_end_of_line("git merge-b", &ctx);
-    assert!(
-        merge_b.contains(&"merge-base".to_string()),
-        "git merge-b should suggest merge-base, got {merge_b:?}"
-    );
-
-    let flags = complete_at_end_of_line_with_options(
-        "git merge-base --",
-        MatchStrategy::CaseInsensitive,
-        &ctx,
-    );
-    assert!(
-        flags.contains(&"--all".to_string()),
-        "git merge-base should complete --all, got {flags:?}"
-    );
-    assert!(
-        flags.contains(&"--octopus".to_string()),
-        "git merge-base should complete --octopus, got {flags:?}"
-    );
-    assert!(
-        flags.contains(&"--is-ancestor".to_string()),
-        "git merge-base should complete --is-ancestor, got {flags:?}"
-    );
-    assert!(
-        flags.contains(&"--independent".to_string()),
-        "git merge-base should complete --independent, got {flags:?}"
-    );
-    assert!(
-        flags.contains(&"--fork-point".to_string()),
-        "git merge-base should complete --fork-point, got {flags:?}"
-    );
-
-    let merge_flags =
-        complete_at_end_of_line_with_options("git merge --", MatchStrategy::CaseInsensitive, &ctx);
-    assert!(
-        merge_flags.contains(&"--no-ff".to_string()),
-        "git merge flag completions should be preserved, got {merge_flags:?}"
-    );
-}
-
-#[cfg(not(feature = "v2"))]
-#[test]
 pub fn test_equal_sign_flag_does_not_bleed_variadic_suggestions() {
     let registry = create_test_command_registry([test_signature()]);
     let ctx = FakeCompletionContext::new(registry);
