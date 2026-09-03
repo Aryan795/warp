@@ -373,3 +373,15 @@ fn read_recent_ai_queries_strips_legacy_skill_snapshots_row_by_row() {
         }
     }
 }
+
+#[test]
+fn read_recent_ai_queries_propagates_row_loading_errors() {
+    let mut conn = test_connection();
+    diesel::sql_query(
+        "INSERT INTO ai_queries (exchange_id, conversation_id, start_ts, input, output_status, model_id, planning_model_id, coding_model_id) VALUES ('ex', 'conv', 'not-a-timestamp', '[]', 'Completed', 'm', 'p', 'c')",
+    )
+    .execute(&mut conn)
+    .expect("raw insert of an unparseable timestamp should succeed");
+
+    assert!(read_recent_ai_queries(&mut conn).is_err());
+}

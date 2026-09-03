@@ -114,9 +114,7 @@ pub(super) fn read_recent_ai_queries(
         .limit(MAX_AI_QUERIES_READ_LIMIT)
         .load_iter::<AIQuery, DefaultLoadingMode>(conn)?
     {
-        let Ok(ai_query) = ai_query else {
-            continue;
-        };
+        let ai_query = ai_query?;
         if let Ok(persisted) = PersistedAIInput::try_from(ai_query) {
             queries.push(persisted);
         }
