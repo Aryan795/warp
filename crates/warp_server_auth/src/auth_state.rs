@@ -345,6 +345,11 @@ impl AuthState {
 
     /// Determines whether the user should be considered as logged in.
     pub fn is_logged_in(&self) -> bool {
+        // The local adapter issues no credentials and checks none, so the
+        // features an account would unlock are always available.
+        if ChannelState::uses_local_adapter() {
+            return true;
+        }
         self.credentials.read().is_some()
     }
 
@@ -416,6 +421,11 @@ impl AuthState {
     /// Anonymous users are real Warp users, but have no providers linked in Firebase.
     /// Returns `None` if there is no user data.
     pub fn is_user_anonymous(&self) -> Option<bool> {
+        // See `is_logged_in`: local-adapter builds have no account tiers, so
+        // the user is never the restricted anonymous kind.
+        if ChannelState::uses_local_adapter() {
+            return Some(false);
+        }
         self.user
             .read()
             .as_ref()
