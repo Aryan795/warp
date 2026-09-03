@@ -8053,6 +8053,30 @@ impl TerminalView {
         self.ambient_agent_view_model.as_ref()
     }
 
+    fn is_in_agent_or_cli_attach_context(&self, app: &AppContext) -> bool {
+        let agent_view_state = self.agent_view_controller.as_ref(app).agent_view_state();
+        agent_view_state.is_fullscreen()
+            || agent_view_state.is_inline()
+            || CLIAgentSessionsModel::as_ref(app)
+                .session(self.view_id)
+                .is_some()
+    }
+
+    fn file_attach_allowed_for_shared_session(&self, app: &AppContext) -> bool {
+        let is_cloud_mode = FeatureFlag::CloudModeImageContext.is_enabled()
+            && self
+                .ambient_agent_view_model
+                .as_ref()
+                .is_some_and(|model| model.as_ref(app).is_ambient_agent());
+        let status = self.model.lock().shared_session_status().clone();
+        AgentToolbarItemKind::FileAttach.available_to_session_viewer(&status, is_cloud_mode)
+    }
+
+    fn can_attach_file(&self, app: &AppContext) -> bool {
+        self.is_in_agent_or_cli_attach_context(app)
+            && self.file_attach_allowed_for_shared_session(app)
+    }
+
     /// Ensures this pane has an [`ambient_agent::AmbientAgentViewModel`], creating and wiring
     /// it into the input if absent. Idempotent: returns the existing model when already
     /// present (the upfront cloud-mode construction path). Used by both the upfront and
@@ -27783,6 +27807,9 @@ impl TypedActionView for TerminalView {
                 self.write_codebase_index(ctx);
             }
             AttachFile => {
+                if !self.can_attach_file(ctx) {
+                    return;
+                }
                 self.input.update(ctx, |input, ctx| {
                     input.attach_file(ctx);
                 });
@@ -28928,6 +28955,18 @@ impl View for TerminalView {
             } else if agent_view_state.is_inline() {
                 context.set.insert(flags::ACTIVE_INLINE_AGENT_VIEW);
             }
+        }
+
+        let is_cloud_mode_for_file_attach = FeatureFlag::CloudModeImageContext.is_enabled()
+            && self
+                .ambient_agent_view_model
+                .as_ref()
+                .is_some_and(|model| model.as_ref(app).is_ambient_agent());
+        if AgentToolbarItemKind::FileAttach.available_to_session_viewer(
+            model_lock.shared_session_status(),
+            is_cloud_mode_for_file_attach,
+        ) {
+            context.set.insert(init::CAN_ATTACH_FILE_KEY);
         }
 
         if self.is_ambient_agent_session(app) && !self.is_nested_cloud_mode(app) {

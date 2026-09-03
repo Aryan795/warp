@@ -162,6 +162,7 @@ use crate::ai::ambient_agents::AmbientAgentTaskId;
 use crate::ai::ambient_agents::telemetry::HandoffEntryPoint;
 use crate::ai::attachment_utils::MAX_ATTACHMENT_SIZE_BYTES;
 use crate::ai::block_context::BlockContext;
+use crate::ai::blocklist::agent_view::agent_input_footer::toolbar_item::AgentToolbarItemKind;
 use crate::ai::blocklist::agent_view::shortcuts::AgentShortcutViewModel;
 use crate::ai::blocklist::agent_view::{
     AgentInputFooter, AgentInputFooterEvent, AgentViewController, AgentViewEntryOrigin,
@@ -324,6 +325,7 @@ use crate::terminal::view::ambient_agent::{
     AuthSecretFtuxView, AuthSecretFtuxViewEvent, AuthSecretSelector, AuthSecretSelectorEvent,
     HarnessSelector, HarnessSelectorEvent, HostSelector, HostSelectorEvent, NakedHeaderButtonTheme,
 };
+use crate::terminal::view::init::{CAN_ATTACH_FILE_KEY, CLI_AGENT_SESSION_ACTIVE_KEY};
 use crate::terminal::view::inline_banner::{PromptSuggestionsEvent, PromptSuggestionsView};
 use crate::terminal::view::{
     AIQueryRouting, CodeDiffAction, resolve_ai_query_routing, resolve_ambient_agent_task_id,
@@ -16857,6 +16859,13 @@ impl View for Input {
             }
         }
 
+        if CLIAgentSessionsModel::as_ref(app)
+            .session(self.terminal_view_id)
+            .is_some()
+        {
+            ctx.set.insert(CLI_AGENT_SESSION_ACTIVE_KEY);
+        }
+
         if self.buffer_text(app).is_empty() {
             ctx.set.insert(flags::EMPTY_INPUT_BUFFER);
         }
@@ -16967,6 +16976,16 @@ impl View for Input {
         let model_lock = self.model.lock();
         ctx.set
             .insert(model_lock.shared_session_status().as_keymap_context());
+        let is_cloud_mode_for_file_attach = FeatureFlag::CloudModeImageContext.is_enabled()
+            && self
+                .ambient_agent_view_model()
+                .is_some_and(|model| model.as_ref(app).is_ambient_agent());
+        if AgentToolbarItemKind::FileAttach.available_to_session_viewer(
+            model_lock.shared_session_status(),
+            is_cloud_mode_for_file_attach,
+        ) {
+            ctx.set.insert(CAN_ATTACH_FILE_KEY);
+        }
 
         if model_lock
             .block_list()
