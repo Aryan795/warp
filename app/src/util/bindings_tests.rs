@@ -141,6 +141,43 @@ fn test_toggle_maximize_pane_binding_is_editable() {
 }
 
 #[test]
+fn test_attach_file_binding_is_editable_and_unbound_by_default() {
+    App::test((), |mut app| async move {
+        app.update(terminal::init);
+
+        app.update(|ctx| {
+            use crate::terminal::view::init::ATTACH_FILE_KEYBINDING;
+
+            assert!(
+                ctx.editable_bindings()
+                    .any(|binding| binding.name == ATTACH_FILE_KEYBINDING),
+                "{ATTACH_FILE_KEYBINDING} should be registered as an editable binding",
+            );
+
+            assert_eq!(
+                None,
+                keybinding_name_to_display_string(ATTACH_FILE_KEYBINDING, ctx),
+            );
+
+            ctx.set_custom_trigger(
+                ATTACH_FILE_KEYBINDING.to_owned(),
+                Trigger::Keystrokes(vec![Keystroke::parse("cmd-shift-U").unwrap()]),
+            );
+
+            let displayed_keybinding = if OperatingSystem::get().is_mac() {
+                "⇧⌘U"
+            } else {
+                "Shift Logo U"
+            };
+            assert_eq!(
+                Some(displayed_keybinding),
+                keybinding_name_to_display_string(ATTACH_FILE_KEYBINDING, ctx).as_deref(),
+            );
+        });
+    });
+}
+
+#[test]
 fn test_terminal_page_scroll_bindings_are_editable() {
     App::test((), |mut app| async move {
         app.update(terminal::init);

@@ -27065,6 +27065,7 @@ impl TypedActionView for TerminalView {
             | DeleteAttachment { .. }
             | OpenAttachmentLightbox { .. }
             | WriteCodebaseIndex
+            | AttachFile
             | ToggleAutoexecuteMode
             | ToggleQueueNextPrompt
             | ToggleTodoPopup
@@ -27780,6 +27781,11 @@ impl TypedActionView for TerminalView {
             }
             WriteCodebaseIndex => {
                 self.write_codebase_index(ctx);
+            }
+            AttachFile => {
+                self.input.update(ctx, |input, ctx| {
+                    input.attach_file(ctx);
+                });
             }
             ToggleAutoexecuteMode => {
                 // Cloud (ambient) agent conversations run with fast-forward conceptually

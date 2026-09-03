@@ -7002,6 +7002,12 @@ impl Input {
         }
     }
 
+    pub(crate) fn attach_file(&mut self, ctx: &mut ViewContext<Self>) {
+        self.agent_input_footer.update(ctx, |footer, ctx| {
+            footer.select_file(ctx);
+        });
+    }
+
     fn select_image(&mut self, ctx: &mut ViewContext<Self>) {
         self.focus_input_box(ctx);
         self.ensure_agent_mode_for_ai_features(
