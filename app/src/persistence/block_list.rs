@@ -206,8 +206,14 @@ fn upsert_ai_query_with_limit(
     })?)
 }
 
-/// Returns the most recent [`MAX_BLOCK_COUNT_PER_SESSION`] block list items for each session. The
-/// items are in chronological order.
+/// Returns the most recent [`MAX_TERMINAL_BLOCKS_TO_PERSIST_PER_SESSION`] block list items for
+/// each session. The items are in chronological order.
+///
+/// This bounds the read at the SQL level, per pane, rather than loading every persisted block
+/// (including the full `stylized_command` / `stylized_output` text) for every pane and trimming
+/// in memory afterwards. A pane's row count in `blocks` is not guaranteed to already be at or
+/// below the cap (e.g. background blocks are excluded from the count `save_block` enforces), so
+/// this bound must be (re-)enforced here too.
 pub(super) fn get_all_restored_blocks(
     conn: &mut SqliteConnection,
 ) -> Result<PersistedBlocks, diesel::result::Error> {
@@ -215,31 +221,24 @@ pub(super) fn get_all_restored_blocks(
         .select(model::TerminalSession::as_select())
         .load::<model::TerminalSession>(conn)?;
 
-    let block_lists = Block::belonging_to(&terminal_sessions)
-        .select(Block::as_select())
-        .order_by(schema::blocks::columns::id.asc())
-        .load::<Block>(conn)?
-        .grouped_by(&terminal_sessions);
+    let mut all_block_items_by_pane = HashMap::with_capacity(terminal_sessions.len());
 
-    let mut all_block_items_by_pane = block_lists
-        .into_iter()
-        .zip(terminal_sessions)
-        .map(|(blocks, terminal_pane)| {
-            (
-                PaneUuid(terminal_pane.uuid),
-                blocks.into_iter().map(Into::into).collect(),
-            )
-        })
-        .collect::<HashMap<_, Vec<SerializedBlockListItem>>>();
+    for terminal_pane in terminal_sessions {
+        // Only the newest `MAX_TERMINAL_BLOCKS_TO_PERSIST_PER_SESSION` rows for this pane are
+        // fetched from SQLite, so a pane with an unusually large backlog never pulls its full
+        // history (and text) into memory just to be discarded.
+        let mut blocks = Block::belonging_to(&terminal_pane)
+            .select(Block::as_select())
+            .order_by(schema::blocks::columns::id.desc())
+            .limit(MAX_TERMINAL_BLOCKS_TO_PERSIST_PER_SESSION)
+            .load::<Block>(conn)?;
+        blocks.reverse();
 
-    for (_, blocks) in all_block_items_by_pane.iter_mut() {
-        blocks.sort_by_key(|item| item.start_ts());
-        // Only keep most recent command blocks
-        blocks.drain(
-            0..blocks
-                .len()
-                .saturating_sub(MAX_TERMINAL_BLOCKS_TO_PERSIST_PER_SESSION as usize),
-        );
+        let mut block_items: Vec<SerializedBlockListItem> =
+            blocks.into_iter().map(Into::into).collect();
+        block_items.sort_by_key(|item| item.start_ts());
+
+        all_block_items_by_pane.insert(PaneUuid(terminal_pane.uuid), block_items);
     }
 
     Ok(all_block_items_by_pane)

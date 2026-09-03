@@ -1,16 +1,20 @@
-//! Unit tests for the `ai_queries` persistence layer in [`super`].
+//! Unit tests for the `ai_queries` and `blocks` persistence layers in [`super`].
 //!
-//! Covers the FIFO eviction cap added to [`super::upsert_ai_query`] and the empty-input filter
-//! that drives the persistence skip in `handle_ai_history_event`.
+//! Covers the FIFO eviction cap added to [`super::upsert_ai_query`], the empty-input filter
+//! that drives the persistence skip in `handle_ai_history_event`, and the SQL-level per-pane
+//! bound on [`super::get_all_restored_blocks`].
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Duration, Local};
+use chrono::{DateTime, Duration, Local, NaiveDateTime};
+use diesel::connection::SimpleConnection;
 use diesel::sqlite::SqliteConnection;
 use diesel::{Connection, ExpressionMethods, QueryDsl, RunQueryDsl};
 use diesel_migrations::MigrationHarness;
+use uuid::Uuid;
 
 use super::{
+    MAX_TERMINAL_BLOCKS_TO_PERSIST_PER_SESSION, get_all_restored_blocks,
     process_ai_queries_for_nld_history_match, process_ai_queries_for_uparrow_prompt,
     read_recent_ai_queries, upsert_ai_query_with_limit,
 };
@@ -18,6 +22,7 @@ use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::{AIAgentExchangeId, AIAgentInput, UserQueryMode};
 use crate::ai::blocklist::{AIQueryHistoryOutputStatus, PersistedAIInput, PersistedAIInputType};
 use crate::ai::llms::LLMId;
+use crate::app_state::PaneUuid;
 
 /// Builds an in-memory SQLite database with all migrations applied.
 fn test_connection() -> SqliteConnection {
@@ -234,6 +239,143 @@ fn process_ai_queries_for_uparrow_prompt_keeps_all_when_under_cap() {
 
     let texts: Vec<&str> = kept.iter().map(first_query_text).collect();
     assert_eq!(texts, vec!["q0", "q1", "q2"]);
+}
+
+/// Inserts a `terminal_panes` row directly and returns its UUID. Bypasses the `pane_nodes` /
+/// `pane_leaves` rows a real pane would have: one of the migrations run by [`test_connection`]
+/// turns `PRAGMA foreign_keys` on for the rest of the connection's lifetime, so FK enforcement
+/// must be turned back off here to construct a pane without its full row graph.
+fn insert_terminal_pane(conn: &mut SqliteConnection) -> Vec<u8> {
+    use crate::persistence::schema::terminal_panes::dsl;
+
+    conn.batch_execute("PRAGMA foreign_keys = OFF;")
+        .expect("disabling foreign keys should succeed");
+
+    let uuid = Uuid::new_v4().as_bytes().to_vec();
+    diesel::insert_into(dsl::terminal_panes)
+        .values((dsl::uuid.eq(&uuid), dsl::is_active.eq(false)))
+        .execute(conn)
+        .expect("insert into terminal_panes should succeed");
+    uuid
+}
+
+/// Inserts a `blocks` row directly for `pane_uuid`, bypassing `save_block`'s own eviction so
+/// tests can construct panes with more persisted blocks than
+/// [`MAX_TERMINAL_BLOCKS_TO_PERSIST_PER_SESSION`] (as can happen in production too, since e.g.
+/// background blocks are excluded from the count `save_block` enforces).
+fn insert_block(
+    conn: &mut SqliteConnection,
+    pane_uuid: &[u8],
+    block_id: &str,
+    start_ts: NaiveDateTime,
+) {
+    use crate::persistence::schema::blocks::dsl;
+
+    diesel::insert_into(dsl::blocks)
+        .values((
+            dsl::pane_leaf_uuid.eq(pane_uuid.to_vec()),
+            dsl::block_id.eq(block_id),
+            dsl::stylized_command.eq(Vec::<u8>::new()),
+            dsl::stylized_output.eq(Vec::<u8>::new()),
+            dsl::exit_code.eq(0),
+            dsl::did_execute.eq(true),
+            dsl::start_ts.eq(Some(start_ts)),
+        ))
+        .execute(conn)
+        .expect("insert into blocks should succeed");
+}
+
+/// Returns the `block_id`s persisted for `pane_uuid`, in the order returned by
+/// [`get_all_restored_blocks`] (chronological, per the function's contract).
+fn restored_block_ids(conn: &mut SqliteConnection, pane_uuid: &[u8]) -> Vec<String> {
+    get_all_restored_blocks(conn)
+        .expect("get_all_restored_blocks should succeed")
+        .remove(&PaneUuid(pane_uuid.to_vec()))
+        .expect("pane should be present in the restored block map")
+        .into_iter()
+        .map(|item| match item {
+            crate::ai::blocklist::SerializedBlockListItem::Command { block } => {
+                block.id.as_str().to_string()
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn get_all_restored_blocks_caps_each_pane_at_the_persist_limit_via_sql() {
+    let mut conn = test_connection();
+    let pane_uuid = insert_terminal_pane(&mut conn);
+
+    // Persist more blocks than the cap for a single pane -- e.g. background blocks, which are
+    // excluded from `save_block`'s own eviction, can grow a pane's row count unbounded.
+    let extra = 50;
+    let total = MAX_TERMINAL_BLOCKS_TO_PERSIST_PER_SESSION as usize + extra;
+    let t0 = Local::now().naive_utc();
+    for i in 0..total {
+        insert_block(
+            &mut conn,
+            &pane_uuid,
+            &format!("block-{i}"),
+            t0 + Duration::seconds(i as i64),
+        );
+    }
+
+    let kept = restored_block_ids(&mut conn, &pane_uuid);
+
+    // Only the cap's worth of blocks come back, and it's the newest ones, oldest-first.
+    assert_eq!(
+        kept.len(),
+        MAX_TERMINAL_BLOCKS_TO_PERSIST_PER_SESSION as usize
+    );
+    assert_eq!(kept.first().unwrap(), &format!("block-{extra}"));
+    assert_eq!(kept.last().unwrap(), &format!("block-{}", total - 1));
+}
+
+#[test]
+fn get_all_restored_blocks_keeps_all_blocks_when_under_the_limit() {
+    let mut conn = test_connection();
+    let pane_uuid = insert_terminal_pane(&mut conn);
+
+    let t0 = Local::now().naive_utc();
+    for i in 0..3 {
+        insert_block(
+            &mut conn,
+            &pane_uuid,
+            &format!("block-{i}"),
+            t0 + Duration::seconds(i),
+        );
+    }
+
+    let kept = restored_block_ids(&mut conn, &pane_uuid);
+
+    assert_eq!(kept, vec!["block-0", "block-1", "block-2"]);
+}
+
+#[test]
+fn get_all_restored_blocks_caps_panes_independently() {
+    let mut conn = test_connection();
+    let heavy_pane = insert_terminal_pane(&mut conn);
+    let light_pane = insert_terminal_pane(&mut conn);
+
+    let t0 = Local::now().naive_utc();
+    let total = MAX_TERMINAL_BLOCKS_TO_PERSIST_PER_SESSION as usize + 10;
+    for i in 0..total {
+        insert_block(
+            &mut conn,
+            &heavy_pane,
+            &format!("heavy-{i}"),
+            t0 + Duration::seconds(i as i64),
+        );
+    }
+    insert_block(&mut conn, &light_pane, "light-0", t0);
+
+    // The heavy pane is capped, but the light pane (well under the cap) is unaffected, and an
+    // empty-for-this-pane result never gets dropped from the map entirely.
+    assert_eq!(
+        restored_block_ids(&mut conn, &heavy_pane).len(),
+        MAX_TERMINAL_BLOCKS_TO_PERSIST_PER_SESSION as usize
+    );
+    assert_eq!(restored_block_ids(&mut conn, &light_pane), vec!["light-0"]);
 }
 
 #[test]
