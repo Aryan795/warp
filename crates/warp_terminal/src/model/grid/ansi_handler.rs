@@ -8,9 +8,9 @@ mod tab_stops;
 
 use std::cmp::min;
 use std::collections::HashMap;
-use std::io;
 use std::ops::Range;
 use std::sync::Arc;
+use std::{io, mem};
 
 use base64::Engine as _;
 use bounded_vec_deque::BoundedVecDeque;
@@ -211,13 +211,6 @@ impl ansi::Handler for GridHandler {
             if self.grid[row][col].flags.contains(Flags::WIDE_CHAR_SPACER) {
                 col = col.saturating_sub(1);
             }
-            let original_cell = if col + 1 == num_cols
-                && !self.ansi_handler_state.mode.contains(TermMode::LINE_WRAP)
-            {
-                Some(self.grid[row][col].clone())
-            } else {
-                None
-            };
 
             let old_cell_content_width = match self.grid[row][col].raw_content() {
                 CharOrStr::Str(s) => s.width(),
@@ -229,7 +222,11 @@ impl ansi::Handler for GridHandler {
                 },
             };
 
-            self.grid[row][col].push_zerowidth(c, /* log_long_grapheme_warnings */ true);
+            // A rejected append cannot change the cell's width, so there is no structural work to do.
+            if !self.grid[row][col].push_zerowidth(c, /* log_long_grapheme_warnings */ true) {
+                return;
+            }
+
             let cell_content_width = match self.grid[row][col].raw_content() {
                 CharOrStr::Str(s) => s.width(),
                 // Note that we should never reach here since we are pushing a zerowidth character,
@@ -250,7 +247,16 @@ impl ansi::Handler for GridHandler {
                 && cell_content_width == 2
                 && self.ansi_handler_state.supports_emoji_presentation_selector
             {
-                let mut wide_cell = self.grid[row][col].clone();
+                let mut wide_cell = mem::take(&mut self.grid[row][col]);
+                if col + 1 == num_cols
+                    && !self.ansi_handler_state.mode.contains(TermMode::LINE_WRAP)
+                {
+                    // Remove the selector rather than leave a wide grapheme without room for its spacer.
+                    let popped = wide_cell.pop_zerowidth();
+                    debug_assert_eq!(popped, Some(c));
+                    self.grid[row][col] = wide_cell;
+                    return;
+                }
                 wide_cell.flags.remove(
                     Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::WRAPLINE,
                 );
@@ -259,10 +265,7 @@ impl ansi::Handler for GridHandler {
                 self.update_cursor(|cursor| {
                     cursor.point.col = col;
                 });
-                if !self.write_wide_char(base_char, |cell| *cell = wide_cell) {
-                    self.grid[row][col] =
-                        original_cell.expect("rejected promotion should have an original cell");
-                }
+                self.write_wide_char(base_char, |cell| *cell = wide_cell);
             }
             return;
         }
@@ -1484,14 +1487,14 @@ impl GridHandler {
         });
     }
 
-    fn write_wide_char(&mut self, c: char, update_wide_cell: impl FnOnce(&mut Cell)) -> bool {
+    fn write_wide_char(&mut self, c: char, update_wide_cell: impl FnOnce(&mut Cell)) {
         let num_cols = self.columns();
         if self.grid.cursor().point.col + 1 >= num_cols {
             if !self.ansi_handler_state.mode.contains(TermMode::LINE_WRAP) {
                 self.move_cursor_forward(|cursor| {
                     cursor.input_needs_wrap = true;
                 });
-                return false;
+                return;
             }
 
             let leading_spacer = self.write_at_cursor(cell::DEFAULT_CHAR);
@@ -1514,7 +1517,6 @@ impl GridHandler {
         spacer.flags.insert(Flags::WIDE_CHAR_SPACER);
         spacer.set_hyperlink_id(hyperlink_id);
         self.advance_cursor_by_one_cell();
-        true
     }
 
     /// Insert a linebreak at the current cursor position.
