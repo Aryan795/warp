@@ -490,6 +490,60 @@ os._exit(0)
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn drain_returns_when_out_of_group_descendant_holds_pty_slave() {
+    use command::r#async::Command;
+    use instant::Instant;
+
+    let pid_file = std::env::temp_dir().join(format!("dc-pty-{}", uuid::Uuid::new_v4()));
+    block_on(async {
+        let mut command = Command::new_with_process_group("python3");
+        command
+            .arg("-c")
+            .arg(format!(
+                r#"
+import os, time
+pid = os.fork()
+if pid == 0:
+    os.setsid()
+    open({pid_file:?}, "w").write(str(os.getpid()))
+    time.sleep(30)
+    os._exit(0)
+os.write(2, b"Container started\n")
+os.write(1, b'{{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"/w"}}\n')
+os._exit(0)
+"#
+            ))
+            .kill_on_drop(true);
+        let started = Instant::now();
+        let (drain, success) = super::drain_dev_container_child(command, None, |_| {})
+            .await
+            .expect("drain after CLI exit with out-of-group slave holder");
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "out-of-group PTY slave holder must not pin drain: {:?}",
+            started.elapsed()
+        );
+        assert!(success);
+        assert!(
+            super::super::interpret_up_output_for_test(true, &drain.stdout.bytes, b""),
+            "final outcome JSON must still parse for attach, got {:?}",
+            String::from_utf8_lossy(&drain.stdout.bytes)
+        );
+        let descendant = wait_for_pid_file(&pid_file);
+        assert!(
+            pid_is_alive(descendant),
+            "container-like descendant must survive CLI exit"
+        );
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(descendant),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    });
+    let _ = std::fs::remove_file(pid_file);
+}
+
 #[test]
 fn drain_stays_pending_while_child_is_silent_but_alive() {
     use command::r#async::Command;

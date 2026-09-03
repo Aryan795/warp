@@ -1,8 +1,11 @@
 use std::future::Future;
 use std::io;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::{Output, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Waker};
 
 use command::r#async::Command;
 use futures_util::future::{try_join, try_join3};
@@ -106,15 +109,18 @@ where
             let _ = child.status().await;
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
+        let child_exit = Arc::new(ChildExit::new());
         let drain_fut = drain_dev_container_pipes(
-            PtyMasterReader(stdout_master),
-            PtyMasterReader(stderr_master),
+            ExitAwareReader::new(PtyMasterReader(stdout_master), child_exit.clone()),
+            ExitAwareReader::new(PtyMasterReader(stderr_master), child_exit.clone()),
             on_output,
         );
         let status_fut = {
             let kill_group = kill_group.clone();
+            let child_exit = child_exit.clone();
             async move {
                 let status = child.status().await?;
+                child_exit.mark();
                 kill_group.terminate_now();
                 io::Result::Ok(status)
             }
@@ -142,11 +148,18 @@ where
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("devcontainer up stderr was not piped"))?;
-        let drain_fut = drain_dev_container_pipes(stdout, stderr, on_output);
+        let child_exit = Arc::new(ChildExit::new());
+        let drain_fut = drain_dev_container_pipes(
+            ExitAwareReader::new(stdout, child_exit.clone()),
+            ExitAwareReader::new(stderr, child_exit.clone()),
+            on_output,
+        );
         let status_fut = {
             let kill_group = kill_group.clone();
+            let child_exit = child_exit.clone();
             async move {
                 let status = child.status().await?;
+                child_exit.mark();
                 kill_group.terminate_now();
                 io::Result::Ok(status)
             }
@@ -394,6 +407,79 @@ fn append_bounded_tail(tail: &mut Vec<u8>, chunk: &[u8]) {
     if tail.len() > STDERR_TAIL_LIMIT {
         let overflow = tail.len() - STDERR_TAIL_LIMIT;
         tail.drain(..overflow);
+    }
+}
+
+struct ChildExit {
+    done: AtomicBool,
+    wakers: Mutex<Vec<Waker>>,
+}
+
+impl ChildExit {
+    fn new() -> Self {
+        Self {
+            done: AtomicBool::new(false),
+            wakers: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn mark(&self) {
+        self.done.store(true, Ordering::Release);
+        for waker in self.wakers.lock().drain(..) {
+            waker.wake();
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    fn register(&self, waker: &Waker) {
+        if self.is_done() {
+            waker.wake_by_ref();
+            return;
+        }
+        self.wakers.lock().push(waker.clone());
+        if self.is_done() {
+            waker.wake_by_ref();
+        }
+    }
+}
+
+/// Docker can keep a PTY/pipe slave open after `devcontainer` exits; waiting for
+/// EIO would hang attach. Once the direct child has exited, a blocked read is EOF.
+struct ExitAwareReader<R> {
+    inner: R,
+    child_exit: Arc<ChildExit>,
+}
+
+impl<R> ExitAwareReader<R> {
+    fn new(inner: R, child_exit: Arc<ChildExit>) -> Self {
+        Self { inner, child_exit }
+    }
+}
+
+impl<R> futures_util::AsyncRead for ExitAwareReader<R>
+where
+    R: futures_util::AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(0)) => Poll::Ready(Ok(0)),
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => {
+                if self.child_exit.is_done() {
+                    Poll::Ready(Ok(0))
+                } else {
+                    self.child_exit.register(cx.waker());
+                    Poll::Pending
+                }
+            }
+        }
     }
 }
 
