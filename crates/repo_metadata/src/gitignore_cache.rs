@@ -20,8 +20,8 @@
 //! matcher's `Pool`. A `Gitignore` handed out by [`get_or_parse`] is commonly cloned into a
 //! longer-lived list (e.g. a repository's accumulated gitignore stack) that outlives this
 //! cache's own entry, so evicting the entry here does not drop the matcher or shrink its
-//! `Pool`. Bounding `Pool` growth itself is the job of the caller-side match concurrency
-//! limit in `entry.rs` (`GITIGNORE_MATCH_CONCURRENCY_LIMIT`).
+//! `Pool`. Bounding `Pool` growth itself is `matches_gitignores`'s job (`entry.rs`), which
+//! routes every match through the fixed dedicated thread set in `gitignore_match_pool`.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;

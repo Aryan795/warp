@@ -3,15 +3,14 @@
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock};
 
 use futures_lite::StreamExt;
 use ignore::gitignore::Gitignore;
 #[cfg(feature = "local_fs")]
 use notify_debouncer_full::notify::WatchFilter;
 use thiserror::Error;
-use tokio::sync::Semaphore;
 use warp_errors::{ErrorExt, register_error, report_error};
 use warp_util::standardized_path::StandardizedPath;
 
@@ -23,22 +22,6 @@ const MAX_FILE_SIZE: usize = 3 * 1000 * 1000;
 
 /// Maximum number of files to load when lazy-loading a directory
 pub const LAZY_LOAD_FILE_LIMIT: usize = 5000;
-
-/// Caps how many `evaluate_entry` calls may be inside a gitignore match at once.
-///
-/// Each distinct, cached `Gitignore` (see `gitignore_cache`) owns its own
-/// `regex_automata` `Pool` of match caches, and that pool hands out one cache per
-/// concurrent caller and never shrinks. Tree builds run on the shared background
-/// executor, so without a cap, matching concurrency against any one `Gitignore`
-/// scales with the number of background worker threads and stays there for the
-/// life of the process, even during a single momentary burst. Matching is a fast,
-/// CPU-only check relative to the directory reads a build also does, so
-/// serializing it to a small constant bounds that retained memory per matcher
-/// without meaningfully slowing down the (I/O-bound) rest of the build.
-pub(crate) const GITIGNORE_MATCH_CONCURRENCY_LIMIT: usize = 4;
-
-static GITIGNORE_MATCH_SEMAPHORE: LazyLock<Semaphore> =
-    LazyLock::new(|| Semaphore::new(GITIGNORE_MATCH_CONCURRENCY_LIMIT));
 
 #[derive(Debug, Error)]
 pub enum BuildTreeError {
@@ -299,9 +282,7 @@ impl Entry {
             &options,
             options.current_depth,
             ancestor_is_ignored,
-        )
-        .await?
-        {
+        )? {
             EvaluatedEntry::File { ignored } => {
                 if quota == Some(0)
                     && options.budget_exceeded_behavior == BudgetExceededBehavior::FailFast
@@ -407,9 +388,7 @@ impl Entry {
                             &options,
                             child_depth,
                             job.ignored,
-                        )
-                        .await
-                        {
+                        ) {
                             Ok(EvaluatedEntry::File { ignored }) => {
                                 if quota == Some(0)
                                     && options.budget_exceeded_behavior
@@ -600,7 +579,7 @@ enum EvaluatedEntry {
 /// `.gitignore`, computes gitignore status, and applies the ignored-path
 /// strategy. Returns `Err(Ignored)`/`Err(Symlink)` for entries that should be
 /// omitted; callers decide whether that is fatal (root) or a skip (child).
-async fn evaluate_entry(
+fn evaluate_entry(
     curr_path: &Path,
     gitignores: &mut Vec<Arc<Gitignore>>,
     options: &BuildTreeOptions<'_>,
@@ -619,18 +598,14 @@ async fn evaluate_entry(
         gitignores.push(gitignore_cache::get_or_parse(&gitignore_path));
     }
 
-    let path_is_ignored = ancestor_is_ignored || is_git_internal_path(curr_path) || {
-        let _permit = GITIGNORE_MATCH_SEMAPHORE
-            .acquire()
-            .await
-            .expect("GITIGNORE_MATCH_SEMAPHORE is never closed");
-        matches_gitignores(
+    let path_is_ignored = ancestor_is_ignored
+        || is_git_internal_path(curr_path)
+        || matches_gitignores(
             curr_path,
             is_dir,
             &*gitignores,
             false, /* check_ancestors */
-        )
-    };
+        );
 
     let force_included = matches_force_included_path(curr_path, options.force_included_paths);
 
@@ -789,29 +764,77 @@ pub(crate) fn matches_force_included_path(path: &Path, force_included_paths: &[P
 /// For example, if the directory `/target` is ignored:
 /// - If `check_ancestors` is true, then `/target/debug` will match.
 /// - If `check_ancestors` is false, then `/target/debug` will not match.
+///
+/// The actual match against each applicable `Gitignore`'s compiled regex runs on a
+/// small, fixed set of dedicated threads (see `gitignore_match_pool`) so that the
+/// `regex_automata` scratch-cache pool backing every shared, long-lived matcher
+/// (`gitignore_cache`) cannot accumulate a cache per caller thread. Every caller of
+/// this function inherits that bound automatically.
 pub fn matches_gitignores(
     path: &Path,
     is_dir: bool,
     gitignores: &[Arc<Gitignore>],
     check_ancestors: bool,
 ) -> bool {
-    gitignores.iter().any(|gitignore| {
-        if let Ok(relative_path) = path.strip_prefix(gitignore.path()) {
-            // `matched_path_or_any_parents` panics if the path has a root.
-            // If not on windows, we allow paths with a root if the gitignore path is empty (since this denotes a global gitignore).
-            if relative_path.has_root() && (cfg!(windows) || gitignore.path() != Path::new("")) {
-                return false;
-            }
+    // Only gitignores whose directory is an ancestor of (or equal to) `path` can ever
+    // match it. Filtering here — cheap, since it never touches a matcher's regex —
+    // keeps the set of `Arc<Gitignore>` handed to the dedicated pool below proportional
+    // to `path`'s ancestor chain rather than to the full, potentially large, list of
+    // gitignores a long-lived accumulated stack may carry (see `gitignore_cache` docs).
+    let relevant: Vec<Arc<Gitignore>> = gitignores
+        .iter()
+        .filter(|gitignore| is_gitignore_relevant_to_path(path, gitignore))
+        .cloned()
+        .collect();
+    if relevant.is_empty() {
+        return false;
+    }
 
-            if check_ancestors {
-                gitignore
-                    .matched_path_or_any_parents(relative_path, is_dir)
-                    .is_ignore()
-            } else {
-                gitignore.matched(relative_path, is_dir).is_ignore()
-            }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let path = path.to_path_buf();
+        crate::gitignore_match_pool::run(move || {
+            match_relevant_gitignores(&path, is_dir, &relevant, check_ancestors)
+        })
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        match_relevant_gitignores(path, is_dir, &relevant, check_ancestors)
+    }
+}
+
+/// Returns whether `gitignore`'s directory is an ancestor of (or equal to) `path`, i.e.
+/// whether it could possibly apply to `path` at all. Never touches the matcher's regex.
+fn is_gitignore_relevant_to_path(path: &Path, gitignore: &Gitignore) -> bool {
+    match path.strip_prefix(gitignore.path()) {
+        // `matched_path_or_any_parents` panics if the path has a root. If not on
+        // windows, we allow paths with a root if the gitignore path is empty (since
+        // this denotes a global gitignore).
+        Ok(relative_path) => {
+            !relative_path.has_root() || (!cfg!(windows) && gitignore.path() == Path::new(""))
+        }
+        Err(_) => false,
+    }
+}
+
+/// Matches `path` against `gitignores`, which must already be pre-filtered by
+/// [`is_gitignore_relevant_to_path`].
+fn match_relevant_gitignores(
+    path: &Path,
+    is_dir: bool,
+    gitignores: &[Arc<Gitignore>],
+    check_ancestors: bool,
+) -> bool {
+    gitignores.iter().any(|gitignore| {
+        let relative_path = path
+            .strip_prefix(gitignore.path())
+            .expect("caller pre-filtered to only relevant gitignores");
+        if check_ancestors {
+            gitignore
+                .matched_path_or_any_parents(relative_path, is_dir)
+                .is_ignore()
         } else {
-            false
+            gitignore.matched(relative_path, is_dir).is_ignore()
         }
     })
 }
