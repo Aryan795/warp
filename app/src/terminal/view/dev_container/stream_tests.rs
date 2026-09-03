@@ -579,12 +579,19 @@ fn drain_returns_when_out_of_group_descendant_holds_pty_slave() {
             .arg(format!(
                 r#"
 import os, time
+r, w = os.pipe()
 pid = os.fork()
 if pid == 0:
+    os.close(r)
     os.setsid()
     open({pid_file:?}, "w").write(str(os.getpid()))
+    os.write(w, b"x")
+    os.close(w)
     time.sleep(30)
     os._exit(0)
+os.close(w)
+os.read(r, 1)
+os.close(r)
 os.write(2, b"Container started\n")
 os.write(1, b'{{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"/w"}}\n')
 os._exit(0)
