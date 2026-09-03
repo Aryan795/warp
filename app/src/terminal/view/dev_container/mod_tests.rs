@@ -232,6 +232,8 @@ fn interpret_docker_ps_probe_failure_keeps_command_and_underlying_stderr() {
 fn failure_message_keeps_novel_stderr_after_repeated_structured_prefix() {
     let stdout = r#"{"outcome":"error","message":"Command failed: docker pull nope:latest"}"#;
     let stderr = "Command failed: docker pull nope:latest\n\
+Cannot connect to the Docker daemon\n\
+Cannot connect to the Docker daemon\n\
 Command failed: docker pull nope:latest: manifest unknown\n";
     let message = dev_container_up_failure_message(stdout.as_bytes(), stderr.as_bytes());
     assert_eq!(
@@ -240,6 +242,13 @@ Command failed: docker pull nope:latest: manifest unknown\n";
             .count(),
         2,
         "exact prefix line is dropped, enriched cause line is kept, got {message:?}"
+    );
+    assert_eq!(
+        message
+            .matches("Cannot connect to the Docker daemon")
+            .count(),
+        1,
+        "duplicate stderr diagnostic must appear once, got {message:?}"
     );
     assert_eq!(
         message.matches("manifest unknown").count(),

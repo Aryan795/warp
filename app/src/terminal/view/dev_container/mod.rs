@@ -1128,18 +1128,20 @@ fn append_unique_failure_part(parts: &mut Vec<String>, extra: Option<String>) {
     let Some(extra) = extra else {
         return;
     };
-    let existing: Vec<&str> = parts
+    let mut seen: Vec<&str> = parts
         .iter()
         .flat_map(|part| part.lines())
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect();
-    let novel: Vec<&str> = extra
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| !existing.contains(line))
-        .collect();
+    let mut novel = Vec::new();
+    for line in extra.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if seen.contains(&line) {
+            continue;
+        }
+        seen.push(line);
+        novel.push(line);
+    }
     if novel.is_empty() {
         return;
     }
