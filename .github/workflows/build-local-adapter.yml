@@ -27,8 +27,11 @@ jobs:
       # (WARP_BIN_NAME=warp-oss, WARP_CHANNEL=oss) when the internal
       # warp-channel-config binary is absent, and handles bundling,
       # Info.plist, resources, icon, and ad-hoc codesigning.
+      # rust-embed only bakes assets into the binary when `debug-embed` is on;
+      # without it a debug build resolves them against the runner's checkout
+      # path and the app dies at startup on any other machine.
       - name: Build and bundle WarpOpen.app (debug)
-        run: ./script/run --dont-open
+        run: ./script/run --dont-open --features rust-embed/debug-embed
 
       - name: Zip app bundle
         run: ditto -c -k --keepParent target/debug/bundle/osx/WarpOpen.app WarpOpen-arm64.zip
