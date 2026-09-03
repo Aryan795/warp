@@ -329,6 +329,17 @@ impl ChannelState {
         CHANNEL_STATE.lock().channel
     }
 
+    /// Whether this build talks to a local LLM adapter instead of Warp's cloud.
+    ///
+    /// [`WarpServerConfig::local_adapter`] configures no Firebase project, so its empty
+    /// API key distinguishes it from cloud-backed configs. The channel check keeps the
+    /// Integration channel (which also has no Firebase key) on its test-credential paths.
+    pub fn uses_local_adapter() -> bool {
+        let state = CHANNEL_STATE.lock();
+        matches!(state.channel, Channel::Oss | Channel::Local)
+            && state.config.server_config.firebase_auth_api_key.is_empty()
+    }
+
     #[cfg(feature = "test-util")]
     pub fn app_version() -> Option<&'static str> {
         let version = APP_VERSION.lock();

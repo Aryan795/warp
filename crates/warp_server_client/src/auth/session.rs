@@ -95,6 +95,12 @@ impl AuthSession {
     }
 
     pub async fn get_or_refresh_access_token(&self) -> Result<AuthToken> {
+        // Local-adapter builds talk to an adapter that does not authenticate
+        // requests, so skip credential lookup and Firebase token refresh entirely.
+        if ChannelState::uses_local_adapter() {
+            return Ok(AuthToken::NoAuth);
+        }
+
         if cfg!(feature = "skip_login") {
             bail!("skip_login enabled; failing all authenticated requests");
         }
