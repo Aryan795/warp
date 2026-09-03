@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -3001,12 +3001,7 @@ fn dropped_view_subscriptions_are_removed_when_drop_happens_during_another_emit(
         });
 
         let to_drop = Rc::new(RefCell::new(None));
-        let view_sub = app.add_view(window_id, |_| SubscriberView::default());
-        view_sub.update(&mut app, |_, ctx| {
-            ctx.subscribe_to_model(&silent, |_, _, _, _| {});
-            ctx.subscribe_to_model(&noisy, |_, _, _, _| {});
-        });
-        *to_drop.borrow_mut() = Some(view_sub);
+        let noisy_calls = Rc::new(Cell::new(0));
 
         let dropper = app.add_model(|_| DropperModel);
         dropper.update(&mut app, |_, ctx| {
@@ -3016,7 +3011,23 @@ fn dropped_view_subscriptions_are_removed_when_drop_happens_during_another_emit(
             });
         });
 
+        let view_sub = app.add_view(window_id, |_| SubscriberView::default());
+        view_sub.update(&mut app, |_, ctx| {
+            ctx.subscribe_to_model(&silent, |_, _, _, _| {});
+            let noisy_calls = noisy_calls.clone();
+            ctx.subscribe_to_model(&noisy, move |_, _, _, _| {
+                noisy_calls.set(noisy_calls.get() + 1);
+            });
+        });
+        *to_drop.borrow_mut() = Some(view_sub);
+
         noisy.update(&mut app, |_, ctx| ctx.emit(()));
+
+        assert_eq!(
+            noisy_calls.get(),
+            1,
+            "dropped view's callback should still run for the current event"
+        );
 
         app.update(|ctx| {
             let subs = ctx.subscriptions.get(&silent_id).map_or(0, |v| v.len());
