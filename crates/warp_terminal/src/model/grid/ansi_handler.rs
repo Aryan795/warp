@@ -211,6 +211,23 @@ impl ansi::Handler for GridHandler {
             if self.grid[row][col].flags.contains(Flags::WIDE_CHAR_SPACER) {
                 col = col.saturating_sub(1);
             }
+            let original_cell = if col + 1 == num_cols
+                && !self.ansi_handler_state.mode.contains(TermMode::LINE_WRAP)
+            {
+                Some(self.grid[row][col].clone())
+            } else {
+                None
+            };
+
+            let old_cell_content_width = match self.grid[row][col].raw_content() {
+                CharOrStr::Str(s) => s.width(),
+                CharOrStr::Char(c) => match c.width() {
+                    Some(width) => width,
+                    None => {
+                        return;
+                    }
+                },
+            };
 
             self.grid[row][col].push_zerowidth(c, /* log_long_grapheme_warnings */ true);
             let cell_content_width = match self.grid[row][col].raw_content() {
@@ -229,19 +246,23 @@ impl ansi::Handler for GridHandler {
             // Bash and Fish support emoji variation selectors, but Zsh does not in bracketed paste
             // mode. Specifically, this references sequences such as \0x2601\0xFE0F (☁️),
             // which are commonly used in prompts e.g. GCloud prompt chip in Starship.
-            if cell_content_width == 2
+            if old_cell_content_width != cell_content_width
+                && cell_content_width == 2
                 && self.ansi_handler_state.supports_emoji_presentation_selector
             {
-                // Current cursor cell contains a wide character (double-width).
-                self.grid[row][col].flags.insert(Flags::WIDE_CHAR);
+                let mut wide_cell = self.grid[row][col].clone();
+                wide_cell.flags.remove(
+                    Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::WRAPLINE,
+                );
+                let base_char = wide_cell.c;
 
-                // Insert spacer at the next cell.
-                self.write_at_cursor(cell::DEFAULT_CHAR)
-                    .flags
-                    .insert(Flags::WIDE_CHAR_SPACER);
-
-                // Update cursor appropriately before early-return.
-                self.advance_cursor_by_one_cell();
+                self.update_cursor(|cursor| {
+                    cursor.point.col = col;
+                });
+                if !self.write_wide_char(base_char, |cell| *cell = wide_cell) {
+                    self.grid[row][col] =
+                        original_cell.expect("rejected promotion should have an original cell");
+                }
             }
             return;
         }
@@ -279,37 +300,10 @@ impl ansi::Handler for GridHandler {
 
         if width == 1 {
             self.write_at_cursor(c);
+            self.advance_cursor_by_one_cell();
         } else {
-            if self.grid.cursor().point.col + 1 >= num_cols {
-                if self.ansi_handler_state.mode.contains(TermMode::LINE_WRAP) {
-                    // Insert placeholder before wide char if glyph does not fit in this row.
-                    self.write_at_cursor(cell::DEFAULT_CHAR)
-                        .flags
-                        .insert(Flags::LEADING_WIDE_CHAR_SPACER);
-                    self.wrapline();
-                } else {
-                    // Prevent out of bounds crash when linewrapping is disabled.
-                    self.move_cursor_forward(|cursor| {
-                        cursor.input_needs_wrap = true;
-                    });
-                    return;
-                }
-            }
-
-            // Write full width glyph to current cursor cell.
-            self.write_at_cursor(c).flags.insert(Flags::WIDE_CHAR);
-
-            // Write spacer to cell following the wide glyph.
-            self.move_cursor_forward(|cursor| {
-                cursor.point.col += 1;
-            });
-
-            self.write_at_cursor(cell::DEFAULT_CHAR)
-                .flags
-                .insert(Flags::WIDE_CHAR_SPACER);
+            self.write_wide_char(c, |_| {});
         }
-
-        self.advance_cursor_by_one_cell();
     }
 
     fn goto(&mut self, row: VisibleRow, column: usize) {
@@ -1488,6 +1482,39 @@ impl GridHandler {
                 cursor.input_needs_wrap = true;
             }
         });
+    }
+
+    fn write_wide_char(&mut self, c: char, update_wide_cell: impl FnOnce(&mut Cell)) -> bool {
+        let num_cols = self.columns();
+        if self.grid.cursor().point.col + 1 >= num_cols {
+            if !self.ansi_handler_state.mode.contains(TermMode::LINE_WRAP) {
+                self.move_cursor_forward(|cursor| {
+                    cursor.input_needs_wrap = true;
+                });
+                return false;
+            }
+
+            let leading_spacer = self.write_at_cursor(cell::DEFAULT_CHAR);
+            leading_spacer.flags.insert(Flags::LEADING_WIDE_CHAR_SPACER);
+            leading_spacer.set_hyperlink_id(None);
+            self.wrapline();
+        }
+
+        let hyperlink_id = {
+            let wide_cell = self.write_at_cursor(c);
+            update_wide_cell(wide_cell);
+            wide_cell.flags.insert(Flags::WIDE_CHAR);
+            wide_cell.hyperlink_id()
+        };
+
+        self.move_cursor_forward(|cursor| {
+            cursor.point.col += 1;
+        });
+        let spacer = self.write_at_cursor(cell::DEFAULT_CHAR);
+        spacer.flags.insert(Flags::WIDE_CHAR_SPACER);
+        spacer.set_hyperlink_id(hyperlink_id);
+        self.advance_cursor_by_one_cell();
+        true
     }
 
     /// Insert a linebreak at the current cursor position.
