@@ -12,7 +12,7 @@ use watcher::HomeDirectoryWatcher;
 
 use super::{
     CloudEnvMcpScanServer, FileBasedMCPManager, FileBasedMCPManagerEvent, FileBasedMCPServerScope,
-    MCPProvider,
+    MCPProvider, home_dir,
 };
 use crate::ai::mcp::file_mcp_watcher::{
     FileMCPConfigDiagnostic, FileMCPConfigDiagnosticKind, PendingScan,
@@ -483,7 +483,7 @@ fn test_global_warp_server_from_managed_home_root_always_spawns() {
 #[test]
 fn test_global_non_warp_server_respects_toggle() {
     let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
-    let Some(home_dir) = dirs::home_dir() else {
+    let Some(home_dir) = home_dir() else {
         // Skip on platforms where a home dir isn't available (shouldn't happen on
         // our supported platforms, but guard to avoid false failures).
         return;
@@ -537,7 +537,7 @@ fn test_global_non_warp_server_respects_toggle() {
 #[test]
 fn tui_global_third_party_servers_never_auto_start() {
     let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
-    let Some(home_dir) = dirs::home_dir() else {
+    let Some(home_dir) = home_dir() else {
         return;
     };
     let parsed =
@@ -739,7 +739,7 @@ fn test_auto_started_cloud_scan_uuids_are_in_wait_set() {
 #[test]
 fn test_server_referenced_from_both_global_and_project_is_global() {
     let _flag_guard = FeatureFlag::FileBasedMcp.override_enabled(true);
-    let Some(home_dir) = dirs::home_dir() else {
+    let Some(home_dir) = home_dir() else {
         return;
     };
     let repo_path = PathBuf::from("/tmp/warp-test-repo-shared");
@@ -789,7 +789,7 @@ fn test_server_referenced_from_both_global_and_project_is_global() {
 
 #[test]
 fn source_snapshots_preserve_provenance_scope_spawn_root_and_hash_lookup() {
-    let Some(home_dir) = dirs::home_dir() else {
+    let Some(home_dir) = home_dir() else {
         return;
     };
     let repo_path = PathBuf::from("/tmp/warp-test-provenance-repo");

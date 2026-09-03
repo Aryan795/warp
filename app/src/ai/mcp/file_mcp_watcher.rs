@@ -21,7 +21,9 @@ use watcher::HomeDirectoryWatcherEvent;
 
 use crate::HomeDirectoryWatcher;
 use crate::ai::mcp::parsing::normalize_codex_toml_to_json;
-use crate::ai::mcp::{MCPProvider, ParsedTemplatableMCPServerResult, home_config_file_path};
+use crate::ai::mcp::{
+    MCPProvider, ParsedTemplatableMCPServerResult, home_config_file_path, home_dir,
+};
 use crate::warp_managed_paths_watcher::{
     WarpManagedPathsWatcher, WarpManagedPathsWatcherEvent, warp_managed_mcp_config_path,
 };
@@ -206,7 +208,7 @@ impl FileMCPWatcher {
         );
 
         let mut home_provider_watchers = HashMap::new();
-        if let Some(home_dir) = dirs::home_dir() {
+        if let Some(home_dir) = home_dir() {
             for provider in MCPProvider::iter().filter(|provider| *provider != MCPProvider::Warp) {
                 let Some(subdir) = home_subdir_to_watch(provider) else {
                     continue;
@@ -390,7 +392,7 @@ impl FileMCPWatcher {
         ctx: &mut ModelContext<Self>,
     ) {
         let HomeDirectoryWatcherEvent::HomeFilesChanged(fs_event) = event;
-        let Some(home_dir) = dirs::home_dir() else {
+        let Some(home_dir) = home_dir() else {
             return;
         };
 
@@ -726,7 +728,7 @@ fn global_config_sources() -> Vec<(PathBuf, PathBuf, MCPProvider)> {
     if let Some(config) = warp_managed_mcp_config_path() {
         sources.push((config.config_path, config.root_path, MCPProvider::Warp));
     }
-    if let Some(home_dir) = dirs::home_dir() {
+    if let Some(home_dir) = home_dir() {
         sources.extend(
             MCPProvider::iter()
                 .filter(|provider| *provider != MCPProvider::Warp)

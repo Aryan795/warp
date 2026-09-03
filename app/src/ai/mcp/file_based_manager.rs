@@ -10,7 +10,7 @@ use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
 use super::file_mcp_watcher::{FileMCPConfigDiagnostic, PendingScan};
-use super::{FileMCPWatcher, FileMCPWatcherEvent, MCPProvider};
+use super::{FileMCPWatcher, FileMCPWatcherEvent, MCPProvider, home_dir};
 use crate::ai::mcp::ParsedTemplatableMCPServerResult;
 use crate::ai::mcp::templatable_installation::TemplatableMCPServerInstallation;
 use crate::settings::AISettingsChangedEvent;
@@ -171,7 +171,7 @@ impl FileBasedMCPManager {
         let repo_root = DetectedRepositories::as_ref(app)
             .get_root_for_path(&LocalOrRemotePath::Local(cwd.to_path_buf()))
             .and_then(|r| PathBuf::try_from(r).ok());
-        let candidate_roots = [dirs::home_dir(), repo_root];
+        let candidate_roots = [home_dir(), repo_root];
 
         let mut servers = Vec::new();
         for root in candidate_roots.into_iter().flatten() {
@@ -385,10 +385,7 @@ impl FileBasedMCPManager {
                 }
             }
             MCPProvider::Claude | MCPProvider::Codex | MCPProvider::Agents => {
-                if dirs::home_dir()
-                    .as_ref()
-                    .is_some_and(|home| root_path == home)
-                {
+                if home_dir().as_ref().is_some_and(|home| root_path == home) {
                     FileBasedMCPServerScope::Global
                 } else {
                     FileBasedMCPServerScope::Project
@@ -724,7 +721,7 @@ impl FileBasedMCPManager {
         // home dir so all global installs (Warp and third-party) share a
         // consistent cwd.
         if self.is_global_warp_server(hash) {
-            return dirs::home_dir().or(Some(discovery_root));
+            return home_dir().or(Some(discovery_root));
         }
         Some(discovery_root)
     }
