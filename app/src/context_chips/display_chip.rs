@@ -43,6 +43,7 @@ use crate::completer::SessionContext;
 use crate::context_chips::git_branch_on_click::{
     GitBranchOnClickValue, is_plausible_new_branch_name,
 };
+use crate::context_chips::git_operation_state::{GitOperationAction, GitOperationKind};
 use crate::context_chips::node_version_popup::{NodeVersionPopupEvent, NodeVersionPopupView};
 use crate::context_chips::spacing;
 use crate::settings::{AISettings, AISettingsChangedEvent};
@@ -645,6 +646,11 @@ pub enum DisplayChipKind {
     GitDiffStats {
         line_changes_info: Option<GitLineChanges>,
     },
+    GitOperationState {
+        kind: GitOperationKind,
+        menu_open: bool,
+        menu: ViewHandle<DisplayChipMenu>,
+    },
 }
 
 impl DisplayChipKind {
@@ -653,7 +659,8 @@ impl DisplayChipKind {
             DisplayChipKind::WorkingDirectory { menu_open, .. } => *menu_open,
             DisplayChipKind::NodeVersion { popup_open, .. } => *popup_open,
             DisplayChipKind::GitBranch { menu_open, .. }
-            | DisplayChipKind::GitBranchStatus { menu_open, .. } => *menu_open,
+            | DisplayChipKind::GitBranchStatus { menu_open, .. }
+            | DisplayChipKind::GitOperationState { menu_open, .. } => *menu_open,
             DisplayChipKind::GithubPullRequest
             | DisplayChipKind::GitDiffStats { .. }
             | DisplayChipKind::Text
@@ -795,6 +802,54 @@ impl GenericMenuItem for CreateGitBranch {
     }
 }
 
+/// A menu entry offering one state-transition action (e.g. "Continue",
+/// "Abort") for the `GitOperationState` chip.
+#[derive(Debug, Clone, Copy)]
+struct GitOperationMenuItem(GitOperationAction);
+
+impl GitOperationMenuItem {
+    fn menu_icon(self) -> Icon {
+        match self.0 {
+            GitOperationAction::RebaseContinue
+            | GitOperationAction::AmContinue
+            | GitOperationAction::MergeContinue
+            | GitOperationAction::CherryPickContinue
+            | GitOperationAction::RevertContinue => Icon::Check,
+            GitOperationAction::RebaseSkip
+            | GitOperationAction::AmSkip
+            | GitOperationAction::CherryPickSkip
+            | GitOperationAction::RevertSkip
+            | GitOperationAction::BisectSkip => Icon::ArrowRight,
+            GitOperationAction::RebaseAbort
+            | GitOperationAction::AmAbort
+            | GitOperationAction::MergeAbort
+            | GitOperationAction::CherryPickAbort
+            | GitOperationAction::RevertAbort => Icon::X,
+            GitOperationAction::BisectGood => Icon::ThumbsUp,
+            GitOperationAction::BisectBad => Icon::ThumbsDown,
+            GitOperationAction::BisectReset => Icon::Repeat,
+        }
+    }
+}
+
+impl GenericMenuItem for GitOperationMenuItem {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> String {
+        self.0.label().to_string()
+    }
+
+    fn icon(&self, _app: &AppContext) -> Option<Icon> {
+        Some(self.menu_icon())
+    }
+
+    fn action_data(&self) -> String {
+        format!("{:?}", self.0)
+    }
+}
+
 impl DisplayChip {
     /// Convert MenuPositioning to appropriate anchor pair for overlay positioning
     fn positioning_to_anchors(positioning: MenuPositioning) -> (ParentAnchor, ChildAnchor) {
@@ -879,6 +934,48 @@ impl DisplayChip {
         menu_view
     }
 
+    /// Builds the state-transition action menu for the `GitOperationState`
+    /// chip: one entry per action valid for `kind` (e.g. "Continue", "Abort").
+    fn git_operation_menu(
+        kind: GitOperationKind,
+        ctx: &mut ViewContext<Self>,
+    ) -> ViewHandle<DisplayChipMenu> {
+        let items: Vec<GitOperationMenuItem> = kind
+            .available_actions()
+            .iter()
+            .map(|action| GitOperationMenuItem(*action))
+            .collect();
+
+        let menu_view = ctx.add_typed_action_view(move |ctx| {
+            DisplayChipMenu::new(items, None, ChipMenuType::GitOperation, ctx)
+        });
+        ctx.subscribe_to_view(&menu_view, |me, _, event, ctx| match event {
+            PromptDisplayMenuEvent::MenuAction(generic_event) => {
+                let action_item = generic_event.action_item.as_any();
+                let Some(git_operation_item) = action_item.downcast_ref::<GitOperationMenuItem>()
+                else {
+                    log::warn!(
+                        "MenuAction event should contain a GitOperationMenuItem action item"
+                    );
+                    return;
+                };
+
+                ctx.emit(PromptDisplayChipEvent::TryExecuteCommand(
+                    PromptChipShellCommand::GitOperationAction(git_operation_item.0),
+                ));
+                me.close_git_branch_menu(ctx);
+                ctx.notify();
+            }
+            PromptDisplayMenuEvent::CloseMenu => {
+                me.close_git_branch_menu(ctx);
+                ctx.emit(PromptDisplayChipEvent::ToggleMenu { open: false });
+                ctx.notify();
+            }
+        });
+
+        menu_view
+    }
+
     fn new_internal(
         chip_result: ChipResult,
         next_chip_kind: Option<ContextChipKind>,
@@ -937,6 +1034,23 @@ impl DisplayChip {
                 menu: Self::git_branch_menu(&chip_result.on_click_values, ctx),
             },
             ContextChipKind::GithubPullRequest => DisplayChipKind::GithubPullRequest,
+            ContextChipKind::GitOperationState => {
+                let kind = chip_result
+                    .value
+                    .as_ref()
+                    .map(|value| value.to_string())
+                    .and_then(|token| GitOperationKind::from_token(&token));
+                match kind {
+                    Some(kind) => DisplayChipKind::GitOperationState {
+                        kind,
+                        menu_open: false,
+                        menu: Self::git_operation_menu(kind, ctx),
+                    },
+                    // Defensive fallback for an unrecognized token; shouldn't happen since the
+                    // chip only has a value when the detection command emitted a known state.
+                    None => DisplayChipKind::Text,
+                }
+            }
             ContextChipKind::WorkingDirectory => {
                 let dir_path = chip_result
                     .value
@@ -1213,9 +1327,14 @@ impl DisplayChip {
         &self.on_click_values
     }
 
+    /// Closes the currently open dropdown menu, if this chip has one
+    /// (`GitBranch`, `GitBranchStatus`, or `GitOperationState`).
     pub fn close_git_branch_menu(&mut self, ctx: &mut ViewContext<Self>) {
         if let DisplayChipKind::GitBranch { menu_open, menu }
         | DisplayChipKind::GitBranchStatus {
+            menu_open, menu, ..
+        }
+        | DisplayChipKind::GitOperationState {
             menu_open, menu, ..
         } = &mut self.display_chip_kind
         {
@@ -1252,6 +1371,9 @@ impl DisplayChip {
             }
             DisplayChipKind::GitBranch { menu_open, menu }
             | DisplayChipKind::GitBranchStatus {
+                menu_open, menu, ..
+            }
+            | DisplayChipKind::GitOperationState {
                 menu_open, menu, ..
             } => {
                 if *menu_open {
@@ -1623,6 +1745,80 @@ impl DisplayChip {
             hover
                 .on_click(|ctx, _app, _position| {
                     ctx.dispatch_typed_action(DisplayChipAction::OpenBranchSelector);
+                })
+                .with_cursor(Cursor::PointingHand)
+                .finish()
+        };
+
+        let mut stack = Stack::new().with_child(hover);
+
+        if menu_open {
+            let positioning = self.menu_positioning_provider.menu_position(app);
+            let (parent_anchor, child_anchor) = Self::positioning_to_anchors(positioning);
+            let offset = match positioning {
+                MenuPositioning::BelowInputBox => vec2f(0., 4.),
+                MenuPositioning::AboveInputBox => vec2f(0., -4.),
+            };
+            stack.add_positioned_overlay_child(
+                ChildView::new(menu).finish(),
+                OffsetPositioning::offset_from_parent(
+                    offset,
+                    ParentOffsetBounds::WindowByPosition,
+                    parent_anchor,
+                    child_anchor,
+                ),
+            );
+        }
+
+        stack.finish()
+    }
+
+    fn git_operation_state_chip(
+        &self,
+        kind: GitOperationKind,
+        menu_open: bool,
+        menu: &ViewHandle<DisplayChipMenu>,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let font_color = if self.is_in_agent_view {
+            agent_view_chip_color(appearance)
+        } else {
+            appearance.theme().ansi_fg_yellow()
+        };
+
+        let is_interactive =
+            !self.is_shared_session_viewer && !self.is_cli_agent_session_active(app);
+        let is_in_agent_view = self.is_in_agent_view;
+        let label = kind.display_label().to_string();
+        let hover = Hoverable::new(self.mouse_state.clone(), move |state| {
+            let hovered = state.is_hovered() && is_interactive;
+            let mut config =
+                UdiChipConfig::new_with_icon(Icon::AlertTriangle, font_color, label.clone())
+                    .with_hovered(hovered);
+            if is_in_agent_view {
+                config = config.for_agent_view();
+            }
+            let chip_element = render_udi_chip(config, appearance);
+
+            let mut stack = Stack::new().with_child(chip_element);
+            if state.is_hovered() && is_interactive && !menu_open {
+                let tool_tip = appearance
+                    .ui_builder()
+                    .tool_tip("View available Git actions".to_string())
+                    .build()
+                    .finish();
+                stack.add_positioned_overlay_child(tool_tip, udi_tooltip_positioning());
+            }
+            stack.finish()
+        });
+
+        let hover = if !is_interactive {
+            hover.finish()
+        } else {
+            hover
+                .on_click(|ctx, _app, _position| {
+                    ctx.dispatch_typed_action(DisplayChipAction::ToggleMenu);
                 })
                 .with_cursor(Cursor::PointingHand)
                 .finish()
@@ -2044,6 +2240,11 @@ impl DisplayChip {
             DisplayChipKind::GitDiffStats { line_changes_info } => {
                 self.git_diff_stats_chip(line_changes_info, app)
             }
+            DisplayChipKind::GitOperationState {
+                kind,
+                menu_open,
+                menu,
+            } => Some(self.git_operation_state_chip(*kind, *menu_open, menu, app)),
             _ => {
                 let mut text = Text::new_inline(String::new(), font_family, font_size)
                     .with_line_height_ratio(appearance.line_height_ratio());
@@ -2111,6 +2312,10 @@ pub enum PromptChipShellCommand {
         /// This is to prevent accidental injection of user input into the message.
         message: &'static str,
     },
+    /// A state-transition action for the `GitOperationState` chip (e.g.
+    /// `git rebase --continue`). Maps to a fixed, static `git` argv; see
+    /// `GitOperationAction::git_args`.
+    GitOperationAction(GitOperationAction),
 }
 
 pub enum PromptDisplayChipEvent {
@@ -2138,6 +2343,9 @@ impl TypedActionView for DisplayChip {
             DisplayChipAction::CloseMenu => match &mut self.display_chip_kind {
                 DisplayChipKind::GitBranch { menu_open, menu }
                 | DisplayChipKind::GitBranchStatus {
+                    menu_open, menu, ..
+                }
+                | DisplayChipKind::GitOperationState {
                     menu_open, menu, ..
                 } => {
                     *menu_open = false;
@@ -2170,15 +2378,18 @@ impl TypedActionView for DisplayChip {
             },
             DisplayChipAction::ToggleMenu => {
                 // All ToggleMenu consumers (WorkingDirectory, GitBranch,
-                // GitBranchStatus, NodeVersion) route through shell commands
-                // (cd, git checkout, nvm use) that don't work in CLI agent
-                // context, so we suppress all of them.
+                // GitBranchStatus, GitOperationState, NodeVersion) route through
+                // shell commands (cd, git checkout, git rebase/merge/etc., nvm use)
+                // that don't work in CLI agent context, so we suppress all of them.
                 if self.is_cli_agent_session_active(ctx) {
                     return;
                 }
                 match &mut self.display_chip_kind {
                     DisplayChipKind::GitBranch { menu, menu_open }
                     | DisplayChipKind::GitBranchStatus {
+                        menu, menu_open, ..
+                    }
+                    | DisplayChipKind::GitOperationState {
                         menu, menu_open, ..
                     } => {
                         *menu_open = !*menu_open;

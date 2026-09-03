@@ -7,6 +7,7 @@ pub mod display;
 pub mod display_chip;
 pub mod display_menu;
 pub(crate) mod git_branch_on_click;
+pub mod git_operation_state;
 pub(crate) mod logging;
 pub mod node_version_popup;
 pub mod prompt;
@@ -33,6 +34,7 @@ pub use self::context_chip::{
     ChipAvailability, ChipDisabledReason, ChipRuntimeCapabilities, ExternalCommandsAvailability,
 };
 use self::context_chip::{ChipFingerprintInput, ChipRuntimePolicy, ContextChip, RefreshConfig};
+use self::git_operation_state::GitOperationKind;
 use self::renderer::RendererStyles;
 use crate::appearance::Appearance;
 use crate::features::FeatureFlag;
@@ -191,6 +193,9 @@ pub enum ContextChipKind {
     ShellGitBranch,
     GitBranchStatus,
     GitDiffStats,
+    /// Surfaces an in-progress Git operation (rebase, merge, cherry-pick, revert,
+    /// `git am`, or bisect) and offers its valid state transitions on click.
+    GitOperationState,
     GithubPullRequest,
     KubernetesContext,
     SvnBranch,
@@ -327,6 +332,12 @@ impl ContextChipKind {
                 )
                 .with_allow_empty_value(),
             ),
+            Self::GitOperationState => Some(ContextChip::shell_builtin(
+                "Git Operation",
+                builtins::shell_git_operation_state(),
+                None,
+                GIT_REFRESH_CONFIG,
+            )),
             Self::GithubPullRequest if !FeatureFlag::GithubPrPromptChip.is_enabled() => None,
             Self::GithubPullRequest => Some(ContextChip::builtin(
                 "GitHub Pull Request",
@@ -408,6 +419,7 @@ impl ContextChipKind {
                 ))
             }
             Self::GitDiffStats => ChipValue::Text("3 • +10 -2".to_string()),
+            Self::GitOperationState => ChipValue::Text("REBASING".to_string()),
             Self::GithubPullRequest => ChipValue::Text("PR #123".to_string()),
             Self::VirtualEnvironment => ChipValue::Text("pyenv".to_string()),
             Self::CondaEnvironment => ChipValue::Text("condaenv".to_string()),
@@ -442,6 +454,7 @@ impl ContextChipKind {
             Self::ShellGitBranch => prompt_colors.input_prompt_branch,
             Self::GitBranchStatus => prompt_colors.input_prompt_branch,
             Self::GitDiffStats => prompt_colors.input_prompt_branch,
+            Self::GitOperationState => prompt_colors.input_prompt_branch,
             Self::GithubPullRequest => prompt_colors.input_prompt_branch,
             Self::VirtualEnvironment => prompt_colors.input_prompt_virtual_env,
             Self::CondaEnvironment => prompt_colors.input_prompt_virtual_env,
@@ -483,6 +496,9 @@ impl ContextChipKind {
         let text = value.to_string();
         match self {
             Self::ShellGitBranch | Self::GitBranchStatus => format!("git:({text})"),
+            Self::GitOperationState => GitOperationKind::from_token(&text)
+                .map(|kind| kind.display_label().to_string())
+                .unwrap_or(text),
             Self::GithubPullRequest => github_pr_display_text_from_url(&text).unwrap_or(text),
             Self::KubernetesContext => format!("⎈ {text}"),
             Self::SvnBranch => format!("svn:({text})"),
@@ -545,6 +561,7 @@ impl ContextChipKind {
             Self::NodeVersion => Some(Icon::NodeJS),
             Self::ShellGitBranch | Self::GitBranchStatus | Self::SvnBranch => Some(Icon::GitBranch),
             Self::GitDiffStats | Self::SvnDirtyItems => Some(Icon::File),
+            Self::GitOperationState => Some(Icon::AlertTriangle),
             Self::GithubPullRequest => Some(Icon::Github),
             Self::KubernetesContext => Some(Icon::Globe),
             Self::AgentPlanAndTodoList => Some(Icon::CheckSkinny),
@@ -570,6 +587,7 @@ pub fn available_chips() -> Vec<ContextChipKind> {
         ContextChipKind::ShellGitBranch,
         ContextChipKind::GitBranchStatus,
         ContextChipKind::GitDiffStats,
+        ContextChipKind::GitOperationState,
     ];
     if FeatureFlag::GithubPrPromptChip.is_enabled() {
         chips.push(ContextChipKind::GithubPullRequest);

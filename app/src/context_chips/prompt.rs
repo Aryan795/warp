@@ -338,6 +338,7 @@ impl PromptConfiguration {
             ContextChipKind::WorkingDirectory,
             ContextChipKind::ShellGitBranch,
             ContextChipKind::GitDiffStats,
+            ContextChipKind::GitOperationState,
             ContextChipKind::KubernetesContext,
         ];
         if FeatureFlag::GithubPrPromptChip.is_enabled() && !suppress_pr_chip {

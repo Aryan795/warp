@@ -988,6 +988,9 @@ fn render_prompt_chip_shell_command(
         PromptChipShellCommand::Echo { message } => {
             format!("echo {}", shell_quote_arg(message, shell_type))
         }
+        PromptChipShellCommand::GitOperationAction(action) => {
+            format!("git {}", action.git_args().join(" "))
+        }
     }
 }
 
