@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
+use warp_core::channel::ChannelState;
 use warp_core::send_telemetry_from_ctx;
 use warp_errors::report_error;
 use warp_multi_agent_api as api;
@@ -335,12 +336,21 @@ impl schemars::JsonSchema for CustomEndpointDefinitions {
 
 pub fn validate_custom_endpoint_url(value: &str) -> Result<(), &'static str> {
     let parsed = Url::parse(value).map_err(|_| "Invalid URL")?;
-    if parsed.scheme() != "https" {
-        return Err("URL must use HTTPS");
-    }
     let Some(host) = parsed.host_str().filter(|host| !host.is_empty()) else {
         return Err("URL must include a host");
     };
+    // Upstream requires public HTTPS because Warp's servers call the endpoint.
+    // Local-adapter builds call it from this machine instead, so a loopback
+    // http:// endpoint is the normal case and TLS buys nothing over it.
+    if ChannelState::uses_local_adapter() && is_restricted_host(host) {
+        return match parsed.scheme() {
+            "http" | "https" => Ok(()),
+            _ => Err("URL must use HTTP or HTTPS"),
+        };
+    }
+    if parsed.scheme() != "https" {
+        return Err("URL must use HTTPS");
+    }
     if is_restricted_host(host) {
         return Err("URL must not use a local or private host");
     }
