@@ -63,6 +63,17 @@ impl WarpServerConfig {
             iap_config: None,
         }
     }
+
+    /// Configuration for connecting to a local LLM adapter instead of Warp's servers.
+    pub fn local_adapter() -> Self {
+        Self {
+            server_root_url: "http://127.0.0.1:18888".into(),
+            rtc_server_url: "ws://127.0.0.1:18888/graphql/v2".into(),
+            session_sharing_server_url: None,
+            firebase_auth_api_key: "".into(),
+            iap_config: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
