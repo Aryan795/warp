@@ -23,10 +23,10 @@ use vim::vim::{
     VimOperator, VimTextObject, WordBound, WordMotion, WordType,
 };
 use vim::{
-    HorizontalWrap, find_next_paragraph_end, find_previous_paragraph_start,
-    motion_destination_with_jump, vim_a_block, vim_a_paragraph, vim_a_quote, vim_a_word,
-    vim_find_char_on_line, vim_find_matching_bracket, vim_inner_block, vim_inner_paragraph,
-    vim_inner_quote, vim_inner_word, vim_word_iterator_from_offset,
+    find_next_paragraph_end, find_previous_paragraph_start, motion_destination_with_jump,
+    vim_a_block, vim_a_paragraph, vim_a_quote, vim_a_word, vim_find_char_on_line,
+    vim_find_matching_bracket, vim_inner_block, vim_inner_paragraph, vim_inner_quote,
+    vim_inner_word, vim_word_iterator_from_offset,
 };
 use warp_core::platform::SessionPlatform;
 use warp_core::semantic_selection::SemanticSelection;
@@ -752,7 +752,6 @@ impl CodeEditorModel {
         &mut self,
         motion: &VimMotion,
         count: u32,
-        wrap: HorizontalWrap,
         jump: bool,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -766,7 +765,6 @@ impl CodeEditorModel {
                 selection.head,
                 motion,
                 count,
-                wrap,
                 jump,
             );
             let native = mapped.min(valid.end).max(valid.start);

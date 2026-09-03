@@ -12,17 +12,6 @@ use crate::vim::{
 use crate::vim_find_char_on_line;
 use crate::word_iterator::CharacterKind;
 
-/// How wrapping horizontal motions (`space` / backspace) treat newlines.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HorizontalWrap {
-    /// Never leave the current line (TUI prompt).
-    StopAtLine,
-    /// Skip newlines without counting them (terminal input).
-    SkipNewlines,
-    /// Cross onto the next/previous line, landing on empty lines (code editor).
-    CrossLine,
-}
-
 /// Shared vim motion destination in backend-native offsets.
 ///
 /// `valid` is a contiguous exclusive-end range of real text in the same coordinate
@@ -35,9 +24,8 @@ pub fn motion_destination<T: TextBuffer + ?Sized>(
     offset: CharOffset,
     motion: &VimMotion,
     count: u32,
-    wrap: HorizontalWrap,
 ) -> CharOffset {
-    motion_destination_with_jump(text, valid, offset, motion, count, wrap, true)
+    motion_destination_with_jump(text, valid, offset, motion, count, true)
 }
 
 pub fn motion_destination_with_jump<T: TextBuffer + ?Sized>(
@@ -46,7 +34,6 @@ pub fn motion_destination_with_jump<T: TextBuffer + ?Sized>(
     offset: CharOffset,
     motion: &VimMotion,
     count: u32,
-    wrap: HorizontalWrap,
     jump_first_nonwhitespace: bool,
 ) -> CharOffset {
     let offset = clamp_offset(valid.clone(), offset);
@@ -58,27 +45,17 @@ pub fn motion_destination_with_jump<T: TextBuffer + ?Sized>(
         }
     };
     match motion {
-        VimMotion::Character(CharacterMotion::Left) => move_horizontal(
-            text,
-            valid,
-            offset,
-            count,
-            Direction::Backward,
-            HorizontalWrap::StopAtLine,
-        ),
-        VimMotion::Character(CharacterMotion::Right) => move_horizontal(
-            text,
-            valid,
-            offset,
-            count,
-            Direction::Forward,
-            HorizontalWrap::StopAtLine,
-        ),
+        VimMotion::Character(CharacterMotion::Left) => {
+            move_within_line(text, valid, offset, count, Direction::Backward)
+        }
+        VimMotion::Character(CharacterMotion::Right) => {
+            move_within_line(text, valid, offset, count, Direction::Forward)
+        }
         VimMotion::Character(CharacterMotion::WrappingLeft) => {
-            move_horizontal(text, valid, offset, count, Direction::Backward, wrap)
+            move_crossing_lines(text, valid, offset, count, Direction::Backward)
         }
         VimMotion::Character(CharacterMotion::WrappingRight) => {
-            move_horizontal(text, valid, offset, count, Direction::Forward, wrap)
+            move_crossing_lines(text, valid, offset, count, Direction::Forward)
         }
         VimMotion::Character(CharacterMotion::Up | CharacterMotion::Down) => offset,
         VimMotion::Word(word_motion) => move_by_word(text, valid, offset, count, word_motion),
@@ -213,78 +190,29 @@ fn first_nonwhitespace<T: TextBuffer + ?Sized>(
     start
 }
 
-fn move_horizontal<T: TextBuffer + ?Sized>(
-    text: &T,
-    valid: Range<CharOffset>,
-    offset: CharOffset,
-    count: u32,
-    direction: Direction,
-    wrap: HorizontalWrap,
-) -> CharOffset {
-    match wrap {
-        HorizontalWrap::StopAtLine => {
-            let start = line_start(text, valid.clone(), offset);
-            let end = line_end_exclusive(text, valid, offset);
-            match direction {
-                Direction::Backward => {
-                    let dist = u32::min(
-                        count,
-                        offset.as_usize().saturating_sub(start.as_usize()) as u32,
-                    );
-                    CharOffset::from(offset.as_usize().saturating_sub(dist as usize))
-                }
-                Direction::Forward => {
-                    let dist = u32::min(
-                        count,
-                        end.as_usize().saturating_sub(offset.as_usize()) as u32,
-                    );
-                    cmp::min(end, offset + dist as usize)
-                }
-            }
-        }
-        HorizontalWrap::SkipNewlines => {
-            move_skipping_newlines(text, valid, offset, count, direction)
-        }
-        HorizontalWrap::CrossLine => move_crossing_lines(text, valid, offset, count, direction),
-    }
-}
-
-fn move_skipping_newlines<T: TextBuffer + ?Sized>(
+fn move_within_line<T: TextBuffer + ?Sized>(
     text: &T,
     valid: Range<CharOffset>,
     offset: CharOffset,
     count: u32,
     direction: Direction,
 ) -> CharOffset {
+    let start = line_start(text, valid.clone(), offset);
+    let end = line_end_exclusive(text, valid, offset);
     match direction {
         Direction::Backward => {
-            let mut seen = 0u32;
-            let mut steps = 0usize;
-            for c in reverse_chars(text, valid.clone(), offset) {
-                steps += 1;
-                if c != '\n' {
-                    seen += 1;
-                    if seen == count {
-                        return CharOffset::from(offset.as_usize().saturating_sub(steps))
-                            .max(valid.start);
-                    }
-                }
-            }
-            valid.start
+            let dist = u32::min(
+                count,
+                offset.as_usize().saturating_sub(start.as_usize()) as u32,
+            );
+            CharOffset::from(offset.as_usize().saturating_sub(dist as usize))
         }
         Direction::Forward => {
-            let mut seen = 0u32;
-            let mut steps = 0usize;
-            for c in forward_chars(text, valid.clone(), offset) {
-                if c != '\n' {
-                    seen += 1;
-                }
-                steps += 1;
-                if seen == count {
-                    return cmp::min(valid.end, offset + steps);
-                }
-            }
-            valid.end
+            let dist = u32::min(
+                count,
+                end.as_usize().saturating_sub(offset.as_usize()) as u32,
+            );
+            cmp::min(end, offset + dist as usize)
         }
     }
 }

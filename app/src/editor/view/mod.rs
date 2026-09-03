@@ -2099,7 +2099,6 @@ impl VimHandler for EditorView {
     }
 
     fn map_cursors(&mut self, motion: &VimMotion, count: u32, ctx: &mut ViewContext<Self>) {
-        let wrap = self.horizontal_wrap();
         let jump = self.line_jump_first_nonwhitespace(motion);
         self.change_selections(ctx, |editor_model, ctx| {
             let buffer = editor_model.buffer(ctx);
@@ -2115,7 +2114,6 @@ impl VimHandler for EditorView {
                     offset,
                     motion,
                     count,
-                    wrap,
                     jump,
                 );
                 let cursor = buffer

@@ -4,7 +4,6 @@ use warp_core::safe_info;
 use warpui_core::keymap::Keystroke;
 use warpui_core::{Entity, ModelContext, ModelHandle, ViewContext};
 
-use crate::HorizontalWrap;
 use crate::register::{BLACK_HOLE_REGISTER, valid_register_name};
 
 /// ASCII code for backspace.
@@ -2195,10 +2194,6 @@ pub trait VimHandler {
     /// Runs after a motion that was not intercepted. Default is a no-op so editors whose model
     /// update already notifies do not double-notify.
     fn after_navigation(&mut self, _ctx: &mut ViewContext<Self>) {}
-
-    fn horizontal_wrap(&self) -> HorizontalWrap {
-        HorizontalWrap::SkipNewlines
-    }
 
     fn line_jump_first_nonwhitespace(&self, _motion: &VimMotion) -> bool {
         true

@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use string_offset::CharOffset;
 
-use super::{HorizontalWrap, motion_destination, motion_destination_with_jump};
+use super::{motion_destination, motion_destination_with_jump};
 use crate::vim::{
     BracketChar, CharacterMotion, Direction, FirstNonWhitespaceMotion, LineMotion, VimMotion,
     WordBound, WordMotion, WordType,
@@ -13,7 +13,7 @@ fn full(s: &str) -> Range<CharOffset> {
 }
 
 fn dest(s: &str, valid: Range<CharOffset>, offset: CharOffset, motion: VimMotion) -> CharOffset {
-    motion_destination(s, valid, offset, &motion, 1, HorizontalWrap::StopAtLine)
+    motion_destination(s, valid, offset, &motion, 1)
 }
 
 #[test]
@@ -53,14 +53,22 @@ fn word_forward_from_start() {
             WordType::Default,
         )),
         1,
-        HorizontalWrap::StopAtLine,
     );
     assert_eq!(dest, CharOffset::from(5));
 }
 
 #[test]
-fn wrapping_stop_at_line_does_not_cross() {
+fn wrapping_right_crosses_newline() {
     let text = "ab\ncd";
+    assert_eq!(
+        dest(
+            text,
+            full(text),
+            CharOffset::from(1),
+            VimMotion::Character(CharacterMotion::Right),
+        ),
+        CharOffset::from(2)
+    );
     assert_eq!(
         motion_destination(
             text,
@@ -68,9 +76,8 @@ fn wrapping_stop_at_line_does_not_cross() {
             CharOffset::from(1),
             &VimMotion::Character(CharacterMotion::WrappingRight),
             3,
-            HorizontalWrap::StopAtLine,
         ),
-        CharOffset::from(2)
+        CharOffset::from(5)
     );
 }
 
@@ -124,7 +131,6 @@ fn jump_to_first_line_can_land_on_column_zero() {
             CharOffset::from(10),
             &VimMotion::JumpToFirstLine,
             1,
-            HorizontalWrap::StopAtLine,
             false,
         ),
         CharOffset::zero()
@@ -136,7 +142,6 @@ fn jump_to_first_line_can_land_on_column_zero() {
             CharOffset::from(10),
             &VimMotion::JumpToLine(2),
             1,
-            HorizontalWrap::StopAtLine,
             false,
         ),
         CharOffset::from(8)
@@ -148,7 +153,6 @@ fn jump_to_first_line_can_land_on_column_zero() {
             CharOffset::zero(),
             &VimMotion::JumpToLastLine,
             1,
-            HorizontalWrap::StopAtLine,
             true,
         ),
         CharOffset::from(10)
@@ -208,7 +212,6 @@ fn one_based_jumps_and_word_stay_in_valid_range() {
                 WordType::Default,
             )),
             1,
-            HorizontalWrap::StopAtLine,
         ),
         CharOffset::from(1)
     );
@@ -223,7 +226,6 @@ fn one_based_jumps_and_word_stay_in_valid_range() {
                 WordType::Default,
             )),
             1,
-            HorizontalWrap::StopAtLine,
         ),
         CharOffset::from(6)
     );
@@ -383,7 +385,6 @@ fn word_motions_from_nonzero_range_stay_in_valid() {
                         offset,
                         &VimMotion::Word(WordMotion::new(direction, bound, word_type)),
                         1,
-                        HorizontalWrap::StopAtLine,
                     );
                     assert!(
                         dest >= valid.start && dest <= valid.end,

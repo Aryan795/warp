@@ -1,4 +1,3 @@
-use vim::HorizontalWrap;
 use vim::vim::{
     Direction, InsertPosition, ModeTransition, MotionType, TextObjectType, VimHandler, VimMode,
     VimMotion, VimOperand, VimOperator, VimTextObject,
@@ -27,15 +26,10 @@ impl VimHandler for CodeEditorView {
         // no-op
     }
 
-    fn horizontal_wrap(&self) -> HorizontalWrap {
-        HorizontalWrap::CrossLine
-    }
-
     fn map_cursors(&mut self, motion: &VimMotion, count: u32, ctx: &mut ViewContext<Self>) {
-        let wrap = self.horizontal_wrap();
         let jump = self.line_jump_first_nonwhitespace(motion);
         self.model.update(ctx, |model, ctx| {
-            model.map_vim_cursors(motion, count, wrap, jump, ctx);
+            model.map_vim_cursors(motion, count, jump, ctx);
         });
     }
 
