@@ -336,25 +336,36 @@ impl schemars::JsonSchema for CustomEndpointDefinitions {
 
 pub fn validate_custom_endpoint_url(value: &str) -> Result<(), &'static str> {
     let parsed = Url::parse(value).map_err(|_| "Invalid URL")?;
+    // Upstream requires public HTTPS because Warp's servers call the endpoint.
+    // Local-adapter builds call it from this machine, so a loopback http://
+    // endpoint is the normal case there and TLS buys nothing over it. Only
+    // loopback is exempt: an API key sent over plaintext to a LAN address
+    // still crosses a network.
+    let local_loopback_allowed = ChannelState::uses_local_adapter()
+        && parsed.scheme() == "http"
+        && parsed.host_str().is_some_and(is_loopback_host);
+    if parsed.scheme() != "https" && !local_loopback_allowed {
+        return Err("URL must use HTTPS");
+    }
     let Some(host) = parsed.host_str().filter(|host| !host.is_empty()) else {
         return Err("URL must include a host");
     };
-    // Upstream requires public HTTPS because Warp's servers call the endpoint.
-    // Local-adapter builds call it from this machine instead, so a loopback
-    // http:// endpoint is the normal case and TLS buys nothing over it.
-    if ChannelState::uses_local_adapter() && is_restricted_host(host) {
-        return match parsed.scheme() {
-            "http" | "https" => Ok(()),
-            _ => Err("URL must use HTTP or HTTPS"),
-        };
-    }
-    if parsed.scheme() != "https" {
-        return Err("URL must use HTTPS");
-    }
-    if is_restricted_host(host) {
+    if is_restricted_host(host) && !local_loopback_allowed {
         return Err("URL must not use a local or private host");
     }
     Ok(())
+}
+
+/// Hosts that resolve back to this machine, which a local-adapter build may
+/// reach over plaintext http.
+fn is_loopback_host(host: &str) -> bool {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("localhost.localdomain")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 fn is_restricted_host(host: &str) -> bool {
