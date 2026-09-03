@@ -492,11 +492,86 @@ os._exit(0)
 
 #[cfg(unix)]
 #[test]
+fn drain_returns_and_kills_same_group_holder_of_both_pty_slaves() {
+    use command::r#async::Command;
+    use instant::Instant;
+
+    let holder_file = std::env::temp_dir().join(format!("dc-pty-holder-{}", uuid::Uuid::new_v4()));
+    let container_file =
+        std::env::temp_dir().join(format!("dc-pty-container-{}", uuid::Uuid::new_v4()));
+    block_on(async {
+        let mut command = Command::new_with_process_group("python3");
+        command
+            .arg("-c")
+            .arg(format!(
+                r#"
+import os, time
+holder = os.fork()
+if holder == 0:
+    open({holder_file:?}, "w").write(str(os.getpid()))
+    time.sleep(30)
+    os._exit(0)
+container = os.fork()
+if container == 0:
+    os.setsid()
+    os.close(1)
+    os.close(2)
+    open({container_file:?}, "w").write(str(os.getpid()))
+    time.sleep(30)
+    os._exit(0)
+while not (os.path.exists({holder_file:?}) and os.path.exists({container_file:?})):
+    time.sleep(0.01)
+os.write(2, b"Container started\n")
+os.write(1, b'{{"outcome":"success","containerId":"abc","remoteWorkspaceFolder":"/w"}}\n')
+os._exit(0)
+"#
+            ))
+            .kill_on_drop(true);
+        let started = Instant::now();
+        let (drain, success) = super::drain_dev_container_child(command, None, |_| {})
+            .await
+            .expect("drain after CLI exit with same-group dual-slave holder");
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "same-group PTY slave holder must not pin drain: {:?}",
+            started.elapsed()
+        );
+        assert!(success);
+        assert!(
+            super::super::interpret_up_output_for_test(true, &drain.stdout.bytes, b""),
+            "final outcome JSON must still parse for attach, got {:?}",
+            String::from_utf8_lossy(&drain.stdout.bytes)
+        );
+        let holder = wait_for_pid_file(&holder_file);
+        let container = wait_for_pid_file(&container_file);
+        let holder_gone = Instant::now();
+        while pid_is_alive(holder) {
+            assert!(
+                holder_gone.elapsed().as_secs() < 5,
+                "same-group slave holder must be terminated"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            pid_is_alive(container),
+            "detached container-like process must survive killing the PTY client"
+        );
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(container),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    });
+    let _ = std::fs::remove_file(holder_file);
+    let _ = std::fs::remove_file(container_file);
+}
+
+#[cfg(unix)]
+#[test]
 fn drain_returns_when_out_of_group_descendant_holds_pty_slave() {
     use command::r#async::Command;
     use instant::Instant;
 
-    let pid_file = std::env::temp_dir().join(format!("dc-pty-{}", uuid::Uuid::new_v4()));
+    let pid_file = std::env::temp_dir().join(format!("dc-pty-oog-{}", uuid::Uuid::new_v4()));
     block_on(async {
         let mut command = Command::new_with_process_group("python3");
         command
@@ -534,7 +609,7 @@ os._exit(0)
         let descendant = wait_for_pid_file(&pid_file);
         assert!(
             pid_is_alive(descendant),
-            "container-like descendant must survive CLI exit"
+            "out-of-group descendant must survive CLI exit"
         );
         let _ = nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(descendant),
@@ -1152,6 +1227,62 @@ fn commandless_output_block_height_grows_with_later_batches() {
             .active_block()
             .is_visible(&TranscriptScope::Terminal)
     );
+}
+
+#[test]
+fn exit_aware_reader_replaces_a_single_waker_per_slot() {
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    use futures::future::poll_fn;
+    use futures_util::AsyncRead;
+
+    let child_exit = std::sync::Arc::new(super::ChildExit::new());
+    let mut stdout = super::ExitAwareReader::new(AlwaysPendingReader, child_exit.clone(), 0);
+    let mut stderr = super::ExitAwareReader::new(AlwaysPendingReader, child_exit.clone(), 1);
+    block_on(async {
+        for _ in 0..10_000 {
+            poll_fn(|cx| {
+                let mut buf = [0_u8; 8];
+                assert!(Pin::new(&mut stdout).poll_read(cx, &mut buf).is_pending());
+                assert!(Pin::new(&mut stderr).poll_read(cx, &mut buf).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert!(
+                child_exit.registered_wakers() <= 2,
+                "waker slots must stay bounded, got {}",
+                child_exit.registered_wakers()
+            );
+        }
+        assert_eq!(child_exit.registered_wakers(), 2);
+        child_exit.mark();
+        poll_fn(|cx| {
+            let mut buf = [0_u8; 8];
+            assert!(matches!(
+                Pin::new(&mut stdout).poll_read(cx, &mut buf),
+                Poll::Ready(Ok(0))
+            ));
+            assert!(matches!(
+                Pin::new(&mut stderr).poll_read(cx, &mut buf),
+                Poll::Ready(Ok(0))
+            ));
+            Poll::Ready(())
+        })
+        .await;
+    });
+}
+
+struct AlwaysPendingReader;
+
+impl futures_util::io::AsyncRead for AlwaysPendingReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut [u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::task::Poll::Pending
+    }
 }
 
 struct EofReader;

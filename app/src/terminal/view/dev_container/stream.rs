@@ -111,8 +111,8 @@ where
         }
         let child_exit = Arc::new(ChildExit::new());
         let drain_fut = drain_dev_container_pipes(
-            ExitAwareReader::new(PtyMasterReader(stdout_master), child_exit.clone()),
-            ExitAwareReader::new(PtyMasterReader(stderr_master), child_exit.clone()),
+            ExitAwareReader::new(PtyMasterReader(stdout_master), child_exit.clone(), 0),
+            ExitAwareReader::new(PtyMasterReader(stderr_master), child_exit.clone(), 1),
             on_output,
         );
         let status_fut = {
@@ -150,8 +150,8 @@ where
             .ok_or_else(|| io::Error::other("devcontainer up stderr was not piped"))?;
         let child_exit = Arc::new(ChildExit::new());
         let drain_fut = drain_dev_container_pipes(
-            ExitAwareReader::new(stdout, child_exit.clone()),
-            ExitAwareReader::new(stderr, child_exit.clone()),
+            ExitAwareReader::new(stdout, child_exit.clone(), 0),
+            ExitAwareReader::new(stderr, child_exit.clone(), 1),
             on_output,
         );
         let status_fut = {
@@ -412,21 +412,23 @@ fn append_bounded_tail(tail: &mut Vec<u8>, chunk: &[u8]) {
 
 struct ChildExit {
     done: AtomicBool,
-    wakers: Mutex<Vec<Waker>>,
+    wakers: [Mutex<Option<Waker>>; 2],
 }
 
 impl ChildExit {
     fn new() -> Self {
         Self {
             done: AtomicBool::new(false),
-            wakers: Mutex::new(Vec::new()),
+            wakers: [Mutex::new(None), Mutex::new(None)],
         }
     }
 
     fn mark(&self) {
         self.done.store(true, Ordering::Release);
-        for waker in self.wakers.lock().drain(..) {
-            waker.wake();
+        for slot in &self.wakers {
+            if let Some(waker) = slot.lock().take() {
+                waker.wake();
+            }
         }
     }
 
@@ -434,15 +436,23 @@ impl ChildExit {
         self.done.load(Ordering::Acquire)
     }
 
-    fn register(&self, waker: &Waker) {
+    fn register(&self, slot: usize, waker: &Waker) {
         if self.is_done() {
             waker.wake_by_ref();
             return;
         }
-        self.wakers.lock().push(waker.clone());
+        *self.wakers[slot].lock() = Some(waker.clone());
         if self.is_done() {
             waker.wake_by_ref();
         }
+    }
+
+    #[cfg(test)]
+    fn registered_wakers(&self) -> usize {
+        self.wakers
+            .iter()
+            .filter(|slot| slot.lock().is_some())
+            .count()
     }
 }
 
@@ -451,11 +461,16 @@ impl ChildExit {
 struct ExitAwareReader<R> {
     inner: R,
     child_exit: Arc<ChildExit>,
+    slot: usize,
 }
 
 impl<R> ExitAwareReader<R> {
-    fn new(inner: R, child_exit: Arc<ChildExit>) -> Self {
-        Self { inner, child_exit }
+    fn new(inner: R, child_exit: Arc<ChildExit>, slot: usize) -> Self {
+        Self {
+            inner,
+            child_exit,
+            slot,
+        }
     }
 }
 
@@ -475,7 +490,7 @@ where
                 if self.child_exit.is_done() {
                     Poll::Ready(Ok(0))
                 } else {
-                    self.child_exit.register(cx.waker());
+                    self.child_exit.register(self.slot, cx.waker());
                     Poll::Pending
                 }
             }
