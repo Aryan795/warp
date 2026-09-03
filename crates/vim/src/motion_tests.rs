@@ -82,6 +82,135 @@ fn wrapping_right_crosses_newline() {
 }
 
 #[test]
+fn wrapping_motions_cross_blank_lines_for_zero_and_nonzero_origins() {
+    let text = "ab\n\ncd";
+    let valid = full(text);
+    assert_eq!(
+        motion_destination(
+            text,
+            valid.clone(),
+            CharOffset::from(1),
+            &VimMotion::Character(CharacterMotion::WrappingRight),
+            1,
+        ),
+        CharOffset::from(2)
+    );
+    assert_eq!(
+        motion_destination(
+            text,
+            valid.clone(),
+            CharOffset::from(1),
+            &VimMotion::Character(CharacterMotion::WrappingRight),
+            2,
+        ),
+        CharOffset::from(4)
+    );
+    assert_eq!(
+        motion_destination(
+            text,
+            valid.clone(),
+            CharOffset::from(1),
+            &VimMotion::Character(CharacterMotion::WrappingRight),
+            3,
+        ),
+        CharOffset::from(5)
+    );
+    assert_eq!(
+        motion_destination(
+            text,
+            valid.clone(),
+            CharOffset::from(6),
+            &VimMotion::Character(CharacterMotion::WrappingLeft),
+            1,
+        ),
+        CharOffset::from(5)
+    );
+    assert_eq!(
+        motion_destination(
+            text,
+            valid.clone(),
+            CharOffset::from(6),
+            &VimMotion::Character(CharacterMotion::WrappingLeft),
+            3,
+        ),
+        CharOffset::from(3)
+    );
+    assert_eq!(
+        motion_destination(
+            text,
+            valid,
+            CharOffset::from(6),
+            &VimMotion::Character(CharacterMotion::WrappingLeft),
+            4,
+        ),
+        CharOffset::from(1)
+    );
+
+    let text = "Xab\n\ncd";
+    let valid = CharOffset::from(1)..CharOffset::from(text.chars().count());
+    assert_eq!(
+        motion_destination(
+            text,
+            valid.clone(),
+            CharOffset::from(2),
+            &VimMotion::Character(CharacterMotion::WrappingRight),
+            1,
+        ),
+        CharOffset::from(3)
+    );
+    assert_eq!(
+        motion_destination(
+            text,
+            valid.clone(),
+            CharOffset::from(2),
+            &VimMotion::Character(CharacterMotion::WrappingRight),
+            2,
+        ),
+        CharOffset::from(5)
+    );
+    assert_eq!(
+        motion_destination(
+            text,
+            valid.clone(),
+            CharOffset::from(2),
+            &VimMotion::Character(CharacterMotion::WrappingRight),
+            3,
+        ),
+        CharOffset::from(6)
+    );
+    assert_eq!(
+        motion_destination(
+            text,
+            valid.clone(),
+            valid.end,
+            &VimMotion::Character(CharacterMotion::WrappingLeft),
+            1,
+        ),
+        CharOffset::from(6)
+    );
+    assert_eq!(
+        motion_destination(
+            text,
+            valid.clone(),
+            valid.end,
+            &VimMotion::Character(CharacterMotion::WrappingLeft),
+            3,
+        ),
+        CharOffset::from(4)
+    );
+    assert_eq!(
+        motion_destination(
+            text,
+            valid.clone(),
+            valid.end,
+            &VimMotion::Character(CharacterMotion::WrappingLeft),
+            4,
+        ),
+        CharOffset::from(2)
+    );
+}
+
+#[test]
 fn stop_at_line_forward_reaches_exclusive_end() {
     let text = "ab";
     assert_eq!(

@@ -1,15 +1,4 @@
-//! [`VimHandler`] implementation for [`TuiInputView`].
-//!
-//! Wires the TUI prompt's backing [`CodeEditorModel`] into the shared vim
-//! dispatch layer (the same pattern [`CodeEditorView`] uses). Prompt-specific
-//! semantics are expressed as explicit no-ops or custom overrides in the trait
-//! implementation rather than as arms in a bespoke match:
-//!
-//! - `search`, `cycle_search`, `search_word_at_cursor` — no-op.
-//! - `visual_paste` — inserts from the local yank buffer (no register system).
-//! - `join_line`, `toggle_case`, `keyword_prg`, `ex_command` — no-op.
-//! - Scroll helpers (`center_cursor_vertically`, `scroll_half_page_*`) — no-op.
-//!
+//! [`VimHandler`] for the TUI prompt, backed by [`CodeEditorModel`].
 
 use vim::vim::{
     Direction, InsertPosition, ModeTransition, MotionType, VimHandler, VimMode, VimMotion,

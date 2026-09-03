@@ -14,10 +14,9 @@ use crate::word_iterator::CharacterKind;
 
 /// Shared vim motion destination in backend-native offsets.
 ///
-/// `valid` is a contiguous exclusive-end range of real text in the same coordinate
-/// space as `offset`. Terminal input uses `0..len`; 1-based code-editor buffers use
-/// `1..max`; a future notebook cell can pass `cell_start..cell_end`. Non-contiguous
-/// rich-text regions need a richer primitive and are out of scope.
+/// `valid` is a contiguous exclusive-end range of real text in the same coordinate space as
+/// `offset`. Motions never leave that range. Non-contiguous regions need a richer primitive and
+/// are out of scope.
 pub fn motion_destination<T: TextBuffer + ?Sized>(
     text: &T,
     valid: Range<CharOffset>,
