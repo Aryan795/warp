@@ -316,3 +316,60 @@ fn read_recent_ai_queries_drops_legacy_skill_snapshots() {
         }
     }
 }
+
+fn skill_snapshot_query(text: &str, start_ts: DateTime<Local>) -> Arc<PersistedAIInput> {
+    with_start_ts(
+        Arc::new(PersistedAIInput {
+            inputs: vec![PersistedAIInputType::Query {
+                text: text.to_string(),
+                context: vec![AIAgentContext::Skills {
+                    skills: vec![SkillDescriptor {
+                        reference: SkillReference::Path(LocalOrRemotePath::Local(
+                            "/tmp/.agents/skills/x/SKILL.md".into(),
+                        )),
+                        name: "x".to_string(),
+                        description: "a".repeat(400),
+                        scope: SkillScope::Home,
+                        provider: SkillProvider::Agents,
+                        icon_override: None,
+                    }],
+                }]
+                .into(),
+                referenced_attachments: Default::default(),
+            }],
+            ..(*make_query(text)).clone()
+        }),
+        start_ts,
+    )
+}
+
+#[test]
+fn read_recent_ai_queries_strips_legacy_skill_snapshots_row_by_row() {
+    let mut conn = test_connection();
+    let t0 = Local::now();
+    let row_count = 48;
+    for i in 0..row_count {
+        upsert_ai_query_with_limit(
+            &mut conn,
+            skill_snapshot_query(&format!("q{i}"), t0 + Duration::seconds(i as i64)),
+            100,
+        )
+        .expect("upsert should succeed");
+    }
+
+    let recent = read_recent_ai_queries(&mut conn).expect("read should succeed");
+    assert_eq!(recent.len(), row_count);
+    let texts: Vec<&str> = recent.iter().map(first_query_text).collect();
+    assert_eq!(texts.first().copied(), Some("q0"));
+    assert_eq!(texts.last().copied(), Some("q47"));
+    for query in &recent {
+        match &query.inputs[0] {
+            PersistedAIInputType::Query { context, .. } => {
+                assert!(
+                    context.is_empty(),
+                    "each streamed row should drop Skills before the next row is read"
+                );
+            }
+        }
+    }
+}

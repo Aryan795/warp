@@ -112,21 +112,15 @@ impl ParsedSkill {
             .unwrap_or_else(|| hash_skill_content(&self.content))
     }
 
-    /// Returns the skill body, re-reading a local file when listing dropped it.
-    pub fn body_for_invocation(&self) -> std::io::Result<String> {
-        if !self.content.is_empty() {
-            return Ok(self.content.clone());
+    /// Reloads a local file-backed skill from disk so invocation uses current content and line range.
+    pub fn refresh_local_file_for_invocation(&mut self) -> Result<()> {
+        if self.scope == SkillScope::Bundled {
+            return Ok(());
         }
-        match self.path.to_local_path() {
-            Some(path) => fs::read_to_string(path),
-            None => Ok(self.content.clone()),
-        }
-    }
-
-    pub fn rehydrate_listing_body(&mut self) -> std::io::Result<()> {
-        if self.content.is_empty() {
-            self.content = self.body_for_invocation()?;
-        }
+        let Some(path) = self.path.to_local_path() else {
+            return Ok(());
+        };
+        *self = parse_skill(path)?;
         Ok(())
     }
 }

@@ -243,7 +243,43 @@ description: Some description
 
     assert!(skill.content.is_empty());
     assert_eq!(skill.listing_content_hash(), hash);
-    assert_eq!(skill.body_for_invocation().unwrap(), content);
+    skill.refresh_local_file_for_invocation().unwrap();
+    assert_eq!(skill.content, content);
+}
+
+#[test]
+fn test_refresh_local_file_for_invocation_updates_line_range_after_front_matter_grows() {
+    let short = r#"---
+name: some-skill
+description: short
+---
+
+# Body
+"#;
+    let long = r#"---
+name: some-skill
+description: short
+padding1: "one"
+padding2: "two"
+padding3: "three"
+padding4: "four"
+---
+
+# Body
+"#;
+    let (_temp_dir, skill_file) = create_temp_skill_file(short);
+    let mut listed = parse_skill(&skill_file).unwrap();
+    listed.drop_listing_body();
+    let listed_range = listed.line_range.clone();
+
+    std::fs::write(&skill_file, long).unwrap();
+    listed.refresh_local_file_for_invocation().unwrap();
+
+    let expected = parse_skill(&skill_file).unwrap();
+    assert_ne!(listed_range, expected.line_range);
+    assert_eq!(listed.line_range, expected.line_range);
+    assert_eq!(listed.content, expected.content);
+    assert!(listed.content.contains("# Body"));
 }
 
 #[test]

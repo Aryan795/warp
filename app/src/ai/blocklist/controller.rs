@@ -1414,10 +1414,13 @@ impl BlocklistAIController {
             .as_ref(ctx)
             .active_skill_by_reference_with_origin(reference, &path_origin, ctx)
             .cloned()?;
-        if let Err(error) = skill.rehydrate_listing_body() {
-            log::warn!(
-                "Failed to rehydrate skill body for {}: {error}",
-                skill.path.display_path()
+        if let Err(error) = skill.refresh_local_file_for_invocation() {
+            warp_core::safe_warn!(
+                safe: ("[Skills] Failed to refresh skill body for invocation"),
+                full: (
+                    "[Skills] Failed to refresh skill body for invocation path={} error={error:#}",
+                    skill.path.display_path()
+                )
             );
             return Err(ActiveSkillLookupError::for_reference(
                 reference,
