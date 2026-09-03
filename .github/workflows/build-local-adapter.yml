@@ -1,6 +1,6 @@
 # Builds the local-adapter fork of Warp OSS on a macOS runner (full Xcode,
 # including the Metal toolchain that crates/warpui/build.rs requires) and
-# uploads the resulting WarpOss.app as a workflow artifact.
+# uploads the resulting WarpOpen.app as a workflow artifact.
 name: build-local-adapter
 
 on:
@@ -27,15 +27,15 @@ jobs:
       # (WARP_BIN_NAME=warp-oss, WARP_CHANNEL=oss) when the internal
       # warp-channel-config binary is absent, and handles bundling,
       # Info.plist, resources, icon, and ad-hoc codesigning.
-      - name: Build and bundle WarpOss.app (debug)
+      - name: Build and bundle WarpOpen.app (debug)
         run: ./script/run --dont-open
 
       - name: Zip app bundle
-        run: ditto -c -k --keepParent target/debug/bundle/osx/WarpOss.app WarpOss-local-adapter-arm64.zip
+        run: ditto -c -k --keepParent target/debug/bundle/osx/WarpOpen.app WarpOpen-arm64.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WarpOss-local-adapter-macos-arm64
-          path: WarpOss-local-adapter-arm64.zip
+          name: WarpOpen-macos-arm64
+          path: WarpOpen-arm64.zip
           retention-days: 30
