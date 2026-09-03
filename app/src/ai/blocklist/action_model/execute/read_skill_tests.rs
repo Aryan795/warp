@@ -56,6 +56,7 @@ fn bundled_skill(name: &str) -> ParsedSkill {
         name: name.to_string(),
         description: format!("{name} bundled skill"),
         path: LocalOrRemotePath::Local(PathBuf::from(format!("/bundled/skills/{name}/SKILL.md"))),
+        content_hash: None,
         content: format!("# {name}"),
         line_range: None,
         provider: SkillProvider::Warp,
@@ -137,6 +138,52 @@ fn test_read_skill_executor_success() {
 }
 
 #[test]
+fn test_read_skill_executor_reloads_dropped_listing_body() {
+    let temp_dir = TempDir::new().unwrap();
+    let skill_path = create_test_skill_file(&temp_dir, "test-skill", "A test skill");
+
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let mut parsed_skill = parse_skill(&skill_path).expect("Failed to parse test skill");
+        parsed_skill.drop_listing_body();
+        assert!(parsed_skill.content.is_empty());
+        SkillManager::handle(&app).update(&mut app, |manager, _ctx| {
+            manager.add_skill_for_testing(parsed_skill);
+        });
+
+        let executor_handle = add_test_read_skill_executor(&mut app);
+        let action = AIAgentAction {
+            id: AIAgentActionId::from("test-action-id".to_string()),
+            action: AIAgentActionType::ReadSkill(ReadSkillRequest {
+                skill: SkillReference::Path(LocalOrRemotePath::Local(skill_path.clone())),
+            }),
+            task_id: TaskId::new("test-task-id".to_string()),
+            requires_result: false,
+        };
+        let input = ExecuteActionInput {
+            action: &action,
+            conversation_id: AIConversationId::new(),
+        };
+
+        executor_handle.update(&mut app, |executor, ctx| {
+            let result: AnyActionExecution = executor.execute(input, ctx).into();
+            match result {
+                AnyActionExecution::Sync(AIAgentActionResultType::ReadSkill(
+                    ReadSkillResult::Success { content },
+                )) => {
+                    let AnyFileContent::StringContent(body) = content.content else {
+                        panic!("expected string skill content");
+                    };
+                    assert!(body.contains("Test instructions for this skill."));
+                }
+                _ => panic!("Dropped listing body should be re-read from disk"),
+            }
+        });
+    });
+}
+
+#[test]
 fn disconnected_remote_session_does_not_fall_back_to_client_global_bundled_skill() {
     App::test((), |mut app| async move {
         initialize_app(&mut app);
@@ -210,6 +257,7 @@ fn remote_session_reads_remote_bundled_skill_catalog() {
                 )
                 .unwrap(),
             )),
+            content_hash: None,
             content: "remote rendered content".to_string(),
             line_range: None,
             provider: SkillProvider::Warp,

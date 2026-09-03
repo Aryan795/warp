@@ -5,19 +5,22 @@
 
 use std::sync::Arc;
 
+use ai::skills::{SkillProvider, SkillReference, SkillScope};
 use chrono::{DateTime, Duration, Local};
 use diesel::sqlite::SqliteConnection;
 use diesel::{Connection, ExpressionMethods, QueryDsl, RunQueryDsl};
 use diesel_migrations::MigrationHarness;
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 
 use super::{
     process_ai_queries_for_nld_history_match, process_ai_queries_for_uparrow_prompt,
     read_recent_ai_queries, upsert_ai_query_with_limit,
 };
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::agent::{AIAgentExchangeId, AIAgentInput, UserQueryMode};
+use crate::ai::agent::{AIAgentContext, AIAgentExchangeId, AIAgentInput, UserQueryMode};
 use crate::ai::blocklist::{AIQueryHistoryOutputStatus, PersistedAIInput, PersistedAIInputType};
 use crate::ai::llms::LLMId;
+use crate::ai::skills::SkillDescriptor;
 
 /// Builds an in-memory SQLite database with all migrations applied.
 fn test_connection() -> SqliteConnection {
@@ -273,4 +276,43 @@ fn empty_input_skip_filters_out_non_query_inputs() {
         .filter_map(|input| PersistedAIInputType::try_from(input).ok())
         .collect();
     assert_eq!(persisted.len(), 1);
+}
+
+#[test]
+fn read_recent_ai_queries_drops_legacy_skill_snapshots() {
+    let mut conn = test_connection();
+    let query = Arc::new(PersistedAIInput {
+        inputs: vec![PersistedAIInputType::Query {
+            text: "hello".to_string(),
+            context: vec![AIAgentContext::Skills {
+                skills: vec![SkillDescriptor {
+                    reference: SkillReference::Path(LocalOrRemotePath::Local(
+                        "/tmp/.agents/skills/x/SKILL.md".into(),
+                    )),
+                    name: "x".to_string(),
+                    description: "a".repeat(400),
+                    scope: SkillScope::Home,
+                    provider: SkillProvider::Agents,
+                    icon_override: None,
+                }],
+            }]
+            .into(),
+            referenced_attachments: Default::default(),
+        }],
+        ..(*make_query("unused")).clone()
+    });
+    upsert_ai_query_with_limit(&mut conn, query, 10).expect("upsert should succeed");
+
+    let recent = read_recent_ai_queries(&mut conn).expect("read should succeed");
+    assert_eq!(recent.len(), 1);
+    match &recent[0].inputs[0] {
+        PersistedAIInputType::Query { context, text, .. } => {
+            assert_eq!(text, "hello");
+            assert!(
+                context
+                    .iter()
+                    .all(|item| !matches!(item, AIAgentContext::Skills { .. }))
+            );
+        }
+    }
 }

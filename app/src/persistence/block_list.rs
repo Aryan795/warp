@@ -44,9 +44,13 @@ impl TryFrom<AIQuery> for PersistedAIInput {
     type Error = anyhow::Error;
 
     fn try_from(value: AIQuery) -> Result<Self, Self::Error> {
+        let mut inputs: Vec<PersistedAIInputType> = serde_json::from_str(&value.input)?;
+        for input in &mut inputs {
+            input.drop_skill_snapshots();
+        }
         Ok(Self {
             start_ts: Local.from_utc_datetime(&value.start_ts),
-            inputs: serde_json::from_str(&value.input)?,
+            inputs,
             exchange_id: value.exchange_id.try_into()?,
             conversation_id: value.conversation_id.try_into()?,
             output_status: serde_json::from_str(&value.output_status)?,

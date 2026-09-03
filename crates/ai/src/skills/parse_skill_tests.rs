@@ -205,7 +205,7 @@ fn test_parse_truncates_fallback_description_with_hard_cut() {
 }
 
 #[test]
-fn test_parse_does_not_truncate_user_provided_description() {
+fn test_parse_truncates_user_provided_description() {
     let description = format!("{} {}", "a".repeat(450), "b".repeat(200));
     let content = format!(
         r#"---
@@ -221,7 +221,29 @@ description: "{}"
     let (_temp_dir, skill_file) = create_temp_skill_file(&content);
     let result = parse_skill(&skill_file).unwrap();
 
-    assert_eq!(result.description, description);
+    assert!(result.description.chars().count() <= MAX_SKILL_DESCRIPTION_CHARS);
+    assert_eq!(result.description, "a".repeat(450));
+}
+
+#[test]
+fn test_drop_listing_body_clears_content_and_keeps_hash() {
+    let content = r#"---
+name: some-skill
+description: Some description
+---
+
+# Body
+"#;
+    let (_temp_dir, skill_file) = create_temp_skill_file(content);
+    let mut skill = parse_skill(&skill_file).unwrap();
+    let hash = skill.listing_content_hash();
+    assert!(!skill.content.is_empty());
+
+    skill.drop_listing_body();
+
+    assert!(skill.content.is_empty());
+    assert_eq!(skill.listing_content_hash(), hash);
+    assert_eq!(skill.body_for_invocation().unwrap(), content);
 }
 
 #[test]
